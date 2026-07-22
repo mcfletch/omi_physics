@@ -1,15 +1,42 @@
 name: wheels
 
-# Build binary wheels (with the compiled accelerators) and an sdist. Runs on
-# tags and can be triggered manually; publishing is a manual/gated step.
+# On every push to main, build binary wheels (with the compiled accelerators)
+# and an sdist, then publish them to PyPI -- but only when the version in
+# src/omi_physics/__init__.py is not already published. So a push that doesn't
+# bump the version is a no-op, and bumping the version cuts a release.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
+  check:
+    name: version check
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        name: Skip if this version is already on PyPI
+        run: |
+          VERSION=$(sed -nE 's/^__version__ *= *"([^"]+)".*/\1/p' src/omi_physics/__init__.py)
+          if [ -z "$VERSION" ]; then echo "could not read version"; exit 1; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/omi_physics/$VERSION/json")
+          if [ "$CODE" = "200" ]; then
+            echo "omi_physics $VERSION is already on PyPI -- skipping build and publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "omi_physics $VERSION is not on PyPI (HTTP $CODE) -- building and publishing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   wheels:
     name: wheels · ${{ matrix.os }}
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,6 +57,8 @@ jobs:
 
   sdist:
     name: sdist
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +74,24 @@ jobs:
           name: sdist
           path: ./dist/*.tar.gz
 
-  # Publishing to PyPI is intentionally a separate, manually-approved step.
-  # Add a `publish` job with pypa/gh-action-pypi-publish and an environment
-  # gate when you are ready to release.
+  publish:
+    name: publish to PyPI
+    needs: [check, wheels, sdist]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # Trusted publishing (OIDC): configure a PyPI publisher for this repo +
+    # workflow, and a GitHub environment named `pypi` (which can require a
+    # manual approval before the release proceeds). No API token needed.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/omi_physics
+    permissions:
+      id-token: write
+    steps:
+      - name: Collect wheels + sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
