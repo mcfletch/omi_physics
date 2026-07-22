@@ -27,7 +27,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Programming Language :: Python :: 3.15",
     "Programming Language :: C",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Games/Entertainment",
@@ -80,10 +79,10 @@ filterwarnings = ["ignore::DeprecationWarning"]
 # Prebuilt binary wheels so end users need no compiler; the accelerators are
 # optional (pure-Python/NumPy fallback), so a build without a toolchain still works.
 [tool.cibuildwheel]
-build = "cp310-* cp311-* cp312-* cp313-* cp314-* cp315-*"
+# Stable CPython only. 3.15 is still in beta -- it is exercised in the tox/CI
+# test matrix (source builds), but no beta-Python wheels are published.
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_i686 *_i686"
 build-frontend = "build"
-# Build prerelease CPythons too (3.15 is still in beta).
-enable = ["cpython-prerelease"]
 # Sanity-check that the compiled accelerators import in the built wheel.
 test-command = 'python -c "from omi_physics import _solver_native, _collide_native; print(\"accelerators OK\")"'
