@@ -46,7 +46,10 @@ flowchart TD
     W --> M
     G <--> M
     W --> BK
-    BK --> BP --> NP --> SV --> JO --> SL
+    BK --> BP
+    BP -->|solid pairs| NP --> SV --> JO --> SL
+    BP -->|trigger pairs| TR
+    TR -->|enter/exit events| W
     NP --> CO
     SV -. uses when present .-> SN
     NP -. uses when present .-> CN

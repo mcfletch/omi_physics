@@ -12,11 +12,15 @@ import numpy as np
 from .body import make_proxy, Proxy
 from . import collide
 from .mathutil import quat_to_matrix
+from ._accel import accelerators_disabled
 
-try:
-    from . import _collide_native as _native
-except ImportError:                            # pragma: no cover - pure-Python fallback
+if accelerators_disabled():
     _native = None
+else:
+    try:
+        from . import _collide_native as _native
+    except ImportError:                        # pragma: no cover - pure-Python fallback
+        _native = None
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld

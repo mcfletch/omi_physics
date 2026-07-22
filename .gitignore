@@ -16,6 +16,7 @@ src/omi_physics/_collide_native.c
 .eggs/
 
 # Test / tooling caches
+.tox/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

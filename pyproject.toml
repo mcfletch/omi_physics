@@ -26,6 +26,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: C",
     "Topic :: Scientific/Engineering :: Physics",
     "Topic :: Games/Entertainment",
@@ -42,10 +44,11 @@ dependencies = [
 gl = ["PyOpenGL>=3.1"]
 # A windowing backend so the GPU-parity tests can create a hidden GL context.
 gltest = ["PyOpenGL>=3.1", "glfw>=2.0"]
+# Just enough to run the test suite (the GPU-parity test skips without gltest).
+test = ["pytest", "pytest-timeout"]
 dev = [
-    "omi_physics[gltest]",
-    "pytest",
-    "pytest-timeout",
+    "omi_physics[test,gltest]",
+    "tox>=4.0",
     "Cython>=3.0",
     "mypy",
     "ruff",
@@ -77,8 +80,10 @@ filterwarnings = ["ignore::DeprecationWarning"]
 # Prebuilt binary wheels so end users need no compiler; the accelerators are
 # optional (pure-Python/NumPy fallback), so a build without a toolchain still works.
 [tool.cibuildwheel]
-build = "cp310-* cp311-* cp312-* cp313-*"
+build = "cp310-* cp311-* cp312-* cp313-* cp314-* cp315-*"
 skip = "*-musllinux_i686 *_i686"
 build-frontend = "build"
+# Build prerelease CPythons too (3.15 is still in beta).
+enable = ["cpython-prerelease"]
 # Sanity-check that the compiled accelerators import in the built wheel.
 test-command = 'python -c "from omi_physics import _solver_native, _collide_native; print(\"accelerators OK\")"'

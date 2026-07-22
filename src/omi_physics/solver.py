@@ -10,11 +10,15 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 
 from . import model, mathutil
+from ._accel import accelerators_disabled
 
-try:
-    from . import _solver_native as _native   # compiled Cython inner loops
-except ImportError:                            # pragma: no cover - pure-Python fallback
+if accelerators_disabled():
     _native = None
+else:
+    try:
+        from . import _solver_native as _native   # compiled Cython inner loops
+    except ImportError:                            # pragma: no cover - pure-Python fallback
+        _native = None
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld

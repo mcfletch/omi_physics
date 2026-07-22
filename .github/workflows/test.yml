@@ -8,29 +8,27 @@ on:
 
 jobs:
   test:
-    name: py${{ matrix.python-version }} · ${{ matrix.os }}
+    name: ${{ matrix.python-version }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "pypy-3.10"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # 3.15 is still a prerelease (3.15b4); pull it (and any other beta)
+          # rather than failing to resolve a stable build.
+          allow-prereleases: true
 
-      - name: Install (with accelerators)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Install tox
+        run: python -m pip install --upgrade pip tox tox-gh
 
-      - name: Run tests (compiled accelerators)
-        run: pytest -q
-
-      - name: Run tests (pure-Python fallback)
-        run: |
-          find . -name '_*_native*.so' -delete
-          pytest -q
+      # tox-gh reads the [gh] table in tox.ini and runs the envs mapped to this
+      # interpreter: CPython runs both -accel and -fallback, PyPy runs -fallback.
+      - name: Run tox
+        run: tox
