@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=77", "wheel", "Cython>=3.0", "numpy>=2.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omi_physics"
+dynamic = ["version"]
+description = "Renderer-agnostic real-time rigid-body physics on the OMI glTF physics model"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+    { name = "Mike C. Fletcher", email = "mcfletch@vrplumber.com" }
+]
+keywords = [
+    "physics", "rigid-body", "collision", "simulation", "OMI", "glTF",
+    "numpy", "game", "3D",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+# NumPy is the only hard dependency. Everything else is optional.
+dependencies = [
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+# The GPU compute backend (omi_physics.glcompute) needs a GL 4.3 context.
+gl = ["PyOpenGL>=3.1"]
+# A windowing backend so the GPU-parity tests can create a hidden GL context.
+gltest = ["PyOpenGL>=3.1", "glfw>=2.0"]
+dev = [
+    "omi_physics[gltest]",
+    "pytest",
+    "pytest-timeout",
+    "Cython>=3.0",
+    "mypy",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/mcfletch/omi_physics"
+Repository = "https://github.com/mcfletch/omi_physics"
+Documentation = "https://github.com/mcfletch/omi_physics/tree/main/docs"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "omi_physics.__version__" }
+
+# Ship the Cython sources inside the wheel/sdist so a source install can rebuild.
+[tool.setuptools.package-data]
+omi_physics = ["*.pyx", "*.pxd", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+# Prebuilt binary wheels so end users need no compiler; the accelerators are
+# optional (pure-Python/NumPy fallback), so a build without a toolchain still works.
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_i686 *_i686"
+build-frontend = "build"
+# Sanity-check that the compiled accelerators import in the built wheel.
+test-command = 'python -c "from omi_physics import _solver_native, _collide_native; print(\"accelerators OK\")"'

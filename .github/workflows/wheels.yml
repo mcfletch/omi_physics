@@ -1,0 +1,50 @@
+name: wheels
+
+# Build binary wheels (with the compiled accelerators) and an sdist. Runs on
+# tags and can be triggered manually; publishing is a manual/gated step.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  wheels:
+    name: wheels · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        # cibuildwheel config (build targets, skips, test-command) lives in
+        # pyproject.toml under [tool.cibuildwheel].
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
+
+  # Publishing to PyPI is intentionally a separate, manually-approved step.
+  # Add a `publish` job with pypa/gh-action-pypi-publish and an environment
+  # gate when you are ready to release.
