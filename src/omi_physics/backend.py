@@ -63,7 +63,14 @@ def __getattr__(name: str) -> Any:
 
 
 def _has_gl_compute() -> bool:
-    """True if a current GL context reports version 4.3 or newer (compute shaders)."""
+    """True if the current GL context can actually dispatch compute shaders.
+
+    A 4.3 version string is necessary but not sufficient: some contexts (a
+    degraded GLX/Xwayland path, for instance) report 4.3 yet cannot resolve the
+    compute entry points, so calling ``glDispatchCompute`` would raise a
+    ``NullFunctionError``. Verifying the function loads keeps the GPU backend from
+    being selected where it would crash, so ``auto`` falls back to numpy instead.
+    """
     try:
         from OpenGL.GL import glGetString, GL_VERSION
         version = glGetString(GL_VERSION)
@@ -76,7 +83,13 @@ def _has_gl_compute() -> bool:
         major, minor = (int(x) for x in text.split()[0].split('.')[:2])
     except Exception:
         return False
-    return (major, minor) >= (4, 3)
+    if (major, minor) < (4, 3):
+        return False
+    try:
+        from OpenGL.GL import glDispatchCompute
+        return bool(glDispatchCompute)
+    except Exception:
+        return False
 
 
 def select_backend(prefer: str = 'auto') -> Any:

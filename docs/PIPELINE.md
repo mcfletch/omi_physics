@@ -29,7 +29,7 @@ sequenceDiagram
 
     W->>W: save prev_position / prev_orientation
     W->>B: integrate_forces(dt)
-    Note right of B: v += g·dt ; apply damping + drag
+    Note right of B: v += g·dt, then damping and drag
     alt a collider exists
         W->>B: refit_aabbs()
         W->>BP: pairs()  → candidate overlaps
@@ -43,7 +43,7 @@ sequenceDiagram
         W->>JO: solve_joints(dt)
     end
     W->>B: integrate_positions(dt)
-    Note right of B: x += v·dt ; q ← integrate(q, ω, dt)
+    Note right of B: x += v·dt, then q ← integrate(q, ω, dt)
     opt sleeping enabled
         W->>SL: update_sleep(dt)
     end

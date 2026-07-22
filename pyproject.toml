@@ -41,9 +41,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # The GPU compute backend (omi_physics.glcompute) needs a GL 4.3 context.
-gl = ["PyOpenGL>=3.1"]
+gl = ["PyOpenGL>=4.0.0a1"]
 # A windowing backend so the GPU-parity tests can create a hidden GL context.
-gltest = ["PyOpenGL>=3.1", "glfw>=2.0"]
+gltest = ["PyOpenGL>=4.0.0a1", "glfw>=2.0"]
 # Just enough to run the test suite (the GPU-parity test skips without gltest).
 test = ["pytest", "pytest-timeout"]
 dev = [
