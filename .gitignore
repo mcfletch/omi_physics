@@ -28,3 +28,6 @@ htmlcov/
 .venv/
 venv/
 .env/
+
+# uv lock (byproduct of tox-uv; not tracked for a library)
+uv.lock
