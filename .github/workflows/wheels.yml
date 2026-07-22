@@ -84,7 +84,16 @@ jobs:
   publish:
     name: publish to PyPI
     needs: [check, wheels, sdist]
-    if: needs.check.outputs.publish == 'true'
+    # Publish only when the version is new AND every wheel build (all OSes) and
+    # the sdist succeeded -- a partial build must never burn the release number
+    # (PyPI versions are immutable), e.g. shipping just the sdist because one
+    # wheel failed. The `needs:` gate already requires all three to succeed; the
+    # explicit result checks keep that guarantee even if the workflow is edited
+    # later (e.g. someone adds always()).
+    if: >-
+      needs.check.outputs.publish == 'true' &&
+      needs.wheels.result == 'success' &&
+      needs.sdist.result == 'success'
     runs-on: ubuntu-latest
     # Trusted publishing (OIDC): configure a PyPI publisher for this repo +
     # workflow, and a GitHub environment named `pypi` (which can require a
