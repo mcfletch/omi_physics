@@ -10,7 +10,9 @@ The capsule is *kinematic* (move-and-slide against the world's static colliders)
 rather than a dynamic rigid body — the standard approach for responsive avatars.
 Pure CPU; the GL-facing :class:`PhysicsViewPlatform` wraps this.
 """
-from typing import Dict, Iterator, Optional, Tuple, TYPE_CHECKING
+import math
+import sys
+from typing import Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 
 from dataclasses import dataclass
@@ -47,7 +49,27 @@ class CharacterCapabilities:
     crouchHeight: float = 1.0
     radius: float = 0.3
     airControl: float = 0.4
+    pushFriction: float = 6.0         # per second; bleeds off impulse speed on the ground
+    #: Fastest the capsule may **fall**, m/s.  A real quantity -- a human
+    #: reaches about 55 m/s spread-eagled -- and the one that decides how much
+    #: work a frame can be asked for: collision is stepped finely enough to
+    #: keep up with the capsule, so the fastest it may go is what sets the
+    #: ceiling on the substep count (:meth:`CharacterController.max_substeps`).
+    #: Raise it and falls stay fast for longer and cost proportionally more;
+    #: 0 lets the fall accelerate without limit, which also removes the
+    #: guarantee that a step cannot outrun collision.
+    terminalVelocity: float = 55.0
     suppressOverVoid: bool = False    # hover instead of dropping into a bottomless gap
+    #: Seconds after *falling* off something during which a jump is still
+    #: allowed.  Running over a step, a ramp lip or a seam between two
+    #: colliders leaves the capsule airborne for a frame or two at a time, and
+    #: without this every press landing in one of those frames is swallowed
+    #: with no feedback -- the commonest complaint about a first-person
+    #: controller, and worst at speed, where it happens most.  0 disables it.
+    coyoteTime: float = 0.12
+    #: Seconds a refused jump is remembered for, so one asked for just before
+    #: landing fires on landing rather than being dropped.  0 disables it.
+    jumpBuffer: float = 0.12
 
 
 class CharacterController:
@@ -63,12 +85,26 @@ class CharacterController:
         self.position = np.asarray(position, dtype='d')     # capsule centre
         self.vy = 0.0
         self.grounded = False
+        #: Surface normal underfoot while grounded, else None.  What the move
+        #: direction is projected onto, so speed is spent along the ground
+        #: rather than along the horizon.
+        self.ground_normal: Optional[np.ndarray] = None
         self.crouching = False
         self.flying = False
         self.mode = 'walk'
         self.move_dir = np.zeros(3)                         # world horizontal unit
         self.fly_dir = np.zeros(3)
+        self.push = np.zeros(3)                             # impulse-carried horizontal m/s
         self.stuck = False
+        #: Seconds since the capsule last left the ground by *falling*, or None
+        #: when it is grounded or left by jumping.  See ``coyoteTime``.
+        self._airborne_for: Optional[float] = None
+        #: Seconds since a jump was asked for and refused, or None.  See
+        #: ``jumpBuffer``.
+        self._jump_wanted_for: Optional[float] = None
+        #: Metres a step-up advanced beyond what its frame was due, taken back
+        #: out of the frames that follow.  See :meth:`_try_step_up`.
+        self._step_debt: float = 0.0
         self._proxy_cache: Dict[int, Proxy] = {}            # static body -> proxy
 
     # -- geometry --------------------------------------------------------
@@ -123,12 +159,88 @@ class CharacterController:
         return self.caps.walkSpeed
 
     def jump(self) -> bool:
-        """Launch upward if grounded and able; return whether the jump fired."""
-        if self.caps.canJump and self.grounded and not self.crouching:
-            self.vy = np.sqrt(2.0 * self.gravity_mag * self.caps.jumpHeight)
-            self.grounded = False
+        """Launch upward if able; return whether the jump fired *now*.
+
+        Able means grounded, or airborne only because the capsule walked off
+        something within the last ``coyoteTime`` seconds.  A jump that is
+        refused for timing alone is remembered for ``jumpBuffer`` seconds and
+        taken on landing, so False here does not always mean the press was
+        thrown away.
+
+        The two windows forgive *falling*, never jumping: a capsule that left
+        the ground under its own power has no coyote time, so there is no free
+        double jump.
+        """
+        if not self._may_jump():
+            return False
+        if self._can_launch():
+            self._launch()
             return True
+        # Refused for timing, not for good: hold it for the landing.
+        if self.caps.jumpBuffer > 0.0:
+            self._jump_wanted_for = 0.0
         return False
+
+    def _may_jump(self) -> bool:
+        """Whether a jump is permitted at all, timing aside."""
+        return bool(self.caps.canJump and not self.crouching and not self.flying)
+
+    def _can_launch(self) -> bool:
+        """Whether the capsule is on the ground, or close enough in time to it."""
+        if self.grounded:
+            return True
+        return (self.caps.coyoteTime > 0.0 and self._airborne_for is not None
+                and self._airborne_for <= self.caps.coyoteTime)
+
+    def _launch(self) -> None:
+        self.vy = np.sqrt(2.0 * self.gravity_mag * self.caps.jumpHeight)
+        self.grounded = False
+        # Neither window survives a launch: coyote time forgives falling only,
+        # and a buffered press has now been spent.
+        self._airborne_for = None
+        self._jump_wanted_for = None
+
+    def _tick_jump_windows(self, dt: float, was_grounded: bool) -> None:
+        """Age the coyote and buffer windows, and take a buffered jump on landing.
+
+        Run at the end of a step, once the ground state for the frame is
+        settled, so "landed this frame" is a fact rather than a prediction.
+        """
+        if self.grounded:
+            self._airborne_for = None
+        elif was_grounded:
+            # Left the ground this frame.  A launch has already cleared this,
+            # so reaching here means it fell.
+            self._airborne_for = 0.0
+        elif self._airborne_for is not None:
+            self._airborne_for += dt
+
+        if self._jump_wanted_for is None:
+            return
+        if self.grounded and self._may_jump():
+            self._launch()
+            return
+        self._jump_wanted_for += dt
+        if self._jump_wanted_for > self.caps.jumpBuffer:
+            self._jump_wanted_for = None
+
+    def apply_impulse(self, velocity: Vec) -> None:
+        """Launch the capsule at ``velocity`` (m/s), discarding its current motion.
+
+        This is the jump-pad / spring / blast primitive: the vertical part drives
+        the usual ballistic arc, and the horizontal part is *carried* -- it moves
+        the capsule on its own, unscaled by ``airControl``, until ground friction
+        bleeds it away.  Ungrounding is part of the launch: a grounded capsule is
+        snapped back onto its surface each step, which would eat the impulse.
+        """
+        v = np.asarray(velocity, dtype='d')
+        self.push = v * np.array([1, 0, 1])
+        self.vy = float(v[1])
+        self.grounded = False
+        # Launched, not fallen: no coyote time off a jump pad, and a press held
+        # from before the launch must not fire the moment it lands.
+        self._airborne_for = None
+        self._jump_wanted_for = None
 
     def set_crouch(self, crouch: bool) -> bool:
         """Crouch or stand; standing fails (returns False) if the head is blocked."""
@@ -148,6 +260,8 @@ class CharacterController:
         self.flying = flying
         if flying:
             self.grounded = False
+            self._airborne_for = None
+            self._jump_wanted_for = None
         return True
 
     def _can_stand(self) -> bool:
@@ -206,7 +320,12 @@ class CharacterController:
                 for c in collide.collide(0, 1, self._proxy(pos), Pj):
                     push = -c.normal                        # from world into char
                     contacts.append((push, c.depth))
-                    if push[1] > 0.5:
+                    # Ground is a surface this capsule could stand on, which is
+                    # what ``maxSlope`` says.  A fixed threshold here would
+                    # disagree with it -- and a face counted as ground but too
+                    # steep to walk is one the player can climb, since every
+                    # part of the controller that seats or steps trusts this.
+                    if self._walkable(push):
                         ground_n = push
             if not contacts:
                 break
@@ -220,17 +339,123 @@ class CharacterController:
         return pos, ground_n
 
     # -- movement --------------------------------------------------------
+    #: How much of the capsule's own extent it may cross in one collision step.
+    #: Collision is *discrete* -- each step places the capsule and then resolves
+    #: whatever it overlaps -- so a step that carries it clean past a surface
+    #: leaves nothing to overlap and nothing to be stopped by.  Half leaves the
+    #: contact plenty of depth to be found at.
+    SUBSTEP_REACH = 0.5
+
     def update(self, dt: float) -> None:
-        """Advance the avatar one step: move-and-slide, gravity, ground/slope handling."""
+        """Advance the avatar: move-and-slide, gravity, ground/slope handling.
+
+        Split into substeps short enough that collision cannot be outrun.  A
+        fall from a third-storey window reaches ~15 m/s, which at a 20 fps
+        frame is three quarters of a metre in one step: enough to place the
+        capsule beyond the floor it should have landed on, where the floor is
+        no longer something it overlaps and so no longer something it can be
+        stopped by.  Stepping it in shorter pieces is what makes the landing
+        depend on the geometry rather than on the frame rate.
+        """
+        for piece in self._substeps(dt):
+            was_grounded = self.grounded
+            self._step(piece)
+            # After the step, so "left the ground" and "landed" are settled
+            # facts rather than predictions, and so every early return above is
+            # covered.
+            if not self.flying:
+                self._tick_jump_windows(piece, was_grounded)
+
+    def _reach(self) -> Tuple[float, float]:
+        """How far the capsule may travel before a surface stops overlapping it.
+
+        Two numbers because the capsule is not round: it is **as wide as its
+        radius and as tall as its height**, so it can cross far more ground
+        vertically than horizontally before a floor it has passed is no longer
+        something it touches.  Budgeting the vertical by the narrow measure
+        would substep an ordinary walk for nothing.
+        """
+        return (self.caps.radius * self.SUBSTEP_REACH,
+                self.height * 0.5 * self.SUBSTEP_REACH)
+
+    def terminal_velocity(self) -> float:
+        """Fastest the capsule may fall, or ``inf`` where none was set."""
+        limit = float(self.caps.terminalVelocity)
+        return limit if limit > 0 else float('inf')
+
+    def max_substeps(self, dt: float) -> int:
+        """The most substeps a frame of ``dt`` can ever need.
+
+        **Calculated, not chosen.**  A fixed ceiling is a number nobody can
+        check: raise the fall speed past what it allows and a step outruns
+        collision again, silently and only at speed.  Derived from terminal
+        velocity the two cannot disagree -- whatever the capsule is allowed to
+        reach is what the stepping is sized for.
+
+        Unbounded (``sys.maxsize``) when ``terminalVelocity`` is 0, which is
+        the honest answer rather than a safe-looking one: with no top speed
+        there is no bound on the work a frame might need and no guarantee a
+        step cannot outrun collision.  The stepping still follows the actual
+        speed, so the cost stays proportional rather than jumping to the
+        sentinel.
+        """
+        limit = self.terminal_velocity()
+        _across, along = self._reach()
+        if along <= 0 or dt <= 0:
+            return 1
+        if limit == float('inf'):
+            return sys.maxsize
+        return max(1, math.ceil(limit * dt / along))
+
+    def _substeps(self, dt: float) -> List[float]:
+        """``dt`` cut into pieces no one of which can outrun collision.
+
+        Sized from the speed the capsule will actually reach this frame,
+        gravity included, so a fall is stepped finely exactly while it is fast
+        and costs nothing at all once it is standing still.  The count cannot
+        exceed :meth:`max_substeps`, because the speed feeding it cannot exceed
+        terminal velocity.
+        """
+        if dt <= 0:
+            return [dt]
+        vertical = min(abs(self.vy) + self.gravity_mag * dt,
+                       self.terminal_velocity()) * dt
+        horizontal = float(np.linalg.norm(
+            self.move_dir * self.speed() + self.push)) * dt
+        across, along = self._reach()
+        if across <= 0 or along <= 0:
+            return [dt]
+        count = max(math.ceil(horizontal / across),
+                    math.ceil(vertical / along), 1)
+        count = min(count, self.max_substeps(dt))
+        return [dt / count] * count
+
+    def _step(self, dt: float) -> None:
+        """One movement step, before the jump windows are aged."""
         if self.flying:
             self._update_fly(dt)
             return
         was_grounded = self.grounded
+        if self.grounded:
+            # Friction is a contact effect. Bleeding impulse speed off in flight
+            # instead would shorten every launch by however long it hangs there.
+            self.push = self.push * max(0.0, 1.0 - self.caps.pushFriction * dt)
         control = 1.0 if self.grounded else self.caps.airControl
-        horiz = self.move_dir * self.speed() * control
+        horiz = self.move_dir * self.speed() * control + self.push
+        horiz = self._settle_step_debt(horiz, dt)
+        if self.grounded:
+            horiz = self._along_ground(horiz)
 
         target = self.position + horiz * dt
         resolved, _ = self._push_out(target)
+        if not self._on_walkable_ground() and resolved[1] > target[1]:
+            # Pushing out of a surface travels along its normal, so walking into
+            # anything tilted lifts the capsule -- and a player holding forward
+            # against a cliff climbs it.  Off walkable ground the move asked for
+            # no height, so any it gained is that lift and is dropped.  On a
+            # walkable slope the climb is already in ``target`` (the move was
+            # turned along the ground) and the seating that follows is real.
+            resolved = np.array([resolved[0], target[1], resolved[2]])
         moved = np.linalg.norm((resolved - self.position)[[0, 2]])
         want = np.linalg.norm(horiz[[0, 2]]) * dt
         if want > 1e-6 and moved < 0.7 * want:
@@ -245,8 +470,15 @@ class CharacterController:
         if was_grounded and self.vy <= 1e-6:
             seated, gn = self._snap_down(self.caps.stepHeight)
             if gn is not None:
-                self.position = seated
+                # Seat vertically and keep the horizontal position the move
+                # already resolved.  The seat is found by pushing out of the
+                # surface, which travels along its normal -- back down the hill
+                # on any slope -- and letting that move the capsule sideways
+                # takes a slice off every step of a climb.
+                self.position = np.array(
+                    [self.position[0], seated[1], self.position[2]])
                 self.grounded = True
+                self.ground_normal = gn
                 self.vy = 0.0
                 return
 
@@ -258,7 +490,7 @@ class CharacterController:
             self.grounded = False
             return
 
-        self.vy -= self.gravity_mag * dt
+        self.vy = max(self.vy - self.gravity_mag * dt, -self.terminal_velocity())
         vtarget = self.position + UP * (self.vy * dt)
         vresolved, ground_n = self._push_out(vtarget)
         self.position = vresolved
@@ -311,6 +543,23 @@ class CharacterController:
         move = (self.move_dir + self.fly_dir) * self.caps.flySpeed
         self.position = self.position + move * dt
         self.vy = 0.0
+        self.push = np.zeros(3)                 # noclip answers to input alone
+
+    def _settle_step_debt(self, horiz: np.ndarray, dt: float) -> np.ndarray:
+        """Take back what a step-up advanced beyond its frame's due.
+
+        Paid off over the frames that follow rather than all at once, so the
+        capsule keeps moving -- a stall would read as the stutter the whole
+        one-motion step exists to avoid.
+        """
+        if self._step_debt <= 0.0:
+            return horiz
+        due = float(np.linalg.norm(horiz[[0, 2]])) * dt
+        if due <= 1e-9:
+            return horiz
+        paid = min(self._step_debt, due)
+        self._step_debt -= paid
+        return horiz * (1.0 - paid / due)
 
     def _try_step_up(self, horiz: np.ndarray, dt: float) -> Optional[np.ndarray]:
         """Try to climb a small ledge ahead; return the seated position or None if not a step."""
@@ -330,24 +579,102 @@ class CharacterController:
             return None                                     # blocked -> not a step
         dropped, ground_n = self._push_out(ahead - UP * self.caps.stepHeight)
         # Only accept a step onto solid ground that is actually higher than here
-        # (never leave the avatar hanging, and never "step" down onto the floor).
-        if ground_n is None or dropped[1] <= self.position[1] + 1e-3:
+        # (never leave the avatar hanging, and never "step" down onto the floor)
+        # and that could be stood on.  Without the slope test a face steeper
+        # than ``maxSlope`` is climbable one step-height at a time, so anything
+        # rising less than ``stepHeight`` per frame -- which at running speed is
+        # most cliffs -- can simply be walked up.
+        if (ground_n is None or not self._walkable(ground_n)
+                or dropped[1] <= self.position[1] + 1e-3):
             return None
+        # The step is mounted in one motion, which is further than this frame
+        # was due -- so the excess is owed.  Without it a flight of stairs is
+        # climbed one step per *frame* rather than at running speed, and the
+        # better the frame rate the faster the stairs.
+        advanced = float(np.linalg.norm((dropped - self.position)[[0, 2]]))
+        self._step_debt += max(0.0, advanced - speed * dt)
         return dropped
 
+    def _along_ground(self, velocity: np.ndarray) -> np.ndarray:
+        """A horizontal velocity turned to run along the surface, same speed.
+
+        Moved horizontally into a slope, the capsule penetrates it and is pushed
+        back out along the surface normal, whose horizontal component opposes
+        the motion -- so the distance covered falls off with the slope and a
+        walkable ramp feels like wading.  Redirecting first means the whole
+        speed is spent going somewhere: a run up a ramp covers the same metres
+        per second as a run along the flat, and the climb is the vertical part
+        of that rather than something taken out of it.
+
+        Only for slopes that can be walked.  Steeper than ``maxSlope`` the
+        surface is a wall, and projecting onto it would let the player run up
+        it.
+        """
+        normal = self.ground_normal
+        if normal is None or not self._walkable(normal):
+            return velocity
+        speed = float(np.linalg.norm(velocity))
+        if speed <= 1e-9 or abs(float(normal[1])) <= 1e-6:
+            return velocity
+        # The *heading* is the player's and is never turned: only the height
+        # needed to follow the surface is added, and the result is rescaled so
+        # the speed along the surface is the speed that was asked for.  A plain
+        # projection onto the plane would also rotate the heading, which on a
+        # floor whose contact normal is a hair off vertical steers the player
+        # sideways for as long as they walk.
+        climb = -(float(normal[0]) * float(velocity[0])
+                  + float(normal[2]) * float(velocity[2])) / float(normal[1])
+        along = np.array([velocity[0], climb, velocity[2]])
+        length = float(np.linalg.norm(along))
+        if length <= 1e-9:
+            return velocity
+        return along * (speed / length)
+
+    def _on_walkable_ground(self) -> bool:
+        """Whether the capsule is standing on something it could walk along."""
+        return bool(self.grounded and self.ground_normal is not None
+                    and self._walkable(self.ground_normal))
+
+    def _walkable(self, normal: np.ndarray) -> bool:
+        """Whether a surface with this normal is shallow enough to stand on."""
+        slope = np.degrees(np.arccos(np.clip(float(np.dot(normal, UP)), -1, 1)))
+        return bool(slope <= self.caps.maxSlope)
+
+    #: How far below itself the capsule looks for floor when nothing touched it
+    #: this step.  Enough to bridge the gap a step opens under a walker, small
+    #: enough not to hunt for ground that is not there.
+    GROUND_PROBE = 0.05
+
     def _update_grounded(self, ground_n: Optional[np.ndarray]) -> None:
-        """Set the grounded flag from the vertical contact, probing just below if needed."""
+        """Set the grounded flag from the vertical contact, probing just below if needed.
+
+        **A rising capsule is never grounded**, whatever is under it.  One frame
+        after a jump the capsule has climbed only ``vy * dt``, which on a fast
+        machine is less than the probe reaches -- so without this the launch is
+        snapped straight back onto the floor and its velocity zeroed in the same
+        frame it started, and the faster the machine the more jumps vanish.  It
+        also still *touches* the floor it is leaving, so the contact above says
+        "ground" too; a capsule on its way up has left deliberately and neither
+        answer applies to it.
+        """
+        if self.vy > 0.0:
+            self.grounded = False
+            self.ground_normal = None
+            return
         if ground_n is not None:
             self.grounded = True
+            self.ground_normal = ground_n
             self.vy = max(self.vy, 0.0)
             return
-        probe, gn = self._push_out(self.position - UP * 0.05)
+        probe, gn = self._push_out(self.position - UP * self.GROUND_PROBE)
         if gn is not None:
             self.position = probe
             self.grounded = True
+            self.ground_normal = gn
             self.vy = 0.0
         else:
             self.grounded = False
+            self.ground_normal = None
 
     def _apply_slope_slide(self, ground_n: Optional[np.ndarray], dt: float) -> None:
         """Slide the avatar downhill and unground it when the slope exceeds ``maxSlope``."""
@@ -362,6 +689,7 @@ class CharacterController:
                 self.position, _ = self._push_out(
                     self.position + slide * self.gravity_mag * dt * dt * 4.0)
                 self.grounded = False
+                self.ground_normal = None
 
     # -- safe viewpoint binding -----------------------------------------
     def safe_bind(self, position: Vec, search: float = 4.0) -> bool:
@@ -374,6 +702,8 @@ class CharacterController:
         self.position = np.asarray(position, dtype='d').copy()
         self.stuck = False
         self.flying = False                         # a fresh bind starts on foot
+        self.push = np.zeros(3)                     # ...and at rest
+        self.vy = 0.0
         resolved, ground_n = self._push_out(self.position, iterations=12)
         self.position = resolved
         if self._overlaps(self._proxy()):

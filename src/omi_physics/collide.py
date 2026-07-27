@@ -5,6 +5,14 @@ body A toward body B and ``depth > 0`` for penetration.  Analytic tests cover th
 primitive pairs; oriented box↔box uses SAT plus face clipping to build a stable
 multi-point manifold (Ericson, *Real-Time Collision Detection*).  Convex↔convex
 via GJK/EPA lands in Phase 3 (:mod:`omi_physics.gjk`).
+
+**Depth is how far one shape reaches past another, not how near it is to it.**
+The distinction only shows up once something is deeply inside: a test that
+answers with the distance to the nearest feature starts pointing the wrong way
+as soon as the far side is nearer than the near one, and resolving along it then
+drives the pair further together instead of apart.  :func:`capsule_triangle` is
+where that matters most, because a character landing hard is the common way to
+get deeply inside anything.
 """
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, cast
@@ -287,8 +295,57 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
 def capsule_triangle(cap: CapsuleProxy,
                      tri: TriangleProxy) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
     """Analytic capsule↔triangle. Returns ``(point, normal, depth)`` with the
-    normal pointing from the triangle toward the capsule, or ``None`` if apart."""
+    normal pointing from the triangle toward the capsule, or ``None`` if apart.
+
+    **Against the face, the capsule is pushed back to the side it is on** --
+    the side its axis centre lies on -- along the face's own perpendicular.
+
+    Resolving toward the nearest point on the capsule *axis* instead looks
+    right while the capsule is barely touching and is exactly wrong once it is
+    not.  A character landing hard puts its lower cap below the floor; that cap
+    is then the nearest end, so "push toward the nearest end" drives the
+    character **down through the floor it just hit**, and reports no ground
+    while doing it.  Sinking into the ground on a fast landing is that, and the
+    faster the arrival the deeper it goes.
+
+    The side is taken from the capsule rather than from the winding, because a
+    triangle soup does not promise one: the same floor is wound either way in
+    different scenes, and a rule that trusted it would eject half of them
+    downward.  Taking it from the capsule is also what makes a ceiling work --
+    a character jumping into one is below it and is pushed back down.
+
+    Depth is how far the capsule reaches **past** the plane, unbounded, so one
+    that has been placed or driven deep inside comes back out instead of being
+    pushed further in.  Contacts against an **edge** or a **vertex** keep the
+    nearest-point direction: there is no face to be in front of at a rim, and
+    that is where a neighbouring triangle has the say.
+    """
     v0, v1, v2 = tri.verts
+    face = np.cross(v1 - v0, v2 - v0)
+    face_len = float(np.linalg.norm(face))
+    r = cap.radius
+
+    if face_len > EPS:
+        face_n = face / face_len
+        centre = (cap.p0 + cap.p1) * 0.5
+        if float(np.dot(centre - v0, face_n)) < 0:
+            face_n = -face_n                    # the side the capsule is on
+        deepest: Optional[Tuple[float, np.ndarray]] = None
+        for sp in (cap.p0, cap.p1):
+            # Over the face itself rather than off one of its rims: the foot of
+            # the perpendicular is then the closest point on the triangle.
+            height = float(np.dot(sp - v0, face_n))
+            foot = sp - face_n * height
+            tp = _closest_point_on_triangle(sp, v0, v1, v2)
+            if float(np.dot(foot - tp, foot - tp)) > EPS * EPS:
+                continue
+            reach = r - height
+            if reach > 0 and (deepest is None or reach > deepest[0]):
+                deepest = (reach, tp)
+        if deepest is not None:
+            reach, tp = deepest
+            return tp, face_n, reach
+
     best: Tuple[float, Optional[np.ndarray], Optional[np.ndarray]] = (np.inf, None, None)
     for sp in (cap.p0, cap.p1):
         tp = _closest_point_on_triangle(sp, v0, v1, v2)
@@ -301,15 +358,13 @@ def capsule_triangle(cap: CapsuleProxy,
         if d2 < best[0]:
             best = (d2, sp, tp)
     best_d2, best_sp, best_tp = best
-    r = cap.radius
     if best_d2 >= r * r or best_sp is None or best_tp is None:
         return None
     d = np.sqrt(best_d2)
     if d > EPS:
         normal = (best_sp - best_tp) / d        # triangle -> capsule
     else:
-        n = np.cross(v1 - v0, v2 - v0)          # capsule axis through the face
-        normal = mathutil.normalize(n)
+        normal = mathutil.normalize(face)       # capsule axis through the face
     return best_tp, normal, r - d
 
 

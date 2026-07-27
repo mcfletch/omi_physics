@@ -161,4 +161,7 @@ docs/                   deep-dive documentation (Markdown + Mermaid)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE). In some jurisdictions LLM generated
+code cannot have any copyright assignment. The intent of the license
+is that anyone anywhere can use the code for whatever purpose they
+deem fit, provided that they assume any liability for that usage.
