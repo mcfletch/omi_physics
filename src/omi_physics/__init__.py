@@ -23,7 +23,7 @@ from . import mathutil
 from .world import PhysicsWorld
 from .backend import NumpyBackend, select_backend
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "PhysicsWorld",
