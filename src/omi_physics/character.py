@@ -12,13 +12,15 @@ Pure CPU; the GL-facing :class:`PhysicsViewPlatform` wraps this.
 """
 import math
 import sys
-from typing import Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING
+import weakref
+from typing import (Any, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING,
+                    cast)
 import numpy as np
 
 from dataclasses import dataclass
 
 from . import model
-from .body import make_proxy, CapsuleProxy, Proxy
+from .body import CapsuleProxy, TriangleMeshProxy, make_proxy, Proxy
 from . import collide
 from .mathutil import Vec
 
@@ -27,6 +29,21 @@ if TYPE_CHECKING:
 
 UP = np.array([0.0, 1.0, 0.0])
 IDENT = np.array([0.0, 0.0, 0.0, 1.0])
+
+#: World-space proxies for each world's static colliders, keyed by world and
+#: then by body index.  Weak, so an unloaded level takes its collision copy
+#: with it rather than keeping it alive for the rest of the process.  See
+#: :meth:`CharacterController._static_proxy` for why it is shared.
+_STATIC_PROXIES: "weakref.WeakKeyDictionary[Any, Dict[int, Proxy]]" = \
+    weakref.WeakKeyDictionary()
+
+
+def _static_proxies(world: "PhysicsWorld") -> Dict[int, Proxy]:
+    """The proxy cache belonging to ``world``, made on first use."""
+    found = _STATIC_PROXIES.get(world)
+    if found is None:
+        found = _STATIC_PROXIES[world] = {}
+    return found
 
 
 @dataclass
@@ -41,6 +58,15 @@ class CharacterCapabilities:
     canJump: bool = True
     canFly: bool = True
     flySpeed: float = 8.0
+    #: Metres per second under water.  Slower than walking, because water is
+    #: what you push against and should feel like it.
+    swimSpeed: float = 2.0
+    #: How fast water bleeds off a swimmer's vertical speed, per second.  This
+    #: is what makes sinking read as sinking rather than as falling: without
+    #: it a swimmer with no buoyancy accelerates to terminal velocity, and a
+    #: pool becomes a hole in the floor.  It also settles the steady sink
+    #: rate, which is ``(1 - buoyancy) * gravity / swimDrag``.
+    swimDrag: float = 4.0
     jumpHeight: float = 1.2
     stepHeight: float = 0.35
     maxSlope: float = 50.0            # degrees
@@ -91,6 +117,15 @@ class CharacterController:
         self.ground_normal: Optional[np.ndarray] = None
         self.crouching = False
         self.flying = False
+        #: Under water: collides like walking, moves like flying, and is
+        #: pulled by whatever fraction of gravity :attr:`buoyancy` leaves.
+        self.swimming = False
+        #: Fraction of gravity that pushes back up while swimming.  1.0 hangs
+        #: where it is, 0.0 sinks at full weight, above 1.0 rises.
+        self.buoyancy = 0.0
+        #: Swimming velocity, which is state rather than input: water is
+        #: pushed against, so a stroke builds speed and letting go coasts.
+        self._swim_velocity = np.zeros(3)
         self.mode = 'walk'
         self.move_dir = np.zeros(3)                         # world horizontal unit
         self.fly_dir = np.zeros(3)
@@ -105,7 +140,14 @@ class CharacterController:
         #: Metres a step-up advanced beyond what its frame was due, taken back
         #: out of the frames that follow.  See :meth:`_try_step_up`.
         self._step_debt: float = 0.0
-        self._proxy_cache: Dict[int, Proxy] = {}            # static body -> proxy
+        # Static body -> world-space proxy, shared with every other avatar in
+        # this world.  See `_static_proxy`.
+        self._proxy_cache: Dict[int, Proxy] = _static_proxies(world)
+        # Per *avatar*, unlike the proxy cache above: it is keyed on where this
+        # capsule is, and two avatars are in different places.  See
+        # `_near_triangles`.
+        self._near_cache: Dict[int, Tuple[np.ndarray, np.ndarray,
+                                          np.ndarray]] = {}
 
     # -- geometry --------------------------------------------------------
     @property
@@ -264,6 +306,32 @@ class CharacterController:
             self._jump_wanted_for = None
         return True
 
+    def set_swim(self, swimming: bool, buoyancy: float = 0.9) -> None:
+        """Enter or leave the water.
+
+        A separate state from :meth:`set_fly` rather than a use of it, and the
+        difference is the point: flying is noclip and free of gravity, while a
+        swimmer still collides with the world and is still pulled by whatever
+        fraction of gravity ``buoyancy`` leaves.  Swimming as a fly gives a
+        player who can leave a pool through its wall.
+
+        Vertical speed is dropped on the way in *and* out.  Coming in, a
+        falling body should enter the water and not carry its fall through it;
+        going out, a swimmer rising fast who breaks the surface with that speed
+        intact is launched into the air.
+        """
+        was = self.swimming
+        self.swimming = bool(swimming)
+        self.buoyancy = float(buoyancy)
+        if self.swimming != was:
+            self.vy = 0.0
+            self._swim_velocity = np.zeros(3)
+        if self.swimming:
+            self.grounded = False
+            self.ground_normal = None
+            self._airborne_for = None
+            self._jump_wanted_for = None
+
     def _can_stand(self) -> bool:
         """No static geometry where the standing capsule's head would be."""
         stand = self._proxy(height=self.caps.standHeight)
@@ -283,7 +351,16 @@ class CharacterController:
 
     def _static_proxy(self, j: int) -> Proxy:
         """Cached world-space proxy for a static body (they never move, so a
-        trimesh's transformed vertices are computed once, not per query)."""
+        trimesh's transformed vertices are computed once, not per query).
+
+        The cache is the **world's**, shared by every avatar walking in it: a
+        trimesh proxy is not a handle but a transformed copy of the geometry
+        with a uniform grid over it, so one per controller is one copy of the
+        level per person in the level.  With opponents in the world that is
+        paid again the first time each of them takes a step, which reads as a
+        hitch at the start of a fight.  Sharing is correct precisely because
+        these bodies never move.
+        """
         proxy = self._proxy_cache.get(j)
         if proxy is None:
             w = self.world
@@ -298,6 +375,35 @@ class CharacterController:
             if collide.collide(0, 1, proxy, self._static_proxy(j)):
                 return True
         return False
+
+    #: How far past the capsule a cached candidate gather reaches, in metres.
+    #: Wide enough that the depenetration iterations, the ground probe and the
+    #: step tests all fall inside one gather -- their positions differ by
+    #: centimetres -- and narrow enough that what it hands back is still mostly
+    #: near the capsule.
+    NEAR_MARGIN = 0.5
+
+    def _near_triangles(self, body: int, mesh: TriangleMeshProxy,
+                        capsule: CapsuleProxy) -> np.ndarray:
+        """Triangles near the capsule, gathered once and reused while it fits.
+
+        A frame asks for depenetration nine to twelve times -- three iterations
+        inside each of the ground probe, the move, the step-up and the
+        step-down -- at positions centimetres apart. The broad phase does not
+        change its answer over that, so it is asked once for a box grown by
+        :attr:`NEAR_MARGIN` and the gather is reused until the capsule leaves
+        it. A superset is safe: the exact test rejects the rest.
+        """
+        lo, hi = capsule.aabb()
+        cached = self._near_cache.get(body)
+        if cached is not None:
+            low, high, verts = cached
+            if np.all(lo >= low) and np.all(hi <= high):
+                return verts
+        low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
+        verts = mesh.candidate_vertices(low, high)
+        self._near_cache[body] = (low, high, verts)
+        return verts
 
     def _push_out(self, position: Vec,
                   iterations: int = 3) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -314,19 +420,29 @@ class CharacterController:
         pos = np.asarray(position, dtype='d').copy()
         ground_n: Optional[np.ndarray] = None
         for _ in range(iterations):
-            contacts = []
+            contacts: List[Tuple[np.ndarray, float]] = []
             for j in self._static_bodies():
                 Pj = self._static_proxy(j)
+                if isinstance(Pj, TriangleMeshProxy):
+                    # The level, which is nearly always every contact there is.
+                    # Straight to the two numbers this loop reads, so a frame
+                    # does not build twenty thousand contact objects to look at
+                    # a normal and a depth and drop them.
+                    capsule = cast(CapsuleProxy, self._proxy(pos))
+                    pushes, depths = collide.capsule_mesh_pushes(
+                        capsule, Pj, self._near_triangles(j, Pj, capsule))
+                    contacts.extend(zip(pushes, depths, strict=True))
+                    continue
                 for c in collide.collide(0, 1, self._proxy(pos), Pj):
-                    push = -c.normal                        # from world into char
-                    contacts.append((push, c.depth))
-                    # Ground is a surface this capsule could stand on, which is
-                    # what ``maxSlope`` says.  A fixed threshold here would
-                    # disagree with it -- and a face counted as ground but too
-                    # steep to walk is one the player can climb, since every
-                    # part of the controller that seats or steps trusts this.
-                    if self._walkable(push):
-                        ground_n = push
+                    contacts.append((-c.normal, c.depth))   # from world into char
+            # Ground is a surface this capsule could stand on, which is what
+            # ``maxSlope`` says.  A fixed threshold here would disagree with it
+            # -- and a face counted as ground but too steep to walk is one the
+            # player can climb, since every part of the controller that seats
+            # or steps trusts this.
+            for push, _depth in contacts:
+                if self._walkable(push):
+                    ground_n = push
             if not contacts:
                 break
             contacts.sort(key=lambda pc: -pc[1])            # deepest first
@@ -434,6 +550,9 @@ class CharacterController:
         """One movement step, before the jump windows are aged."""
         if self.flying:
             self._update_fly(dt)
+            return
+        if self.swimming:
+            self._update_swim(dt)
             return
         was_grounded = self.grounded
         if self.grounded:
@@ -545,12 +664,52 @@ class CharacterController:
         self.vy = 0.0
         self.push = np.zeros(3)                 # noclip answers to input alone
 
+    def _update_swim(self, dt: float) -> None:
+        """Advance the avatar one step under water.
+
+        Halfway between the other two, and deliberately so.  The *movement* is
+        flying's -- a direction in three dimensions, at one speed, with no
+        ground to walk along and no slope to slide down.  The *collision* is
+        walking's: the capsule is depenetrated from the world every step, so a
+        pool has a bottom, a wall and a ceiling.
+
+        The vertical is what is neither.  Gravity is scaled by what buoyancy
+        does not cancel, and drag bleeds the result away, so a sink settles at
+        a steady speed instead of accelerating; the two together are most of
+        what tells a player they are in water rather than in air.
+        """
+        self.grounded = False
+        self.ground_normal = None
+        # Water is something you push against, so a stroke builds speed and
+        # letting go coasts.  Movement that switched on and off is what makes
+        # a swim read as walking with the floor removed.
+        desired = (self.move_dir + self.fly_dir) * self.caps.swimSpeed
+        self._swim_velocity += ((desired - self._swim_velocity)
+                                * min(1.0, self.caps.swimDrag * dt))
+        self.vy += (self.buoyancy - 1.0) * self.gravity_mag * dt
+        self.vy *= max(0.0, 1.0 - self.caps.swimDrag * dt)
+        # An impulse -- a jump pad firing into a pool -- carries through the
+        # water and is bled off by the same drag, so it slows rather than
+        # stopping dead at the surface.
+        self.push = self.push * max(0.0, 1.0 - self.caps.swimDrag * dt)
+        velocity = self._swim_velocity + UP * self.vy + self.push
+        target = self.position + velocity * dt
+        resolved, _ = self._push_out(target)
+        # Meeting the bottom or the ceiling has to stop the drift, not merely
+        # be undone by it: speed accumulating against the floor would rocket
+        # the swimmer the moment they turned upward.
+        if abs(resolved[1] - target[1]) > 1e-6:
+            self.vy = 0.0
+        self.position = resolved
+
     def _settle_step_debt(self, horiz: np.ndarray, dt: float) -> np.ndarray:
         """Take back what a step-up advanced beyond its frame's due.
 
         Paid off over the frames that follow rather than all at once, so the
         capsule keeps moving -- a stall would read as the stutter the whole
-        one-motion step exists to avoid.
+        one-motion step exists to avoid.  It makes the *average* speed right;
+        it does not make the step-up frame itself right, which is the bug
+        recorded on :meth:`_try_step_up`.
         """
         if self._step_debt <= 0.0:
             return horiz
@@ -570,9 +729,10 @@ class CharacterController:
         lifted = self.position + UP * self.caps.stepHeight
         if self._overlaps(self._proxy(lifted)):
             return None                                     # too tall / ceiling above
-        # Move forward far enough to clear the step edge and land *on* the step in
-        # one motion (a small per-frame velocity alone catches the edge and never
-        # gets over it, which the old code hid with an airborne hop -> the jitter).
+        # Move forward far enough to clear the step edge and land *on* the step
+        # in one motion (a small per-frame velocity alone catches the edge and
+        # never gets over it, which an earlier version hid with an airborne hop
+        # -> the jitter).
         forward = max(speed * dt, self.caps.radius + 0.05)
         ahead, _ = self._push_out(lifted + hdir * forward)
         if np.linalg.norm((ahead - self.position)[[0, 2]]) < 0.5 * forward:
@@ -587,10 +747,25 @@ class CharacterController:
         if (ground_n is None or not self._walkable(ground_n)
                 or dropped[1] <= self.position[1] + 1e-3):
             return None
+        # There *is* a step.  Now cross it at this frame's own pace: the probe
+        # above went as far as it had to in order to answer the question, and
+        # moving that far would carry the capsule several frames' distance in
+        # one -- which the eye reads as a sharp jump forward however carefully
+        # the excess is paid back over the frames that follow.  An average that
+        # is right and an instant that is wrong is still wrong.
         # The step is mounted in one motion, which is further than this frame
         # was due -- so the excess is owed.  Without it a flight of stairs is
         # climbed one step per *frame* rather than at running speed, and the
         # better the frame rate the faster the stairs.
+        #
+        # **This is the cause of a known bug**: the whole mount lands in a
+        # single frame, and the eye reads that as a sharp jump forward however
+        # carefully the distance is paid back afterwards.  See
+        # ``tests/test_character_step_pace.py``, which measures it, and the
+        # bug's entry in twitch's PROJECT-PLAN -- three fixes were tried and
+        # each traded the lurch for a stall.  An average that is right and an
+        # instant that is wrong is still wrong, and this is the wrong one that
+        # at least always works.
         advanced = float(np.linalg.norm((dropped - self.position)[[0, 2]]))
         self._step_debt += max(0.0, advanced - speed * dt)
         return dropped
@@ -714,9 +889,16 @@ class CharacterController:
         return True
 
     def _ground_snap(self, search: float) -> None:
-        """Drop the capsule up to ``search`` metres onto the first floor below and seat it."""
+        """Drop the capsule up to ``search`` metres onto the first floor below and seat it.
+
+        Nothing within reach leaves it airborne, and it must say so: the pose
+        before the bind is no evidence about the one after it, and a caller
+        asking whether there is ground underfoot -- to decide between walking
+        and flying there -- gets the wrong answer from a stale yes.
+        """
         step = 0.05
         drop = 0.0
+        self.grounded = False
         while drop < search:
             probe = self.position - UP * (drop + step)
             _, gn = self._push_out(probe, iterations=2)

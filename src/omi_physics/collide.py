@@ -19,8 +19,17 @@ from typing import Callable, Dict, List, Optional, Tuple, cast
 import numpy as np
 
 from . import mathutil
+from ._accel import accelerators_disabled
 from .body import (SphereProxy, BoxProxy, CapsuleProxy, ConvexProxy, TriangleProxy,
                    TriangleMeshProxy, Proxy, SupportProxy)
+
+if accelerators_disabled():
+    _native = None
+else:
+    try:
+        from . import _collide_native as _native   # type: ignore[no-redef,attr-defined]
+    except ImportError:                # pragma: no cover - pure-Python fallback
+        _native = None                 # type: ignore[assignment]
 
 EPS = 1e-9
 
@@ -273,19 +282,24 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
     else:
         mesh, other, mesh_is_a = cast(TriangleMeshProxy, PB), cast(SupportProxy, PA), False
     lo, hi = other.aabb()
-    use_capsule = other.kind == 'capsule'
+    if other.kind == 'capsule':
+        # Every candidate in one call. A character controller reaches this nine
+        # to twelve times a frame -- three depenetration iterations inside each
+        # of four call sites -- so a Python round trip per triangle is the
+        # frame at a handful of characters and hopeless at a hundred.
+        verts = mesh.candidate_vertices(lo, hi)
+        hit, points, normals, depths = capsule_triangle_batch(
+            cast(CapsuleProxy, other), verts)
+        # A is the mesh: the normal already points A→B. B is the mesh: flip it.
+        # Negated once for the batch rather than per contact, which is an array
+        # allocated per contact in a list that is usually a dozen long.
+        if not mesh_is_a:
+            normals = -normals
+        return [Contact(a, b, points[i], normals[i], float(depths[i]))
+                for i in np.flatnonzero(hit)]
     contacts = []
     for tri in mesh.triangles_overlapping(lo, hi):
-        if use_capsule:
-            c = capsule_triangle(cast(CapsuleProxy, other), tri)
-            if c is None:
-                continue
-            pt, normal, depth = c
-            if mesh_is_a:                       # A is the mesh: normal points A→B
-                contacts.append(Contact(a, b, pt, normal, depth))
-            else:                               # B is the mesh: flip to A→B
-                contacts.append(Contact(a, b, pt, -normal, depth))
-        elif mesh_is_a:
+        if mesh_is_a:
             contacts.extend(collide_convex(a, b, tri, other))
         else:
             contacts.extend(collide_convex(a, b, other, tri))
@@ -366,6 +380,293 @@ def capsule_triangle(cap: CapsuleProxy,
     else:
         normal = mathutil.normalize(face)       # capsule axis through the face
     return best_tp, normal, r - d
+
+
+def capsule_triangles(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
+                      v2: np.ndarray) -> Tuple[np.ndarray, np.ndarray,
+                                               np.ndarray, np.ndarray]:
+    """:func:`capsule_triangle` for N triangles at once.
+
+    The compiled accelerator when it is present, the numpy fallback otherwise;
+    the two are asserted to agree triangle for triangle. See
+    :func:`_capsule_triangles_numpy` for why a batch exists at all.
+    """
+    if _native is not None:
+        v0 = np.ascontiguousarray(v0, dtype='d').reshape(-1, 3)
+        v1 = np.ascontiguousarray(v1, dtype='d').reshape(-1, 3)
+        v2 = np.ascontiguousarray(v2, dtype='d').reshape(-1, 3)
+        verts = np.empty((len(v0), 3, 3), dtype='d')
+        verts[:, 0], verts[:, 1], verts[:, 2] = v0, v1, v2
+        return capsule_triangle_batch(cap, verts)
+    return _capsule_triangles_numpy(cap, v0, v1, v2)
+
+
+def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
+                        verts: Optional[np.ndarray] = None
+                        ) -> Tuple[np.ndarray, np.ndarray]:
+    """Depenetration for a capsule against a mesh, as ``(pushes, depths)``.
+
+    ``pushes`` is ``(N,3)`` unit normals pointing **from the world into the
+    capsule** -- the direction the capsule must move -- and ``depths`` is
+    ``(N,)``, ordered deepest first, which is the order a sequential-projection
+    resolve wants.
+
+    The same contacts :func:`collide` answers with, without building a
+    :class:`Contact` for each. A character controller reads only these two
+    numbers per contact and asks nine to twelve times a frame; at a hundred
+    characters that is twenty thousand objects a frame constructed to have two
+    fields read and be dropped.
+
+    ``verts`` lets a caller supply candidates it has already gathered -- a
+    controller resolving one position holds the capsule still across several
+    calls, and the broad phase does not need asking again for each. A superset
+    is safe: the exact test rejects whatever is not really near.
+    """
+    if verts is None:
+        verts = mesh.candidate_vertices(*cap.aabb())
+    hit, _points, normals, depths = capsule_triangle_batch(cap, verts)
+    where = np.flatnonzero(hit)
+    if not len(where):
+        return np.zeros((0, 3), dtype='d'), np.zeros(0, dtype='d')
+    # The mesh is the world, so the push into the capsule is the normal as the
+    # triangle test gives it: from the triangle toward the capsule.
+    pushes, found = normals[where], depths[where]
+    order = np.argsort(-found, kind='stable')
+    return pushes[order], found[order]
+
+
+def capsule_triangle_batch(cap: CapsuleProxy, verts: np.ndarray
+                           ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                                      np.ndarray]:
+    """:func:`capsule_triangles` taking the triangles already as ``(N, 3, 3)``.
+
+    The layout :meth:`TriangleMeshProxy.candidate_vertices` gathers into, so the
+    mesh path hands its array straight over instead of splitting it into three
+    and having it rebuilt.
+    """
+    verts = np.ascontiguousarray(verts, dtype='d').reshape(-1, 3, 3)
+    count = len(verts)
+    hit = np.zeros(count, dtype=np.uint8)
+    points = np.zeros((count, 3), dtype='d')
+    normals = np.zeros((count, 3), dtype='d')
+    depths = np.zeros(count, dtype='d')
+    if not count:
+        return hit.astype(bool), points, normals, depths
+    if _native is None:
+        return _capsule_triangles_numpy(cap, verts[:, 0], verts[:, 1],
+                                        verts[:, 2])
+    _native.capsule_triangles(
+        np.ascontiguousarray(cap.p0, dtype='d'),
+        np.ascontiguousarray(cap.p1, dtype='d'),
+        float(cap.radius), verts, hit, points, normals, depths)
+    return hit.astype(bool), points, normals, depths
+
+
+def _capsule_triangles_numpy(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
+                             v2: np.ndarray) -> Tuple[np.ndarray, np.ndarray,
+                                                      np.ndarray, np.ndarray]:
+    """:func:`capsule_triangle` for N triangles at once, in numpy.
+
+    Answers ``(hit, points, normals, depths)`` -- an ``(N,)`` bool and three
+    arrays of shape ``(N,3)``, ``(N,3)``, ``(N,)`` -- lined up with the input,
+    so a caller keeps its own triangle indices.  Entries where ``hit`` is false
+    are unspecified rather than meaningful.
+
+    **Identical in answer to the scalar routine, and that is a requirement, not
+    a hope**: ``tests/test_collide_batch.py`` asserts it triangle for triangle
+    over randomised input as well as against geometry worked out by hand.
+    Every rule the scalar version's docstring explains -- the side taken from
+    the capsule and not the winding, the unbounded depth, the rim contacts
+    keeping the nearest-point direction -- holds here and is not restated.
+
+    This exists because of *dispatch*, not arithmetic.  The scalar routine
+    spends about seventy microseconds a triangle, almost all of it numpy
+    entering and leaving over three-element vectors; a character controller
+    runs three depenetration iterations inside each of four calls a frame, so
+    that overhead **is** the frame at a handful of characters and hopeless at a
+    hundred.  Done as arrays the same work is one pass of the same operations,
+    and the cost stops being per triangle.
+    """
+    v0 = np.ascontiguousarray(v0, dtype='d').reshape(-1, 3)
+    v1 = np.ascontiguousarray(v1, dtype='d').reshape(-1, 3)
+    v2 = np.ascontiguousarray(v2, dtype='d').reshape(-1, 3)
+    count = len(v0)
+    points = np.zeros((count, 3), dtype='d')
+    normals = np.zeros((count, 3), dtype='d')
+    depths = np.zeros(count, dtype='d')
+    if not count:
+        return np.zeros(0, dtype=bool), points, normals, depths
+
+    r = float(cap.radius)
+    caps = (np.asarray(cap.p0, dtype='d'), np.asarray(cap.p1, dtype='d'))
+    centre = (caps[0] + caps[1]) * 0.5
+
+    face = np.cross(v1 - v0, v2 - v0)
+    face_len = np.linalg.norm(face, axis=1)
+    has_face = face_len > EPS
+    # Divide only where there is a face; a degenerate triangle keeps a zero
+    # normal and is answered by the edge path below.
+    safe_len = np.where(has_face, face_len, 1.0)
+    face_n = face / safe_len[:, None]
+    # The side the capsule is on, from its axis centre.
+    flip = np.einsum('ij,ij->i', centre - v0, face_n) < 0
+    face_n = np.where(flip[:, None], -face_n, face_n)
+
+    # -- over the face --------------------------------------------------
+    best_reach = np.full(count, -np.inf)
+    face_point = np.zeros((count, 3), dtype='d')
+    for sp in caps:
+        height = np.einsum('ij,ij->i', sp - v0, face_n)
+        foot = sp - face_n * height[:, None]
+        near = _closest_points_on_triangles(sp, v0, v1, v2)
+        gap = foot - near
+        # Over the face itself rather than off one of its rims.
+        over = np.einsum('ij,ij->i', gap, gap) <= EPS * EPS
+        reach = r - height
+        take = has_face & over & (reach > 0) & (reach > best_reach)
+        best_reach = np.where(take, reach, best_reach)
+        face_point = np.where(take[:, None], near, face_point)
+    face_hit = best_reach > -np.inf
+
+    # -- off the rim ----------------------------------------------------
+    best_d2 = np.full(count, np.inf)
+    best_sp = np.zeros((count, 3), dtype='d')
+    best_tp = np.zeros((count, 3), dtype='d')
+    for sp in caps:
+        near = _closest_points_on_triangles(sp, v0, v1, v2)
+        delta = sp - near
+        d2 = np.einsum('ij,ij->i', delta, delta)
+        take = d2 < best_d2
+        best_d2 = np.where(take, d2, best_d2)
+        best_sp = np.where(take[:, None], np.broadcast_to(sp, (count, 3)), best_sp)
+        best_tp = np.where(take[:, None], near, best_tp)
+    for e0, e1 in ((v0, v1), (v1, v2), (v2, v0)):
+        on_axis, on_edge = _closest_segments_to_segment(caps[0], caps[1], e0, e1)
+        delta = on_axis - on_edge
+        d2 = np.einsum('ij,ij->i', delta, delta)
+        take = d2 < best_d2
+        best_d2 = np.where(take, d2, best_d2)
+        best_sp = np.where(take[:, None], on_axis, best_sp)
+        best_tp = np.where(take[:, None], on_edge, best_tp)
+
+    distance = np.sqrt(best_d2)
+    apart = distance > EPS
+    # A capsule axis passing exactly through the face has no direction to be
+    # pushed along but the face's own.
+    rim_n = np.where(apart[:, None],
+                     (best_sp - best_tp) / np.where(apart, distance, 1.0)[:, None],
+                     _normalize_rows(face))
+    rim_hit = best_d2 < r * r
+
+    hit = face_hit | rim_hit
+    use_face = face_hit
+    points = np.where(use_face[:, None], face_point, best_tp)
+    normals = np.where(use_face[:, None], face_n, rim_n)
+    depths = np.where(use_face, best_reach, r - distance)
+    return hit, points, normals, depths
+
+
+def _normalize_rows(vectors: np.ndarray) -> np.ndarray:
+    """Each row scaled to unit length; a zero row stays zero."""
+    length = np.linalg.norm(vectors, axis=1)
+    return vectors / np.where(length > EPS, length, 1.0)[:, None]
+
+
+def _closest_points_on_triangles(p: np.ndarray, a: np.ndarray, b: np.ndarray,
+                                 c: np.ndarray) -> np.ndarray:
+    """:func:`_closest_point_on_triangle` for one point against N triangles.
+
+    Ericson's Voronoi-region test with every branch evaluated and selected by
+    mask instead of taken: the regions are mutually exclusive, so computing all
+    seven and choosing costs a constant few array passes where branching per
+    triangle costs a Python round trip per triangle.
+    """
+    ab, ac, ap = b - a, c - a, p - a
+    d1 = np.einsum('ij,ij->i', ab, ap)
+    d2 = np.einsum('ij,ij->i', ac, ap)
+    bp = p - b
+    d3 = np.einsum('ij,ij->i', ab, bp)
+    d4 = np.einsum('ij,ij->i', ac, bp)
+    cp = p - c
+    d5 = np.einsum('ij,ij->i', ab, cp)
+    d6 = np.einsum('ij,ij->i', ac, cp)
+    vc = d1 * d4 - d3 * d2
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+
+    # The regions, tested in the scalar routine's order so the same triangle
+    # falls in the same one; `np.where` is applied in reverse so the earliest
+    # region wins where two masks would both be true on a degenerate triangle.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        on_ab = a + (d1 / (d1 - d3))[:, None] * ab
+        on_ac = a + (d2 / (d2 - d6))[:, None] * ac
+        on_bc = b + ((d4 - d3) / ((d4 - d3) + (d5 - d6)))[:, None] * (c - b)
+        denom = 1.0 / (va + vb + vc)
+        inside = a + ab * (vb * denom)[:, None] + ac * (vc * denom)[:, None]
+
+    found = np.where(np.isfinite(inside), inside, a)
+    found = np.where((((va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0))
+                      & np.all(np.isfinite(on_bc), axis=1))[:, None],
+                     on_bc, found)
+    found = np.where((((vb <= 0) & (d2 >= 0) & (d6 <= 0))
+                      & np.all(np.isfinite(on_ac), axis=1))[:, None],
+                     on_ac, found)
+    found = np.where(((d6 >= 0) & (d5 <= d6))[:, None], c, found)
+    found = np.where((((vc <= 0) & (d1 >= 0) & (d3 <= 0))
+                      & np.all(np.isfinite(on_ab), axis=1))[:, None],
+                     on_ab, found)
+    found = np.where(((d3 >= 0) & (d4 <= d3))[:, None], b, found)
+    found = np.where(((d1 <= 0) & (d2 <= 0))[:, None], a, found)
+    return found
+
+
+def _closest_segments_to_segment(p1: np.ndarray, q1: np.ndarray,
+                                 p2: np.ndarray, q2: np.ndarray
+                                 ) -> Tuple[np.ndarray, np.ndarray]:
+    """:func:`_closest_segment_segment` for one segment against N segments.
+
+    Answers ``(on_the_single, on_each)``, both ``(N,3)``.  The scalar routine's
+    nested branches become masks over the same expressions; the clamped
+    re-solve for ``t`` outside ``[0,1]`` is applied last so it overrides the
+    unclamped answer exactly as the early return does.
+    """
+    count = len(p2)
+    d1 = np.broadcast_to(q1 - p1, (count, 3))
+    d2 = q2 - p2
+    r = p1 - p2
+    aa = np.einsum('ij,ij->i', d1, d1)
+    e = np.einsum('ij,ij->i', d2, d2)
+    f = np.einsum('ij,ij->i', d2, r)
+    cc = np.einsum('ij,ij->i', d1, r)
+    bb = np.einsum('ij,ij->i', d1, d2)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        denom = aa * e - bb * bb
+        s = np.where(denom > EPS,
+                     np.clip((bb * f - cc * e) / np.where(denom > EPS, denom, 1.0),
+                             0.0, 1.0),
+                     0.0)
+        t = (bb * s + f) / np.where(e > EPS, e, 1.0)
+        # t clamped to its interval, with s re-solved for the clamped t.
+        low = t < 0.0
+        high = t > 1.0
+        s = np.where(low, np.clip(-cc / np.where(aa > EPS, aa, 1.0), 0.0, 1.0), s)
+        s = np.where(high, np.clip((bb - cc) / np.where(aa > EPS, aa, 1.0),
+                                   0.0, 1.0), s)
+        t = np.clip(t, 0.0, 1.0)
+        # The degenerate cases the scalar routine returns early for.
+        both_points = (aa <= EPS) & (e <= EPS)
+        axis_point = (aa <= EPS) & (e > EPS)
+        edge_point = (aa > EPS) & (e <= EPS)
+        s = np.where(both_points, 0.0, s)
+        t = np.where(both_points, 0.0, t)
+        s = np.where(axis_point, 0.0, s)
+        t = np.where(axis_point,
+                     np.clip(f / np.where(e > EPS, e, 1.0), 0.0, 1.0), t)
+        t = np.where(edge_point, 0.0, t)
+        s = np.where(edge_point,
+                     np.clip(-cc / np.where(aa > EPS, aa, 1.0), 0.0, 1.0), s)
+    return p1 + d1 * s[:, None], p2 + d2 * t[:, None]
 
 
 def _closest_point_on_triangle(p: np.ndarray, a: np.ndarray, b: np.ndarray,

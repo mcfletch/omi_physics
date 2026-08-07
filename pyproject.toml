@@ -75,6 +75,9 @@ omi_physics = ["*.pyx", "*.pxd", "py.typed"]
 testpaths = ["tests"]
 addopts = "-ra"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "serial: needs a quiet machine (no concurrent CPU load); wall-clock budget checks whose margin shrinks under load. Run them alone with '-m serial' after a '-m \"not serial\"' bulk pass.",
+]
 
 # Prebuilt binary wheels so end users need no compiler; the accelerators are
 # optional (pure-Python/NumPy fallback), so a build without a toolchain still works.

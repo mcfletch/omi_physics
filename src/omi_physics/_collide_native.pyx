@@ -342,3 +342,233 @@ def sphere_box(double[::1] cs, double rs, double[::1] cb, double[:, ::1] Rb, dou
     cdef double wy = cb[1] + Rb[1, 0] * cx + Rb[1, 1] * cy + Rb[1, 2] * cz
     cdef double wz = cb[2] + Rb[2, 0] * cx + Rb[2, 1] * cy + Rb[2, 2] * cz
     return 1, (-nx, -ny, -nz), [(wx, wy, wz)], [depth]
+
+
+# -- capsule vs a batch of triangles ----------------------------------------
+#
+# A faithful port of :func:`omi_physics.collide.capsule_triangle`, run over N
+# triangles in one call. This is the character controller's inner loop: the
+# controller runs three depenetration iterations inside each of four calls a
+# frame, and each iteration asks against every triangle near the capsule. Done
+# from Python that is a round trip per triangle -- around sixty microseconds of
+# numpy dispatch for a few dozen flops -- which is the whole frame at a handful
+# of characters and hopeless at a hundred.
+#
+# Every rule the Python version's docstring explains is kept: the face side is
+# taken from the capsule rather than the winding, face depth is unbounded so
+# something driven deep comes back out, and rim contacts keep the nearest-point
+# direction. `tests/test_collide_batch.py` asserts the two agree triangle for
+# triangle.
+
+cdef void _closest_on_tri(double* p, double* a, double* b, double* c,
+                          double* out) noexcept nogil:
+    """Closest point on triangle abc to p (Ericson's Voronoi-region test)."""
+    cdef double ab[3], ac[3], ap[3], bp[3], cp[3], bc[3]
+    cdef double d1, d2, d3, d4, d5, d6, va, vb, vc, denom, v, w
+    cdef int m
+    for m in range(3):
+        ab[m] = b[m] - a[m]; ac[m] = c[m] - a[m]; ap[m] = p[m] - a[m]
+    d1 = _dot3(ab, ap); d2 = _dot3(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        out[0] = a[0]; out[1] = a[1]; out[2] = a[2]; return
+    for m in range(3):
+        bp[m] = p[m] - b[m]
+    d3 = _dot3(ab, bp); d4 = _dot3(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        out[0] = b[0]; out[1] = b[1]; out[2] = b[2]; return
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        for m in range(3):
+            out[m] = a[m] + v * ab[m]
+        return
+    for m in range(3):
+        cp[m] = p[m] - c[m]
+    d5 = _dot3(ab, cp); d6 = _dot3(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; return
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6)
+        for m in range(3):
+            out[m] = a[m] + w * ac[m]
+        return
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        for m in range(3):
+            bc[m] = c[m] - b[m]
+            out[m] = b[m] + w * bc[m]
+        return
+    denom = 1.0 / (va + vb + vc)
+    v = vb * denom; w = vc * denom
+    for m in range(3):
+        out[m] = a[m] + ab[m] * v + ac[m] * w
+
+
+cdef void _closest_seg_seg(double* p1, double* q1, double* p2, double* q2,
+                           double* out1, double* out2) noexcept nogil:
+    """Closest pair of points between segments p1q1 and p2q2."""
+    cdef double d1[3], d2[3], r[3]
+    cdef double aa, e, f, cc, bb, denom, s, t
+    cdef int m
+    for m in range(3):
+        d1[m] = q1[m] - p1[m]; d2[m] = q2[m] - p2[m]; r[m] = p1[m] - p2[m]
+    aa = _dot3(d1, d1); e = _dot3(d2, d2); f = _dot3(d2, r)
+    if aa <= EPS and e <= EPS:
+        for m in range(3):
+            out1[m] = p1[m]; out2[m] = p2[m]
+        return
+    if aa <= EPS:
+        s = 0.0
+        t = f / e
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    else:
+        cc = _dot3(d1, r)
+        if e <= EPS:
+            t = 0.0
+            s = -cc / aa
+            s = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
+        else:
+            bb = _dot3(d1, d2)
+            denom = aa * e - bb * bb
+            if denom > EPS:
+                s = (bb * f - cc * e) / denom
+                s = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
+            else:
+                s = 0.0
+            t = (bb * s + f) / e
+            if t < 0.0:
+                t = 0.0
+                s = -cc / aa
+                s = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
+            elif t > 1.0:
+                t = 1.0
+                s = (bb - cc) / aa
+                s = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
+    for m in range(3):
+        out1[m] = p1[m] + d1[m] * s
+        out2[m] = p2[m] + d2[m] * t
+
+
+def capsule_triangles(double[::1] cp0, double[::1] cp1, double radius,
+                      double[:, :, ::1] verts,
+                      unsigned char[::1] hit, double[:, ::1] points,
+                      double[:, ::1] normals, double[::1] depths):
+    """Fill ``hit``/``points``/``normals``/``depths`` for every triangle.
+
+    ``verts`` is ``(N, 3, 3)`` -- triangle, vertex, axis. The output arrays are
+    written in place and are the caller's, so a controller reuses one set of
+    buffers across a frame instead of allocating per query.
+    """
+    cdef Py_ssize_t n = verts.shape[0], i
+    cdef double v0[3], v1[3], v2[3], e1[3], e2[3], face[3], fn[3]
+    cdef double sp[3], tp[3], foot[3], centre[3], axis_pt[3], edge_pt[3]
+    cdef double bsp[3], btp[3], bpoint[3]
+    cdef double face_len, height, reach, best_reach, d2, best_d2, dist
+    cdef double gx, gy, gz, nx, ny, nz
+    cdef int m, k, has_face, face_found
+    cdef double* caps[2]
+    cdef double bestpt[3]
+    cdef double c0[3]
+    cdef double c1[3]
+
+    # Copied into C locals so the loop below needs nothing from Python.
+    for m in range(3):
+        c0[m] = cp0[m]
+        c1[m] = cp1[m]
+        centre[m] = (c0[m] + c1[m]) * 0.5
+    caps[0] = c0
+    caps[1] = c1
+
+    with nogil:
+        for i in range(n):
+            for m in range(3):
+                v0[m] = verts[i, 0, m]
+                v1[m] = verts[i, 1, m]
+                v2[m] = verts[i, 2, m]
+                e1[m] = v1[m] - v0[m]
+                e2[m] = v2[m] - v0[m]
+            face[0] = e1[1] * e2[2] - e1[2] * e2[1]
+            face[1] = e1[2] * e2[0] - e1[0] * e2[2]
+            face[2] = e1[0] * e2[1] - e1[1] * e2[0]
+            face_len = sqrt(_dot3(face, face))
+            has_face = 1 if face_len > EPS else 0
+            face_found = 0
+            best_reach = -1e300
+            if has_face:
+                for m in range(3):
+                    fn[m] = face[m] / face_len
+                gx = centre[0] - v0[0]; gy = centre[1] - v0[1]; gz = centre[2] - v0[2]
+                if fn[0] * gx + fn[1] * gy + fn[2] * gz < 0.0:
+                    for m in range(3):
+                        fn[m] = -fn[m]
+                for k in range(2):
+                    for m in range(3):
+                        sp[m] = caps[k][m]
+                    gx = sp[0] - v0[0]; gy = sp[1] - v0[1]; gz = sp[2] - v0[2]
+                    height = fn[0] * gx + fn[1] * gy + fn[2] * gz
+                    for m in range(3):
+                        foot[m] = sp[m] - fn[m] * height
+                    _closest_on_tri(sp, v0, v1, v2, tp)
+                    gx = foot[0] - tp[0]; gy = foot[1] - tp[1]; gz = foot[2] - tp[2]
+                    if gx * gx + gy * gy + gz * gz > EPS * EPS:
+                        continue
+                    reach = radius - height
+                    if reach > 0.0 and reach > best_reach:
+                        best_reach = reach
+                        face_found = 1
+                        for m in range(3):
+                            bestpt[m] = tp[m]
+            if face_found:
+                hit[i] = 1
+                depths[i] = best_reach
+                for m in range(3):
+                    points[i, m] = bestpt[m]
+                    normals[i, m] = fn[m]
+                continue
+
+            best_d2 = 1e300
+            for k in range(2):
+                for m in range(3):
+                    sp[m] = caps[k][m]
+                _closest_on_tri(sp, v0, v1, v2, tp)
+                gx = sp[0] - tp[0]; gy = sp[1] - tp[1]; gz = sp[2] - tp[2]
+                d2 = gx * gx + gy * gy + gz * gz
+                if d2 < best_d2:
+                    best_d2 = d2
+                    for m in range(3):
+                        bsp[m] = sp[m]; btp[m] = tp[m]
+            for k in range(3):
+                if k == 0:
+                    _closest_seg_seg(c0, c1, v0, v1, axis_pt, edge_pt)
+                elif k == 1:
+                    _closest_seg_seg(c0, c1, v1, v2, axis_pt, edge_pt)
+                else:
+                    _closest_seg_seg(c0, c1, v2, v0, axis_pt, edge_pt)
+                gx = axis_pt[0] - edge_pt[0]
+                gy = axis_pt[1] - edge_pt[1]
+                gz = axis_pt[2] - edge_pt[2]
+                d2 = gx * gx + gy * gy + gz * gz
+                if d2 < best_d2:
+                    best_d2 = d2
+                    for m in range(3):
+                        bsp[m] = axis_pt[m]; btp[m] = edge_pt[m]
+            if best_d2 >= radius * radius:
+                hit[i] = 0
+                continue
+            dist = sqrt(best_d2)
+            if dist > EPS:
+                nx = (bsp[0] - btp[0]) / dist
+                ny = (bsp[1] - btp[1]) / dist
+                nz = (bsp[2] - btp[2]) / dist
+            elif face_len > EPS:
+                nx = face[0] / face_len; ny = face[1] / face_len
+                nz = face[2] / face_len
+            else:
+                nx = 0.0; ny = 0.0; nz = 0.0
+            hit[i] = 1
+            depths[i] = radius - dist
+            for m in range(3):
+                points[i, m] = btp[m]
+            normals[i, 0] = nx; normals[i, 1] = ny; normals[i, 2] = nz

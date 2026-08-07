@@ -11,13 +11,14 @@ three calls the narrow phase relies on: ``aabb()`` for the broad-phase box,
 ``center_hint()`` for a representative interior point.  The type aliases
 :data:`SupportProxy` and :data:`Proxy` name these two proxy families for callers.
 """
-from typing import Dict, Iterator, Optional, Tuple, Union, TYPE_CHECKING
-from numpy.typing import ArrayLike
-import numpy as np
+from typing import Iterator, Tuple, Union
 
-from . import mathutil
-from . import model
+import numpy as np
+from numpy.typing import ArrayLike
+
+from . import mathutil, model
 from .mathutil import Vec
+from .trigrid import TriangleGrid
 
 _AABB = Tuple[np.ndarray, np.ndarray]           # (lo, hi) corner pair
 
@@ -167,67 +168,37 @@ class TriangleMeshProxy:
         self.tri_lo = tris.min(axis=1)
         self.tri_hi = tris.max(axis=1)
         # A uniform grid so per-query cost is proportional to the triangles near
-        # the query, not the whole mesh — a full-mesh AABB scan is O(T) and the
+        # the query, not the whole mesh -- a full-mesh AABB scan is O(T) and the
         # character controller queries many times per frame (85k-tri models
-        # otherwise stutter). Only built for meshes large enough to matter.
-        self._grid: Optional[Dict[tuple, np.ndarray]] = None
-        if len(self.indices) > 256:
-            self._build_grid()
-
-    def _build_grid(self, target: int = 64, big_cell_limit: int = 64) -> None:
-        """Bin triangles into a uniform spatial grid; oversized triangles go to a
-        separate always-check list so no cell holds thousands of them."""
-        lo = self.world_pts.min(axis=0)
-        self._grid_lo = lo
-        extent = np.maximum(self.world_pts.max(axis=0) - lo, 1e-9)
-        self._cell = float(extent.max()) / target
-        cmin = np.floor((self.tri_lo - lo) / self._cell).astype(int)
-        cmax = np.floor((self.tri_hi - lo) / self._cell).astype(int)
-        spans = np.prod(cmax - cmin + 1, axis=1)
-        grid: Dict[tuple, list] = {}
-        big = []
-        for t in range(len(self.indices)):
-            if spans[t] > big_cell_limit:       # huge triangle: always-check list
-                big.append(t)
-                continue
-            for i in range(cmin[t, 0], cmax[t, 0] + 1):
-                for j in range(cmin[t, 1], cmax[t, 1] + 1):
-                    for k in range(cmin[t, 2], cmax[t, 2] + 1):
-                        grid.setdefault((i, j, k), []).append(t)
-        self._grid = {key: np.array(v, dtype='i') for key, v in grid.items()}
-        self._big = np.array(big, dtype='i')
+        # otherwise stutter).
+        self._grid = TriangleGrid(self.tri_lo, self.tri_hi)
 
     def _candidate_indices(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
         """Triangle indices whose AABBs may overlap the query box ``[lo, hi]``."""
-        if self._grid is None:
-            return np.nonzero(np.all(self.tri_lo <= hi, axis=1)
-                              & np.all(self.tri_hi >= lo, axis=1))[0]
-        cmin = np.floor((lo - self._grid_lo) / self._cell).astype(int)
-        cmax = np.floor((hi - self._grid_lo) / self._cell).astype(int)
-        parts = []
-        for i in range(cmin[0], cmax[0] + 1):
-            for j in range(cmin[1], cmax[1] + 1):
-                for k in range(cmin[2], cmax[2] + 1):
-                    cell = self._grid.get((i, j, k))
-                    if cell is not None:
-                        parts.append(cell)
-        if len(self._big):
-            parts.append(self._big)
-        if not parts:
-            return np.zeros(0, dtype='i')
-        cand = np.unique(np.concatenate(parts))
-        keep = np.all(self.tri_lo[cand] <= hi, axis=1) & np.all(self.tri_hi[cand] >= lo, axis=1)
-        return cand[keep]
+        return self._grid.box(lo, hi)
 
     def aabb(self) -> _AABB:
         """Axis-aligned bounding box of the whole mesh as ``(lo, hi)``."""
         return self.world_pts.min(axis=0), self.world_pts.max(axis=0)
 
     def triangles_overlapping(self, lo: np.ndarray, hi: np.ndarray) -> 'Iterator[TriangleProxy]':
-        """Yield a :class:`TriangleProxy` for each triangle near the box ``[lo, hi]``."""
+        """Yield a :class:`TriangleProxy` for each triangle near the box ``[lo, hi]``.
+
+        One Python object per candidate, which is why the capsule path uses
+        :meth:`candidate_vertices` instead: a character asks this many times a
+        frame and the proxies are built only to be read once and dropped.
+        """
         for idx in self._candidate_indices(lo, hi):
             i0, i1, i2 = self.indices[idx]
             yield TriangleProxy(self.world_pts[i0], self.world_pts[i1], self.world_pts[i2])
+
+    def candidate_vertices(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        """World vertices of the triangles near ``[lo, hi]``, as ``(N, 3, 3)``.
+
+        The batch narrow phase wants the numbers, not objects wrapping them:
+        one gather instead of a proxy built and discarded per triangle.
+        """
+        return self.world_pts[self.indices[self._candidate_indices(lo, hi)]]
 
     def center_hint(self) -> np.ndarray:
         """A representative interior point (the vertex centroid)."""

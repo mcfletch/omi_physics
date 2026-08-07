@@ -43,6 +43,21 @@ def test_character_seats_on_floor_after_bind():
     assert ch.base()[1] == pytest.approx(0.0, abs=0.05)
 
 
+def test_bind_out_of_reach_of_any_floor_is_not_grounded():
+    """A bind reports the pose it made, never the one it replaced.
+
+    Binding to a viewpoint high above a scene finds no floor within the snap
+    search.  Reporting the capsule as still standing -- because it was, before
+    the bind -- makes callers that ask "is there ground under me?" start it
+    falling out of the shot.
+    """
+    world = floor_world()
+    ch = standing_character(world)
+    assert ch.grounded
+    ch.safe_bind((0, 60.0, 0))
+    assert not ch.grounded
+
+
 def test_speed_tiers_walk_run_sprint():
     walk = walk_distance(*(lambda w: (w, standing_character(w)))(floor_world()), mode='walk')
     run = walk_distance(*(lambda w: (w, standing_character(w)))(floor_world()), mode='run')

@@ -9,7 +9,7 @@ same results. Nothing else in the code changes.
 | Accelerator | Replaces | Used by |
 | --- | --- | --- |
 | `_solver_native.pyx` | sequential-impulse inner loops (constraint prep, warm start, velocity + position iterations) | `solver.py` |
-| `_collide_native.pyx` | SAT box-box (with Sutherland–Hodgman clipping), sphere-sphere, sphere-box | `narrowphase.py` |
+| `_collide_native.pyx` | SAT box-box (with Sutherland–Hodgman clipping), sphere-sphere, sphere-box; **capsule against a batch of triangles** | `narrowphase.py`, `collide.py` |
 
 ## The fallback contract
 
