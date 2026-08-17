@@ -359,6 +359,17 @@ class PhysicsWorld:
         self._free.append(i)
         if i < len(self.bodies):
             self.bodies[i] = None
+        # Anything cached against this slot is about a body that is gone. Left
+        # behind it is both a leak -- a world that streams for an hour keeps
+        # every mesh it ever held -- and, once the slot is handed out again,
+        # an answer about the wrong geometry.
+        self._forget_body(i)
+
+    def _forget_body(self, i: int) -> None:
+        """Drop per-body caches other modules keep on the world."""
+        meshes = getattr(self, '_raycast_meshes', None)
+        if meshes is not None:
+            meshes.pop(i, None)
 
     def _reset_body(self, i: int) -> None:
         """Empty a slot: no collider, no motion, and nowhere the broad phase looks."""

@@ -499,8 +499,10 @@ class _Placed:
     A level is a single trimesh of tens of thousands of triangles that never
     moves, and transforming all of it per cast costs milliseconds — enough that
     a bot checking what it can see would be felt.  What is cached is the pose
-    it was built for, so a body that *does* move rebuilds and one that does not
-    pays once.
+    *and the shape* it was built for, so a body that moves rebuilds, one that
+    does not pays once, and one whose collider was swapped for another —
+    a recycled slot in a streaming world — does not answer with the mesh that
+    used to be there.
     """
 
     __slots__ = (
@@ -511,6 +513,7 @@ class _Placed:
         'low',
         'lows',
         'rotation',
+        'shape',
         'triangles',
     )
 
@@ -518,6 +521,7 @@ class _Placed:
                  rotation: np.ndarray) -> None:
         self.centre = centre.copy()
         self.rotation = rotation.copy()
+        self.shape = shape
         points = np.asarray(shape.points, dtype='d') @ rotation.T + centre
         indices = np.asarray(shape.indices, dtype='i')
         self.triangles = points[indices]
@@ -527,8 +531,10 @@ class _Placed:
         self.high = points.max(axis=0)
         self.grid = TriangleGrid(self.lows, self.highs)
 
-    def matches(self, centre: np.ndarray, rotation: np.ndarray) -> bool:
-        return (np.array_equal(self.centre, centre)
+    def matches(self, shape: Any, centre: np.ndarray,
+                rotation: np.ndarray) -> bool:
+        return (self.shape is shape
+                and np.array_equal(self.centre, centre)
                 and np.array_equal(self.rotation, rotation))
 
 
@@ -546,7 +552,7 @@ def _placed(world: Any, body: int, shape: Any, centre: np.ndarray,
         cache = {}
         world._raycast_meshes = cache
     found = cache.get(body)
-    if found is None or not found.matches(centre, rotation):
+    if found is None or not found.matches(shape, centre, rotation):
         found = _Placed(shape, centre, rotation)
         cache[body] = found
     return found

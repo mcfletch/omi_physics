@@ -266,3 +266,63 @@ class TestEverythingAlongTheRay:
         from omi_physics.raycast import bodies_along
         assert bodies_along(self._stack(), (500.0, 20.0, 0.0), (0, -1, 0),
                             max_distance=40.0) == []
+
+
+class TestASlotThatIsReused:
+    """A streaming world removes the ground behind it and adds the ground in
+    front, and the freed slot is the one the new body lands in. Anything the
+    caster remembered about the old body is then about the wrong mesh."""
+
+    def _patch(self, world, x0):
+        points = np.array([(x0, 0.0, -5.0), (x0 + 10.0, 0.0, -5.0),
+                           (x0, 0.0, 5.0), (x0 + 10.0, 0.0, 5.0)], dtype='d')
+        shape = world.add_shape(model.Shape.trimesh(
+            points, np.array([(0, 1, 2), (1, 3, 2)], dtype='i')))
+        body = world.add_body(model.Motion(type=model.STATIC),
+                              collider=model.Collider(shape=shape))
+        world.refit_aabbs()
+        return body
+
+    def _under(self, world, x):
+        return raycast(world, (x, 10.0, 0.0), (0.0, -1.0, 0.0),
+                       max_distance=40.0)
+
+    def test_the_new_mesh_is_the_one_that_is_hit(self) -> None:
+        world = PhysicsWorld()
+        first = self._patch(world, 0.0)
+        world.remove_body(first)
+        second = self._patch(world, 100.0)
+        assert second == first, "the test needs the slot to be reused"
+        assert self._under(world, 105.0) is not None
+
+    def test_the_old_mesh_is_not(self) -> None:
+        world = PhysicsWorld()
+        world.remove_body(self._patch(world, 0.0))
+        self._patch(world, 100.0)
+        assert self._under(world, 5.0) is None
+
+    def test_it_survives_being_recycled_again_and_again(self) -> None:
+        """What a lap of a streamed circuit does to one slot."""
+        world = PhysicsWorld()
+        body = self._patch(world, 0.0)
+        for step in range(1, 12):
+            world.remove_body(body)
+            body = self._patch(world, step * 100.0)
+            assert self._under(world, step * 100.0 + 5.0) is not None
+
+    def test_a_removed_body_is_forgotten(self) -> None:
+        """Or a world that streams for an hour remembers every mesh it ever
+        held."""
+        world = PhysicsWorld()
+        body = self._patch(world, 0.0)
+        self._under(world, 5.0)
+        world.remove_body(body)
+        assert body not in getattr(world, '_raycast_meshes', {})
+
+    def test_a_bundle_of_rays_sees_the_new_mesh_too(self) -> None:
+        world = PhysicsWorld()
+        world.remove_body(self._patch(world, 0.0))
+        self._patch(world, 100.0)
+        found = raycast_many(world, [(103.0, 10.0, 0.0), (107.0, 10.0, 0.0)],
+                             [(0, -1, 0)] * 2, max_distance=40.0)
+        assert all(hit is not None for hit in found)
