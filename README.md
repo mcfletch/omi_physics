@@ -150,6 +150,7 @@ src/omi_physics/        the engine (importable as omi_physics)
   solver.py             island-parallel sequential-impulse contact solver
   joints.py             point / distance / hinge constraints and motors
   character.py          kinematic character controller
+  vehicle.py            raycast vehicle: suspension, drive, steering
   cookery.py / hull.py  shape cooking (convex hulls, trimeshes)
   omi_gltf.py           read/write OMI physics from glTF documents
   threaded.py           ThreadedSimulation — background-thread stepping

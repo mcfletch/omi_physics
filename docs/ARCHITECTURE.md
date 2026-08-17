@@ -15,6 +15,7 @@ flowchart TD
 
     subgraph api["Public API"]
         W[PhysicsWorld<br/>world.py]
+        V[RaycastVehicle<br/>vehicle.py]
         TS[ThreadedSimulation<br/>threaded.py]
         M[model.py<br/>OMI data model]
         G[omi_gltf.py<br/>glTF read/write]
