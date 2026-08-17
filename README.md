@@ -96,7 +96,26 @@ flowchart LR
 
 The data model is OMI glTF physics (`model.Shape`, `Motion`, `Collider`,
 `Material`, `Joint`, ...), so scenes round-trip to and from glTF documents
-(`omi_physics.omi_gltf`). See [`docs/`](docs/) for a deep dive:
+(`omi_physics.omi_gltf`).
+
+### Driving a car
+
+`RaycastVehicle` is the model every driving game uses: a rigid body with no
+wheels in it, each wheel a ray cast down from where its suspension is mounted,
+a spring pushing the body up off whatever the ray finds, and a patch of friction
+at that point driving, braking and steering. `WheelSpec` says where a wheel is
+and what it is for; `VehicleTuning` says what the pedals and the wheel are worth.
+
+Each wheel also looks a little **above** itself, `VehicleTuning.ground_recovery`
+metres of it. A wheel that only looks down cannot see ground that has come up
+under the car — a lift, a moving platform, a landscape paging in at a finer
+level of detail than the one the car was driving on — and a car that cannot see
+the ground has no grip, no drive and nothing holding it up: it coasts, buried,
+until something else notices. A wheel that finds the ground up there is pushed
+back out on to it at `recovery_speed`, which climbs the car out rather than
+firing it into the air.
+
+See [`docs/`](docs/) for a deep dive:
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, layering, and how
   they fit together.

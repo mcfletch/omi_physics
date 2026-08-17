@@ -41,6 +41,33 @@ def _car(world, position=(0.0, 1.0, 0.0), tuning=None, wheels=None):
                           tuning or VehicleTuning())
 
 
+def _world_with_mesh_floor(height=0.0):
+    """A floor that is a *surface*, as terrain is: no underside to stand on.
+
+    A box has a bottom face, and a car that has fallen through one finds it and
+    settles there -- which is not what a landscape does to a car that has gone
+    under it.
+    """
+    world = PhysicsWorld()
+    half = FLOOR / 2.0
+    points = np.array([(-half, 0.0, -half), (half, 0.0, -half),
+                       (half, 0.0, half), (-half, 0.0, half)], dtype='d')
+    faces = np.array([(0, 1, 2), (0, 2, 3)], dtype='i')
+    shape = world.add_shape(model.Shape.trimesh(points, faces))
+    floor = world.add_body(model.Motion(type=model.STATIC),
+                           collider=model.Collider(shape=shape),
+                           position=(0.0, height, 0.0))
+    return world, floor
+
+
+def _hovering_car(world, position=(0.0, 1.0, 0.0), tuning=None, wheels=None):
+    """A car with no chassis collider: the wheels are all that hold it up."""
+    body = world.add_body(model.Motion(type=model.DYNAMIC, mass=1200.0),
+                          position=position)
+    return RaycastVehicle(world, body, wheels or car_wheels(),
+                          tuning or VehicleTuning())
+
+
 def _settle(world, vehicle, seconds=2.0, **controls):
     for _ in range(int(seconds / STEP)):
         vehicle.control(**controls)
@@ -320,3 +347,71 @@ class TestASingleWheel:
             world.step(STEP)
             settled.append(float(world.position[damped.body][1]))
         assert np.std(settled[-120:]) < np.std(heights[-120:])
+
+
+class TestGroundThatRisesUnderIt:
+    """A wheel looks below itself for the road, so a road that arrives *above*
+    it is a road it cannot see -- and a car that cannot see the ground has no
+    grip, no drive and nothing holding it up. It coasts, buried, until
+    something else notices.
+
+    Ground rises under a car for ordinary reasons: a lift, a moving platform, a
+    landscape paging in at a finer level of detail than the one the car was
+    driving on. Each wheel therefore looks a little above itself as well, and a
+    wheel that finds the ground there is pushed back out on to it.
+    """
+
+    def _buried(self, above_hub=0.2, seconds=2.0, tuning=None):
+        """A car with no chassis collider, so only the wheels can save it.
+
+        A body that overlaps the ground is pushed out by the narrowphase, which
+        would hide whether the wheels found anything -- and a raycast vehicle
+        is meant to work without a chassis collider at all.
+
+        The floor is raised until its surface is above every wheel's hub, which
+        is exactly the case a downward ray cannot see: what a finer tile of a
+        streamed landscape does when it replaces the coarse one the car was on.
+        """
+        world, floor = _world_with_mesh_floor()
+        vehicle = _hovering_car(world, position=(0.0, 1.0, 0.0), tuning=tuning)
+        _settle(world, vehicle, seconds=1.0)
+        surface = max(float(wheel.hub[1]) for wheel in vehicle.wheels) + above_hub
+        world.position[floor] = (0.0, surface, 0.0)
+        world.wake(vehicle.body)
+        _settle(world, vehicle, seconds=seconds)
+        return world, vehicle, surface
+
+    def test_it_ends_up_on_top_of_the_new_ground(self) -> None:
+        world, vehicle, surface = self._buried()
+        assert float(world.position[vehicle.body][1]) > surface
+
+    def test_its_wheels_find_the_ground_again(self) -> None:
+        _world, vehicle, _surface = self._buried()
+        assert all(wheel.grounded for wheel in vehicle.wheels)
+
+    def test_it_can_still_be_driven_afterwards(self) -> None:
+        """The point of getting out: a car with no contact has no grip."""
+        world, vehicle, _surface = self._buried()
+        before = world.position[vehicle.body].copy()
+        _settle(world, vehicle, seconds=2.0, throttle=1.0)
+        assert abs(float(world.position[vehicle.body][2] - before[2])) > 5.0
+
+    def test_ground_further_above_than_it_looks_is_not_found(self) -> None:
+        """A car under a bridge is under a bridge, not hanging from it."""
+        _world, vehicle, _surface = self._buried(above_hub=40.0, seconds=0.5)
+        assert not any(wheel.grounded for wheel in vehicle.wheels)
+
+    def test_the_ordinary_ride_height_is_unchanged(self) -> None:
+        """Looking upwards must not lift a car that was sitting correctly."""
+        world = _world_with_floor()
+        vehicle = _car(world)
+        resting = float(_settle(world, vehicle, seconds=2.0)[1])
+        wheel = vehicle.wheels[0].spec
+        expected = wheel.radius + wheel.suspension_travel
+        assert resting == pytest.approx(expected, abs=0.25)
+
+    def test_how_far_it_looks_is_a_tuning(self) -> None:
+        """Nothing above the wheel is looked at when the recovery is nil."""
+        _world, vehicle, _surface = self._buried(
+            seconds=0.5, tuning=VehicleTuning(ground_recovery=0.0))
+        assert not any(wheel.grounded for wheel in vehicle.wheels)

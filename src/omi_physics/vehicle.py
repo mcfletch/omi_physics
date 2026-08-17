@@ -105,6 +105,24 @@ class VehicleTuning:
     #: Steering lock falls off with speed, or a car twitches out of control at
     #: the top end. This is the speed, in m/s, at which the lock has halved.
     steer_falloff_speed: float = 30.0
+    #: How far *above* each wheel the ground is still looked for, in metres.
+    #:
+    #: A wheel looks below itself for the road, so a road that arrives above it
+    #: is a road it cannot see -- and a car that cannot see the ground has no
+    #: grip, no drive and nothing holding it up. It coasts, buried, until
+    #: something else notices. Ground rises under a car for ordinary reasons: a
+    #: lift, a moving platform, a landscape paging in at a finer level of detail
+    #: than the one the car was driving on. A wheel that finds the ground within
+    #: this distance above itself is pushed back out on to it. Set it to 0 for a
+    #: vehicle that should fall through anything it ends up under.
+    ground_recovery: float = 1.0
+    #: How fast the suspension may push a buried wheel back out, in m/s.
+    #:
+    #: A spring at full compression for as long as the wheel is under the
+    #: ground fires a swallowed car into the air rather than setting it back on
+    #: the road. While a wheel is buried the load is capped to what lifts the
+    #: car at this speed and no faster, so it climbs out.
+    recovery_speed: float = 2.0
 
 
 @dataclass
@@ -132,6 +150,10 @@ class Wheel:
     #: Sideways speed at the contact patch, in m/s: how much the tyre is
     #: scrubbing rather than rolling.
     slip: float = 0.0
+    #: How far the suspension is pushed *past* the end of its travel, in
+    #: metres: how deep the car is in the ground. Zero for a wheel that is
+    #: where a wheel can be.
+    bottomed: float = 0.0
 
     def centre(self) -> np.ndarray:
         """Where the wheel itself is, for something that wants to draw it."""
@@ -282,21 +304,34 @@ class RaycastVehicle:
 
     def _cast(self, wheel: Wheel, rotation: np.ndarray,
               centre: np.ndarray) -> None:
-        """Find the ground under one wheel, or report it hanging."""
+        """Find the ground under one wheel, or report it hanging.
+
+        The ray starts ``ground_recovery`` metres *above* the hub rather than at
+        it, so ground that has come up under the car -- see
+        :attr:`VehicleTuning.ground_recovery` -- is still found and the
+        suspension pushes the wheel back out on to it. Compression is measured
+        from the hub as it always was, and capped at full travel, so the
+        recovery is a firm shove rather than an unbounded one.
+        """
         spec = wheel.spec
         wheel.hub = centre + rotation @ np.asarray(spec.position, dtype='d')
-        down = -(rotation @ UP)
+        up = rotation @ UP
+        down = -up
         reach = spec.suspension_travel + spec.radius
-        hit = raycast(self.world, wheel.hub, down, max_distance=reach,
-                      skip=(self.body,))
+        overhead = max(0.0, self.tuning.ground_recovery)
+        hit = raycast(self.world, wheel.hub + up * overhead, down,
+                      max_distance=reach + overhead, skip=(self.body,))
         if hit is None:
             wheel.grounded = False
             wheel.compression = 0.0
+            wheel.bottomed = 0.0
             return
         wheel.grounded = True
         wheel.contact = np.asarray(hit.point, dtype='d')
         wheel.normal = np.asarray(hit.normal, dtype='d')
-        wheel.compression = max(0.0, reach - float(hit.distance))
+        squash = max(0.0, reach - (float(hit.distance) - overhead))
+        wheel.compression = min(spec.suspension_travel, squash)
+        wheel.bottomed = squash - wheel.compression
 
     def _suspend(self, wheel: Wheel, dt: float, mass: float,
                  gravity: float) -> None:
@@ -313,6 +348,13 @@ class RaycastVehicle:
                  - spec.suspension_damping * critical * speed_along_normal)
         # A spring pushes, never pulls: a wheel at full droop lets the car fall.
         wheel.load = max(0.0, force)
+        if wheel.bottomed > 0.0:
+            # The suspension has run out of travel and the car is in the
+            # ground. Climbing out of it, not bouncing off it: the load is
+            # whatever lifts the car at the recovery speed, and no more.
+            allowed = self.tuning.recovery_speed - speed_along_normal
+            wheel.load = min(wheel.load, max(
+                0.0, share * allowed / max(dt, 1e-9)))
         self._impulse(wheel.contact, normal * (wheel.load * dt))
 
     def _drive(self, wheel: Wheel, dt: float, rotation: np.ndarray, mass: float,
