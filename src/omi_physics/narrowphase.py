@@ -9,7 +9,7 @@ go straight to the native contact generator over batched rotation matrices.
 from typing import Dict, List, Tuple, TYPE_CHECKING
 import numpy as np
 
-from .body import make_proxy, Proxy
+from .body import make_proxy, pose_key, Proxy
 from . import collide
 from .mathutil import quat_to_matrix
 from ._accel import accelerators_disabled
@@ -31,7 +31,15 @@ _BOX = 2
 
 
 class NarrowPhase:
-    """Turns broad-phase body-index pairs into contact manifolds, caching proxies per step."""
+    """Turns broad-phase body-index pairs into contact manifolds, caching proxies.
+
+    A proxy is the shape in world space, which for a triangle mesh means every
+    vertex transformed and the result indexed -- thousands of triangles for one
+    terrain tile. **A body that has not moved keeps its proxy**, so a landscape
+    of static tiles is built once rather than once per step, and a game holding
+    a dozen of them resident pays for the one body that is actually driving
+    around on them.
+    """
 
     def __init__(self) -> None:
         """Start with an empty proxy cache and no step recorded."""
@@ -39,14 +47,23 @@ class NarrowPhase:
         self._stamp = -1
 
     def _proxy(self, world: "PhysicsWorld", i: int) -> Proxy:
-        """World-space collider proxy for body ``i``, rebuilt only when the step stamp changes."""
+        """World-space collider proxy for body ``i``.
+
+        Rebuilt when the step changes *and* the body has moved since the proxy
+        was made, or when it is a different shape than it was.
+        """
+        shape_index = int(world.collider_shape[i])
+        pose = pose_key(world.position[i], world.orientation[i])
         entry = self._proxy_cache.get(i)
-        if entry is None or entry[0] != self._stamp:
-            shape = world.shapes[world.collider_shape[i]]
-            proxy = make_proxy(shape, world.position[i], world.orientation[i])
-            self._proxy_cache[i] = (self._stamp, proxy)
-            return proxy
-        return entry[1]
+        if entry is not None:
+            stamp, proxy, cached_pose, cached_shape = entry
+            if stamp == self._stamp or (cached_pose == pose
+                                        and cached_shape == shape_index):
+                return proxy
+        proxy = make_proxy(world.shapes[shape_index], world.position[i],
+                           world.orientation[i])
+        self._proxy_cache[i] = (self._stamp, proxy, pose, shape_index)
+        return proxy
 
     def generate(self, world: "PhysicsWorld",
                  pairs: List[Tuple[int, int]]) -> "List[Contact]":

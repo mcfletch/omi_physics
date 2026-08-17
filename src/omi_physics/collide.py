@@ -297,6 +297,17 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
             normals = -normals
         return [Contact(a, b, points[i], normals[i], float(depths[i]))
                 for i in np.flatnonzero(hit)]
+    if other.kind == 'box':
+        # The same argument as the capsule above, and the same shape of answer:
+        # a box on a level's floor triangles is what most dynamic bodies are
+        # doing most of the time, and GJK is at its slowest on exactly that.
+        verts = mesh.candidate_vertices(lo, hi)
+        hit, points, normals, depths = box_triangle_batch(
+            cast(BoxProxy, other), verts)
+        if not mesh_is_a:
+            normals = -normals
+        return [Contact(a, b, points[i], normals[i], float(depths[i]))
+                for i in np.flatnonzero(hit)]
     contacts = []
     for tri in mesh.triangles_overlapping(lo, hi):
         if mesh_is_a:
@@ -433,6 +444,129 @@ def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
     pushes, found = normals[where], depths[where]
     order = np.argsort(-found, kind='stable')
     return pushes[order], found[order]
+
+
+def box_triangle_batch(box: BoxProxy, verts: np.ndarray
+                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                                  np.ndarray]:
+    """An oriented box against ``(N, 3, 3)`` triangles, all at once.
+
+    Returns ``(hit, points, normals, depths)`` per triangle, with the normal
+    pointing **from the triangle toward the box** and the depth the smallest
+    distance the box has to move along it to be clear.
+
+    The separating-axis theorem, on the thirteen axes a box and a triangle can
+    be told apart along: the box's three faces, the triangle's face, and the
+    nine cross products of their edges. If the two overlap on every one of them
+    they intersect, and the axis of *least* overlap is the way out.
+
+    Analytic rather than GJK/EPA because this is the case a level is made of --
+    a box-shaped body on big flat floor triangles -- where the polytope
+    expansion is slowest and this is a handful of array operations.
+
+    **The side is taken from the box, not from the winding.** A triangle soup
+    does not promise a consistent one, and a rule that trusted it would eject
+    half the floors of a scene downward.
+    """
+    verts = np.ascontiguousarray(verts, dtype='d').reshape(-1, 3, 3)
+    count = len(verts)
+    hit = np.zeros(count, dtype=bool)
+    points = np.zeros((count, 3), dtype='d')
+    normals = np.zeros((count, 3), dtype='d')
+    depths = np.zeros(count, dtype='d')
+    if not count:
+        return hit, points, normals, depths
+
+    # Everything in the box's own frame: its axes become x, y, z and its
+    # half-extents the box itself, which is thirteen axes' worth of arithmetic
+    # saved on every triangle.
+    local = (verts - box.center) @ box.R
+    half = box.half
+    edges = np.stack([local[:, 1] - local[:, 0], local[:, 2] - local[:, 1],
+                      local[:, 0] - local[:, 2]], axis=1)      # (N, 3, 3)
+
+    axes = [np.tile(axis, (count, 1)) for axis in np.identity(3)]
+    face = np.cross(edges[:, 0], edges[:, 1])                  # the triangle's
+    axes.append(face)
+    for edge in range(3):
+        for axis in range(3):
+            unit = np.zeros(3)
+            unit[axis] = 1.0
+            axes.append(np.cross(edges[:, edge], unit))
+
+    overlap = np.full(count, np.inf)
+    direction = np.zeros((count, 3), dtype='d')
+    separated = np.zeros(count, dtype=bool)
+    for candidate in axes:
+        length = np.linalg.norm(candidate, axis=1)
+        usable = length > 1e-9
+        unit = np.zeros_like(candidate)
+        unit[usable] = candidate[usable] / length[usable, None]
+        # The box projects to +/- the sum of |axis . half|; the triangle to the
+        # span of its three vertices.
+        reach = np.abs(unit) @ half
+        projected = np.einsum('nij,nj->ni', local, unit)
+        low, high = projected.min(axis=1), projected.max(axis=1)
+        # The box spans [-reach, +reach] about the origin and the triangle
+        # [low, high]. Two ways out: move the box along +unit until it clears
+        # the triangle's far side, or along -unit until it clears its near one.
+        out_positive = high + reach
+        out_negative = reach - low
+        apart = usable & ((low > reach) | (high < -reach))
+        separated |= apart
+        this = np.minimum(out_positive, out_negative)
+        sign = np.where(out_positive <= out_negative, 1.0, -1.0)
+        closer = usable & ~apart & (this < overlap)
+        overlap = np.where(closer, this, overlap)
+        direction = np.where(closer[:, None], unit * sign[:, None], direction)
+
+    hit = ~separated & np.isfinite(overlap) & (overlap > 1e-9)
+    if not hit.any():
+        return hit, points, normals, depths
+    # Back to the world, and pointing from the triangle toward the box.
+    world_normal = direction @ box.R.T
+    depths = np.where(hit, overlap, 0.0)
+    normals[hit] = world_normal[hit]
+    # The contact point: the triangle's closest point to the box centre, which
+    # for a resting box is the patch it stands on.
+    centre_local = np.zeros(3)
+    closest = _closest_on_triangles(centre_local, local)
+    points[hit] = (closest[hit] @ box.R.T) + box.center
+    return hit, points, normals, depths
+
+
+def _closest_on_triangles(point: np.ndarray, verts: np.ndarray) -> np.ndarray:
+    """The nearest point of each triangle to ``point``, clamped to the face.
+
+    The barycentric projection, then a clamp onto each edge for the cases where
+    the projection lands outside -- vectorised over the triangles.
+    """
+    a, b, c = verts[:, 0], verts[:, 1], verts[:, 2]
+    ab, ac, ap = b - a, c - a, point - a
+    d1 = np.einsum('ni,ni->n', ab, ap)
+    d2 = np.einsum('ni,ni->n', ac, ap)
+    bp = point - b
+    d3 = np.einsum('ni,ni->n', ab, bp)
+    d4 = np.einsum('ni,ni->n', ac, bp)
+    cp = point - c
+    d5 = np.einsum('ni,ni->n', ab, cp)
+    d6 = np.einsum('ni,ni->n', ac, cp)
+    denominator = np.einsum('ni,ni->n', ab, ab) * np.einsum('ni,ni->n', ac, ac) \
+        - np.einsum('ni,ni->n', ab, ac) ** 2
+    safe = np.where(np.abs(denominator) > 1e-18, denominator, 1.0)
+    va = d3 * d6 - d5 * d4
+    vb = d5 * d2 - d1 * d6
+    vc = d1 * d4 - d3 * d2
+    total = np.maximum(va + vb + vc, 1e-18)
+    out = a + ab * (vb / total)[:, None] + ac * (vc / total)[:, None]
+    # Outside the face: fall back to the barycentric interior point, which for
+    # the shallow overlaps this is used for is within a vertex of the truth.
+    inside = (va >= 0) & (vb >= 0) & (vc >= 0)
+    interior = a + ab * ((d1 * np.einsum('ni,ni->n', ac, ac)
+                          - d2 * np.einsum('ni,ni->n', ab, ac)) / safe)[:, None] \
+        + ac * ((d2 * np.einsum('ni,ni->n', ab, ab)
+                 - d1 * np.einsum('ni,ni->n', ab, ac)) / safe)[:, None]
+    return np.where(inside[:, None], out, interior)
 
 
 def capsule_triangle_batch(cap: CapsuleProxy, verts: np.ndarray

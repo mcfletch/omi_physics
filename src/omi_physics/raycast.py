@@ -6,8 +6,13 @@ lives here rather than being written twice in a game.
 
 **What matters is the nearest hit, not any hit.** A cast that returns the first
 body it happens to test shoots straight through walls, and the whole of the
-structure below — a cheap AABB reject, then an exact test, then keeping the
-closest — exists for that.
+structure below — reject by bounding box, test the survivors exactly nearest
+first, keep the closest — exists for that.
+
+**The rejection is done for the whole world at once**, as a slab test over the
+world's own AABB arrays. A streamed landscape holds hundreds of static
+colliders and a vehicle casts a ray per wheel per step; a Python loop over the
+bodies costs more than the exact tests it is there to avoid.
 
 Shapes are tested exactly: a sphere analytically, a box in its own frame, a
 capsule as a segment, a trimesh triangle by triangle through the proxy's own
@@ -96,7 +101,7 @@ def raycast(world: Any, origin: Vec, direction: Vec,
     ignored = set(skip)
     nearest: RayHit | None = None
     limit = float(max_distance)
-    for body in _castable(world, ignored):
+    for body in _castable(world, ignored, start, heading, limit):
         found = _hit_body(world, body, start, heading, limit)
         if found is not None and (nearest is None or found.distance < nearest.distance):
             nearest = found
@@ -141,12 +146,73 @@ def unsupported_shapes(world: Any) -> set[str]:
     return found
 
 
-def _castable(world: Any, ignored: set[int]) -> Iterable[int]:
-    """Every body worth testing: it has a collider, and is not being skipped."""
-    for body in range(world.body_count):
-        if body in ignored or int(world.collider_shape[body]) < 0:
-            continue
-        yield body
+def _castable(world: Any, ignored: set[int], origin: np.ndarray,
+              heading: np.ndarray, limit: float) -> Iterable[int]:
+    """The bodies worth testing exactly, nearest first.
+
+    A body is worth testing when it has a collider, is not being skipped, and
+    the ray's segment crosses its world bounding box. **The box test is done
+    for every body at once**, as a slab test over the world's own AABB arrays:
+    a streamed landscape holds hundreds of static colliders and a vehicle casts
+    a ray per wheel per step, so a Python loop over the bodies is the frame.
+
+    Nearest first, because the caller shrinks its reach with every hit and the
+    sooner it finds the near one the fewer of the far ones it tests.
+
+    The boxes are the world's own: :meth:`~omi_physics.world.PhysicsWorld.step`
+    maintains them and :meth:`~omi_physics.world.PhysicsWorld.add_body` fits a
+    new body as it arrives, so a world that has been built but never stepped is
+    still castable. A body moved by writing its position directly keeps the box
+    it had until the next refit, exactly as it does for collision.
+    """
+    count = int(world.body_count)
+    if not count:                                # pragma: no cover - empty world
+        return ()
+    shapes = np.asarray(world.collider_shape[:count])
+    live = shapes >= 0
+    if ignored:
+        live[np.fromiter(ignored, dtype=int, count=len(ignored))] = False
+    if not live.any():
+        return ()
+    entry = _slab_entry(world, origin, heading, limit, live)
+    order = np.nonzero(live)[0]
+    return order[np.argsort(entry[order], kind='stable')].tolist()
+
+
+def _slab_entry(world: Any, origin: np.ndarray, heading: np.ndarray,
+                limit: float, live: np.ndarray) -> np.ndarray:
+    """Where the ray enters each body's box, with a miss marked as infinite.
+
+    The standard slab test, vectorised over every body. A body whose box the
+    ray misses is dropped from ``live`` in place, so the caller is left with
+    the ones worth an exact test.
+    """
+    count = len(live)
+    low = np.asarray(world.aabb_min[:count], dtype='d')
+    high = np.asarray(world.aabb_max[:count], dtype='d')
+    # A box has to be finite, the right way round, and have some size in it.
+    # A world that has never been stepped has all-zero boxes, and believing
+    # those would make a cast miss everything in it.
+    fitted = np.all(np.isfinite(low), axis=1) & np.all(np.isfinite(high), axis=1)
+    fitted &= np.all(high >= low, axis=1) & np.any(high > low, axis=1)
+    # A box that is not a box tells the cast nothing, so the body behind it is
+    # tested exactly rather than skipped.
+    unknown = live & ~fitted
+    with np.errstate(divide='ignore', invalid='ignore'):
+        inverse = 1.0 / heading
+        near = (low - origin) * inverse
+        far = (high - origin) * inverse
+    lower = np.minimum(near, far).max(axis=1)
+    upper = np.maximum(near, far).min(axis=1)
+    # NaN appears where a component of the heading is zero and the origin is
+    # exactly on a face; treating it as a hit keeps a grazing ray honest.
+    lower = np.nan_to_num(lower, nan=0.0)
+    upper = np.nan_to_num(upper, nan=limit)
+    crosses = (upper >= np.maximum(lower, 0.0)) & (lower <= limit)
+    live &= (crosses & fitted) | unknown
+    entry = np.where(lower > 0.0, lower, 0.0)
+    entry[unknown] = 0.0
+    return entry
 
 
 def _hit_body(world: Any, body: int, origin: np.ndarray, heading: np.ndarray,

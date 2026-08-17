@@ -239,5 +239,33 @@ def make_proxy(shape: 'model.Shape', position: ArrayLike,
 
 def world_aabb(shape: 'model.Shape', position: ArrayLike,
                orientation: ArrayLike) -> _AABB:
-    """Axis-aligned bounding box of ``shape`` at the given pose, as ``(lo, hi)``."""
+    """Axis-aligned bounding box of ``shape`` at the given pose, as ``(lo, hi)``.
+
+    A mesh is measured from its points rather than through a proxy: building
+    one indexes the whole mesh into a spatial grid, which is worth doing for a
+    body that is about to be *collided* and pure waste for one that is only
+    being measured. A streaming world measures a tile the moment it arrives.
+    """
+    kind = str(shape.type)
+    if kind in ('trimesh', 'convex') and shape.points is not None:
+        points = np.asarray(shape.points, dtype='d')
+        if len(points):
+            rotation = mathutil.quat_to_matrix(np.asarray(orientation, dtype='d'))
+            placed = points @ rotation.T + np.asarray(position, dtype='d')
+            return placed.min(axis=0), placed.max(axis=0)
     return make_proxy(shape, position, orientation).aabb()
+
+
+def pose_key(position: ArrayLike, orientation: ArrayLike) -> tuple:
+    """A hashable stand-in for a pose, for caching what depends on one.
+
+    Seven floats compared is nothing beside building a proxy for a mesh of
+    thousands of triangles, and it is the honest test: a body that has not
+    moved keeps its proxy, whatever kind of body it says it is. Keying on the
+    motion type instead would go wrong the moment a caller repositions a static
+    body, which is a normal thing to do to a level.
+    """
+    p = np.asarray(position, dtype='d')
+    q = np.asarray(orientation, dtype='d')
+    return (float(p[0]), float(p[1]), float(p[2]),
+            float(q[0]), float(q[1]), float(q[2]), float(q[3]))

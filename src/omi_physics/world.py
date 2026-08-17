@@ -35,6 +35,9 @@ class PhysicsWorld:
                  gpu_threshold: int = 10000) -> None:
         self.gravity = gravity if gravity is not None else model.Gravity()
         self.gravity_volumes: List[Any] = []
+        #: Exact AABBs of the shapes that need a proxy to measure, against the
+        #: pose each was measured at. See :meth:`refit_aabbs`.
+        self._aabb_cache: Dict[int, tuple] = {}
         self.fixed_dt = fixed_dt
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
@@ -59,6 +62,10 @@ class PhysicsWorld:
 
         self._n = 0
         self._cap = 0
+        #: Slots whose body has been removed, ready for the next one. A
+        #: streaming world adds and removes a body per tile for as long as it
+        #: runs, and without reuse the arrays only ever grow.
+        self._free: List[int] = []
         self._accumulator = 0.0
         self.time = 0.0
         self.bodies: List[Any] = []            # optional per-index user handle
@@ -264,10 +271,14 @@ class PhysicsWorld:
         """
         if motion is None:
             motion = model.Motion()
-        if self._n >= self._cap:
-            self._grow()
-        i = self._n
-        self._n += 1
+        if self._free:
+            i = self._free.pop()
+            self._reset_body(i)
+        else:
+            if self._n >= self._cap:
+                self._grow()
+            i = self._n
+            self._n += 1
 
         self._position[i] = position
         self._prev_position[i] = position
@@ -295,8 +306,78 @@ class PhysicsWorld:
             self._collision = self._collision or _CollisionStages()
 
         self._set_mass_properties(i, motion, shape)
-        self.bodies.append(handle)
+        while len(self.bodies) <= i:
+            self.bodies.append(None)
+        self.bodies[i] = handle
+        self._fit_body(i)
         return i
+
+    def _fit_body(self, i: int, margin: float = 0.05) -> None:
+        """Give one body its world AABB, without refitting the rest.
+
+        A body arrives with a box, so a world that has been built but never
+        stepped can still be culled against and cast at. The alternative --
+        boxes that are all zero until the first step -- makes a query before
+        that step quietly answer nothing.
+        """
+        from .body import world_aabb
+        shape_index = int(self._collider_shape[i])
+        if shape_index < 0:
+            shape_index = int(self._trigger_shape[i])
+        if shape_index < 0:
+            self._aabb_min[i] = self._position[i]
+            self._aabb_max[i] = self._position[i]
+            return
+        lo, hi = world_aabb(self.shapes[shape_index], self._position[i],
+                            self._orientation[i])
+        self._aabb_min[i] = lo - margin
+        self._aabb_max[i] = hi + margin
+
+    def remove_body(self, i: int) -> None:
+        """Take body ``i`` out of the world, freeing its slot for the next one.
+
+        What a streaming world does with the ground behind it. The body stops
+        colliding, stops moving and stops being found by a ray, and the slot is
+        handed to the next :meth:`add_body`.
+
+        **The index is not renumbered, and it is not yours afterwards.** Other
+        code holds body indices as handles; compacting the arrays would
+        renumber every body above this one and invalidate all of those at once,
+        so the slot is emptied in place. A caller that keeps using the index
+        after removing it is talking about whatever body was put there next.
+        """
+        if not 0 <= i < self._n:
+            raise IndexError("no body %r to remove" % (i,))
+        if i in self._free:
+            return
+        self._reset_body(i)
+        self._free.append(i)
+        if i < len(self.bodies):
+            self.bodies[i] = None
+
+    def _reset_body(self, i: int) -> None:
+        """Empty a slot: no collider, no motion, and nowhere the broad phase looks."""
+        self._collider_shape[i] = -1
+        self._collider_material[i] = -1
+        self._collider_filter[i] = -1
+        self._trigger_shape[i] = -1
+        self._motion_type[i] = _TYPE_INT[model.STATIC]
+        self._linear_velocity[i] = 0.0
+        self._angular_velocity[i] = 0.0
+        self._inv_mass[i] = 0.0
+        self._mass[i] = 0.0
+        self._inv_inertia[i] = 0.0
+        self._awake[i] = False
+        self._sleep_timer[i] = 0.0
+        self._island[i] = -1
+        # An AABB that overlaps nothing, so the broad phase never pairs it and
+        # a refit that skips empty slots leaves it that way.
+        self._aabb_min[i] = np.inf
+        self._aabb_max[i] = -np.inf
+        self._aabb_cache.pop(i, None)
+        # The refit cache is keyed by body count and shape, and this slot's
+        # shape has changed; rebuilding it is what makes the emptiness stick.
+        self._refit_cache_n = -1
 
     def _set_mass_properties(self, i: int, motion: model.Motion,
                              shape: Optional[model.Shape]) -> None:
@@ -498,12 +579,23 @@ class PhysicsWorld:
             self._aabb_max[i] = self._position[i]
         other = np.where(kind == self._RFIT_OTHER)[0]
         if len(other):
-            from .body import world_aabb
+            # The exact AABB of a capsule, cylinder, hull or mesh means building
+            # its world proxy, which for a terrain tile is thousands of
+            # triangles. It cannot have changed if the body has not moved, so it
+            # is remembered against the pose it was measured at.
+            from .body import pose_key, world_aabb
+            cache = self._aabb_cache
             for i in other:
                 si = int(self._collider_shape[i])
                 idx = si if si >= 0 else int(self._trigger_shape[i])
-                lo, hi = world_aabb(self.shapes[idx], self._position[i],
-                                    self._orientation[i])
+                key = (idx,) + pose_key(self._position[i], self._orientation[i])
+                found = cache.get(i)
+                if found is None or found[0] != key:
+                    lo, hi = world_aabb(self.shapes[idx], self._position[i],
+                                        self._orientation[i])
+                    cache[i] = (key, lo, hi)
+                else:
+                    lo, hi = found[1], found[2]
                 self._aabb_min[i] = lo - margin
                 self._aabb_max[i] = hi + margin
 
