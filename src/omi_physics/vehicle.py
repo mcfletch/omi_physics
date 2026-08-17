@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -40,7 +40,8 @@ from . import mathutil
 from .mathutil import Vec
 from .raycast import raycast_many
 
-__all__ = ['RaycastVehicle', 'VehicleTuning', 'Wheel', 'WheelSpec', 'car_wheels']
+__all__ = ['RaycastVehicle', 'Surface', 'TARMAC', 'VehicleTuning', 'Wheel',
+           'WheelSpec', 'car_wheels']
 
 UP = np.array([0.0, 1.0, 0.0])
 FORWARD = np.array([0.0, 0.0, -1.0])
@@ -125,6 +126,28 @@ class VehicleTuning:
     recovery_speed: float = 2.0
 
 
+@dataclass(frozen=True)
+class Surface:
+    """What a wheel is on, as the two numbers a tyre feels.
+
+    Tarmac, gravel, wet grass and mud are the same tyre on different ground.
+    ``grip`` scales the friction there is to steer and drive with, and
+    ``rolling`` is the resistance to rolling over it, as a fraction of the load
+    the wheel is carrying -- so soft going loses the corner *and then* bogs the
+    car down, which is what leaving a road for a field feels like.
+
+    The vehicle has no opinion about what it is on: whatever knows where the
+    road is sets it, on the car or on a wheel.
+    """
+
+    grip: float = 1.0
+    rolling: float = 0.0
+
+
+#: Firm, dry, and what a car is on unless something says otherwise.
+TARMAC = Surface()
+
+
 @dataclass
 class Wheel:
     """One wheel's state, refreshed every update -- the vehicle's read-out.
@@ -154,6 +177,18 @@ class Wheel:
     #: metres: how deep the car is in the ground. Zero for a wheel that is
     #: where a wheel can be.
     bottomed: float = 0.0
+    #: What *this* wheel is on, when it is not what the car is on. Two wheels
+    #: on the verge is the usual way of finding out about the verge.
+    on: "Optional[Surface]" = None
+    #: What the car is on, shared; set by the vehicle when the wheel is made.
+    _car_surface: "Optional[Callable[[], Surface]]" = field(
+        default=None, repr=False)
+
+    def surface(self) -> Surface:
+        """The ground this wheel is on: its own, or the car's."""
+        if self.on is not None:
+            return self.on
+        return self._car_surface() if self._car_surface is not None else TARMAC
 
     def centre(self) -> np.ndarray:
         """Where the wheel itself is, for something that wants to draw it."""
@@ -206,7 +241,12 @@ class RaycastVehicle:
         self.world = world
         self.body = int(body)
         self.tuning = tuning or VehicleTuning()
-        self.wheels = [Wheel(spec=spec) for spec in wheels]
+        #: What the car as a whole is on. A wheel with no surface of its own
+        #: takes this, so a game that knows only "the car is on grass" says it
+        #: once.
+        self.surface = TARMAC
+        self.wheels = [Wheel(spec=spec, _car_surface=lambda: self.surface)
+                       for spec in wheels]
         self.throttle = 0.0
         self.brake = 0.0
         self.steer = 0.0
@@ -397,13 +437,18 @@ class RaycastVehicle:
             # Brake to a stop, not backwards through it.
             drive -= _clamp(stopping * math.copysign(1.0, along), -abs(along) *
                             mass / max(dt, 1e-6), abs(along) * mass / max(dt, 1e-6))
-        drive -= self.tuning.rolling_resistance * wheel.load * math.copysign(
+        # Rolling resistance: the road's own, plus whatever the ground under
+        # this wheel adds. Soft going is mostly this.
+        on = wheel.surface()
+        rolling = self.tuning.rolling_resistance + on.rolling
+        drive -= rolling * wheel.load * math.copysign(
             1.0, along) if abs(along) > CREEPING else 0.0
 
         # The sideways force needed to stop the tyre scrubbing this step, and
-        # the longitudinal force asked of it, share one friction budget.
+        # the longitudinal force asked of it, share one friction budget -- which
+        # is what the ground under the wheel has to offer.
         grip_force = -across * mass / max(1, len(self.wheels)) / max(dt, 1e-6)
-        budget = spec.grip * max(wheel.load, 0.0)
+        budget = spec.grip * on.grip * max(wheel.load, 0.0)
         combined = math.hypot(drive, grip_force)
         if combined > budget > 0.0:
             scale = budget / combined
