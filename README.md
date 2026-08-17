@@ -106,6 +106,11 @@ a spring pushing the body up off whatever the ray finds, and a patch of friction
 at that point driving, braking and steering. `WheelSpec` says where a wheel is
 and what it is for; `VehicleTuning` says what the pedals and the wheel are worth.
 
+The four wheels are cast **together**. They all look at very nearly the same
+piece of the world, so `raycast_many` decides which bodies are worth testing
+once and asks a landscape's mesh once for the triangles near all four rather
+than once per wheel; on a streamed world that is most of a physics step.
+
 Each wheel also looks a little **above** itself, `VehicleTuning.ground_recovery`
 metres of it. A wheel that only looks down cannot see ground that has come up
 under the car — a lift, a moving platform, a landscape paging in at a finer

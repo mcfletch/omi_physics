@@ -35,9 +35,14 @@ class PhysicsWorld:
                  gpu_threshold: int = 10000) -> None:
         self.gravity = gravity if gravity is not None else model.Gravity()
         self.gravity_volumes: List[Any] = []
-        #: Exact AABBs of the shapes that need a proxy to measure, against the
-        #: pose each was measured at. See :meth:`refit_aabbs`.
+        #: Exact AABBs of the shapes that need a proxy to measure, and the pose
+        #: each was measured at, so a body that has not moved is not measured
+        #: again -- nor even asked. See :meth:`_refit_measured`.
         self._aabb_cache: Dict[int, tuple] = {}
+        self._refit_lo: np.ndarray = np.zeros((0, 3), dtype='d')
+        self._refit_hi: np.ndarray = np.zeros((0, 3), dtype='d')
+        self._refit_pose: np.ndarray = np.zeros((0, 3), dtype='d')
+        self._refit_quat: np.ndarray = np.zeros((0, 4), dtype='d')
         self.fixed_dt = fixed_dt
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
@@ -375,6 +380,11 @@ class PhysicsWorld:
         self._aabb_min[i] = np.inf
         self._aabb_max[i] = -np.inf
         self._aabb_cache.pop(i, None)
+        # A slot handed to another body must be measured for it, not trusted
+        # with what the last one's bounds were.
+        if i < len(self._refit_pose):
+            self._refit_pose[i] = np.nan
+            self._refit_quat[i] = np.nan
         # The refit cache is keyed by body count and shape, and this slot's
         # shape has changed; rebuilding it is what makes the emptiness stick.
         self._refit_cache_n = -1
@@ -574,30 +584,60 @@ class PhysicsWorld:
         self._aabb_min[:n] = pos - hw - margin
         self._aabb_max[:n] = pos + hw + margin
         none = np.where(kind == self._RFIT_NONE)[0]
-        for i in none:                                 # point AABB, no margin
-            self._aabb_min[i] = self._position[i]
-            self._aabb_max[i] = self._position[i]
+        if len(none):                                  # point AABB, no margin
+            self._aabb_min[none] = self._position[none]
+            self._aabb_max[none] = self._position[none]
         other = np.where(kind == self._RFIT_OTHER)[0]
         if len(other):
-            # The exact AABB of a capsule, cylinder, hull or mesh means building
-            # its world proxy, which for a terrain tile is thousands of
-            # triangles. It cannot have changed if the body has not moved, so it
-            # is remembered against the pose it was measured at.
-            from .body import pose_key, world_aabb
-            cache = self._aabb_cache
-            for i in other:
-                si = int(self._collider_shape[i])
-                idx = si if si >= 0 else int(self._trigger_shape[i])
-                key = (idx,) + pose_key(self._position[i], self._orientation[i])
-                found = cache.get(i)
-                if found is None or found[0] != key:
-                    lo, hi = world_aabb(self.shapes[idx], self._position[i],
-                                        self._orientation[i])
-                    cache[i] = (key, lo, hi)
-                else:
-                    lo, hi = found[1], found[2]
-                self._aabb_min[i] = lo - margin
-                self._aabb_max[i] = hi + margin
+            self._refit_measured(other, margin)
+
+    def _refit_measured(self, other: np.ndarray, margin: float) -> None:
+        """Refit the bodies whose AABB has to be measured rather than derived.
+
+        The exact AABB of a capsule, cylinder, hull or mesh means building its
+        world proxy, which for a terrain tile is thousands of triangles -- so it
+        is remembered, and remembering it is not the whole saving. A landscape
+        is dozens of bodies that never move, and *asking* each of them whether
+        it has moved is itself the cost once the answer is always no. Which of
+        them moved is one array comparison, and the ones that did not are
+        written out of the remembered bounds in one go.
+        """
+        from .body import world_aabb
+        position, orientation = self._position, self._orientation
+        if len(self._refit_pose) < len(position):
+            self._grow_refit_bounds()
+        moved = other[
+            np.any(position[other] != self._refit_pose[other], axis=1)
+            | np.any(orientation[other] != self._refit_quat[other], axis=1)]
+        for i in moved:
+            si = int(self._collider_shape[i])
+            idx = si if si >= 0 else int(self._trigger_shape[i])
+            lo, hi = world_aabb(self.shapes[idx], position[i], orientation[i])
+            self._refit_lo[i], self._refit_hi[i] = lo, hi
+        if len(moved):
+            self._refit_pose[moved] = position[moved]
+            self._refit_quat[moved] = orientation[moved]
+        self._aabb_min[other] = self._refit_lo[other] - margin
+        self._aabb_max[other] = self._refit_hi[other] + margin
+
+    def _grow_refit_bounds(self) -> None:
+        """Make room to remember every body's measured bounds and its pose.
+
+        What is already remembered is carried over; the new room starts as a
+        pose no body can be at, so a body that has just appeared is measured
+        rather than trusted with whatever was in its slot.
+        """
+        count = len(self._position)
+        kept = len(self._refit_pose)
+        lo = np.zeros((count, 3), dtype='d')
+        hi = np.zeros((count, 3), dtype='d')
+        pose = np.full((count, 3), np.nan, dtype='d')
+        quat = np.full((count, 4), np.nan, dtype='d')
+        if kept:
+            lo[:kept], hi[:kept] = self._refit_lo, self._refit_hi
+            pose[:kept], quat[:kept] = self._refit_pose, self._refit_quat
+        self._refit_lo, self._refit_hi = lo, hi
+        self._refit_pose, self._refit_quat = pose, quat
 
     def _update_sleep(self, dt: float, lin_thresh: float = 0.08,
                       ang_thresh: float = 0.25, t_sleep: float = 0.4) -> None:

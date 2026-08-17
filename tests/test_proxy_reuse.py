@@ -166,3 +166,106 @@ class TestManyTilesStayAffordable:
         finally:
             body.TriangleMeshProxy = original    # type: ignore[misc]
         assert float(world.position[car][1]) > 0.2
+
+
+class TestRefittingCostsWhatMoved:
+    """A world's bounds are recomputed every step. A body that has not moved
+    has the bounds it had, and a streamed landscape is dozens of bodies that
+    never move -- so the recompute has to cost what moved rather than what is
+    there.
+    """
+
+    def _world(self, tiles=24):
+        world = PhysicsWorld()
+        points, faces = _grid_mesh(side=8, extent=20.0)
+        for index in range(tiles):
+            shape = world.add_shape(model.Shape.trimesh(points, faces))
+            world.add_body(model.Motion(type=model.STATIC),
+                           collider=model.Collider(shape=shape),
+                           position=(index * 40.0, 0.0, 0.0))
+        box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+        mover = world.add_body(model.Motion(type=model.DYNAMIC, mass=10.0),
+                               collider=model.Collider(shape=box),
+                               position=(0.0, 4.0, 0.0))
+        return world, mover
+
+    def _counted(self, monkeypatch):
+        """Count the measuring, which is what a terrain tile's AABB costs."""
+        from omi_physics import body
+        measured = []
+        real = body.world_aabb
+
+        def counting(*args, **named):
+            measured.append(1)
+            return real(*args, **named)
+
+        monkeypatch.setattr(body, 'world_aabb', counting)
+        return measured
+
+    def test_a_still_landscape_is_measured_once(self, monkeypatch) -> None:
+        measured = self._counted(monkeypatch)
+        world, _mover = self._world()
+        world.refit_aabbs()
+        first = len(measured)
+        assert first, "the tiles were never measured at all"
+        for _ in range(20):
+            world.refit_aabbs()
+        assert len(measured) == first
+
+    def test_a_tile_that_moves_is_measured_again(self, monkeypatch) -> None:
+        measured = self._counted(monkeypatch)
+        world, _mover = self._world()
+        world.refit_aabbs()
+        before = len(measured)
+        world.position[3] = (999.0, 0.0, 0.0)
+        world.refit_aabbs()
+        assert len(measured) == before + 1
+
+    def test_only_that_one(self, monkeypatch) -> None:
+        measured = self._counted(monkeypatch)
+        world, _mover = self._world()
+        world.refit_aabbs()
+        before = len(measured)
+        world.position[3] = (999.0, 0.0, 0.0)
+        world.refit_aabbs()
+        world.refit_aabbs()
+        assert len(measured) == before + 1
+
+    def test_a_slot_reused_by_another_body_is_measured_for_it(self) -> None:
+        """A removed body\'s bounds must not answer for whatever takes its slot."""
+        world, _mover = self._world(tiles=4)
+        world.refit_aabbs()
+        world.remove_body(1)
+        points, faces = _grid_mesh(side=8, extent=5.0)
+        shape = world.add_shape(model.Shape.trimesh(points, faces))
+        fresh = world.add_body(model.Motion(type=model.STATIC),
+                               collider=model.Collider(shape=shape),
+                               position=(0.0, 0.0, 0.0))
+        world.refit_aabbs()
+        assert float(world.aabb_max[fresh][0]) == pytest.approx(5.0, abs=0.1)
+
+    def test_the_bounds_follow_it(self) -> None:
+        world, _mover = self._world()
+        world.refit_aabbs()
+        world.position[3] = (999.0, 0.0, 0.0)
+        world.refit_aabbs()
+        assert float(world.aabb_min[3][0]) > 900.0
+
+    def test_the_bounds_of_a_still_tile_are_right(self) -> None:
+        world, _mover = self._world()
+        world.refit_aabbs()
+        assert float(world.aabb_min[0][0]) == pytest.approx(-20.0, abs=0.1)
+        assert float(world.aabb_max[0][2]) == pytest.approx(20.0, abs=0.1)
+
+    def test_a_body_added_later_is_measured(self, monkeypatch) -> None:
+        measured = self._counted(monkeypatch)
+        world, _mover = self._world(tiles=4)
+        world.refit_aabbs()
+        before = len(measured)
+        points, faces = _grid_mesh(side=8, extent=20.0)
+        shape = world.add_shape(model.Shape.trimesh(points, faces))
+        world.add_body(model.Motion(type=model.STATIC),
+                       collider=model.Collider(shape=shape),
+                       position=(500.0, 0.0, 0.0))
+        world.refit_aabbs()
+        assert len(measured) > before

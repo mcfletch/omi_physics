@@ -38,7 +38,7 @@ import numpy as np
 
 from . import mathutil
 from .mathutil import Vec
-from .raycast import raycast
+from .raycast import raycast_many
 
 __all__ = ['RaycastVehicle', 'VehicleTuning', 'Wheel', 'WheelSpec', 'car_wheels']
 
@@ -289,9 +289,9 @@ class RaycastVehicle:
         driven = sum(1 for wheel in self.wheels if wheel.spec.driven) or 1
         braked = sum(1 for wheel in self.wheels if wheel.spec.braked) or 1
 
+        self._cast_all(rotation, centre)
         for wheel in self.wheels:
             wheel.steer_angle = self._steer_angle if wheel.spec.steering else 0.0
-            self._cast(wheel, rotation, centre)
             if not wheel.grounded:
                 wheel.load = 0.0
                 wheel.slip = 0.0
@@ -302,26 +302,45 @@ class RaycastVehicle:
 
     # -- the three forces ------------------------------------------------------
 
-    def _cast(self, wheel: Wheel, rotation: np.ndarray,
-              centre: np.ndarray) -> None:
-        """Find the ground under one wheel, or report it hanging.
+    def _cast_all(self, rotation: np.ndarray, centre: np.ndarray) -> None:
+        """Find the ground under every wheel, in one cast.
 
-        The ray starts ``ground_recovery`` metres *above* the hub rather than at
-        it, so ground that has come up under the car -- see
+        Four wheels of one car look at very nearly the same piece of the world,
+        so they are cast together: which bodies are worth testing is decided
+        once, and a landscape's mesh is asked once for the triangles near all
+        four rather than once per wheel. On a streamed world that is most of a
+        physics step.
+
+        Each ray starts ``ground_recovery`` metres *above* its hub rather than
+        at it, so ground that has come up under the car -- see
         :attr:`VehicleTuning.ground_recovery` -- is still found and the
         suspension pushes the wheel back out on to it. Compression is measured
         from the hub as it always was, and capped at full travel, so the
         recovery is a firm shove rather than an unbounded one.
         """
-        spec = wheel.spec
-        wheel.hub = centre + rotation @ np.asarray(spec.position, dtype='d')
         up = rotation @ UP
         down = -up
-        reach = spec.suspension_travel + spec.radius
         overhead = max(0.0, self.tuning.ground_recovery)
-        hit = raycast(self.world, wheel.hub + up * overhead, down,
-                      max_distance=reach + overhead, skip=(self.body,))
-        if hit is None:
+        origins = []
+        reaches = []
+        for wheel in self.wheels:
+            wheel.hub = centre + rotation @ np.asarray(wheel.spec.position,
+                                                       dtype='d')
+            origins.append(wheel.hub + up * overhead)
+            reaches.append(wheel.spec.suspension_travel + wheel.spec.radius)
+        # One distance for the bundle, since a cast has one reach: the longest
+        # any wheel wants, with each wheel's own limit applied to its answer.
+        furthest = max(reaches) + overhead
+        hits = raycast_many(self.world, origins, [down] * len(self.wheels),
+                            max_distance=furthest, skip=(self.body,))
+        for wheel, reach, hit in zip(self.wheels, reaches, hits, strict=True):
+            self._place(wheel, reach, overhead, hit)
+
+    @staticmethod
+    def _place(wheel: Wheel, reach: float, overhead: float,
+               hit: Any) -> None:
+        """What one wheel makes of what its ray found."""
+        if hit is None or float(hit.distance) > reach + overhead:
             wheel.grounded = False
             wheel.compression = 0.0
             wheel.bottomed = 0.0
@@ -330,7 +349,7 @@ class RaycastVehicle:
         wheel.contact = np.asarray(hit.point, dtype='d')
         wheel.normal = np.asarray(hit.normal, dtype='d')
         squash = max(0.0, reach - (float(hit.distance) - overhead))
-        wheel.compression = min(spec.suspension_travel, squash)
+        wheel.compression = min(wheel.spec.suspension_travel, squash)
         wheel.bottomed = squash - wheel.compression
 
     def _suspend(self, wheel: Wheel, dt: float, mass: float,

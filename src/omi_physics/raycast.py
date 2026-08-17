@@ -39,7 +39,7 @@ from .trigrid import TriangleGrid
 log = logging.getLogger(__name__)
 
 __all__ = ['NO_TRIANGLE', 'RayHit', 'line_of_sight', 'raycast',
-           'unsupported_shapes']
+           'raycast_many', 'unsupported_shapes']
 
 #: :attr:`RayHit.triangle` for a hit on a shape that has no triangles.  A
 #: sphere, a box and a capsule are surfaces without parts, so there is nothing
@@ -110,6 +110,136 @@ def raycast(world: Any, origin: Vec, direction: Vec,
             # that is most of what keeps a cast cheap.
             limit = found.distance
     return nearest
+
+
+def raycast_many(world: Any, origins: Any, directions: Any,
+                 max_distance: float = DEFAULT_RANGE,
+                 skip: Iterable[int] = ()) -> list[RayHit | None]:
+    """Several rays at once, sharing the work they have in common.
+
+    A vehicle casts one ray per wheel every step and they all start within a
+    car's length of each other: the same bodies are worth testing, and the same
+    part of the same mesh comes back from each. Cast one at a time, that work
+    is done once per wheel, and for a raycast vehicle it is most of the step.
+
+    So the bundle is answered together. Which bodies matter is decided once,
+    for the box the whole bundle sweeps; a triangle mesh among them is asked
+    once for the triangles near that box, and every ray is then tested against
+    the same candidates. What comes back is what each ray would have answered
+    on its own, in the order the rays were given, with ``None`` for a ray that
+    met nothing.
+
+    Nothing here assumes the rays are parallel or that they start together --
+    a bundle spread across a level simply shares less.
+    """
+    starts = np.asarray(origins, dtype='d').reshape(-1, 3)
+    headings = np.asarray(directions, dtype='d').reshape(-1, 3)
+    count = len(starts)
+    if not count or max_distance <= 0.0:
+        return [None] * count
+    lengths = np.linalg.norm(headings, axis=1)
+    live = lengths >= _TINY
+    headings = headings / np.where(lengths[:, None] > 0, lengths[:, None], 1.0)
+    answers: list[RayHit | None] = [None] * count
+    if not live.any():
+        return answers
+    limits = np.where(live, float(max_distance), 0.0)
+    for body in _bundle_castable(world, set(skip), starts[live], headings[live],
+                                 float(max_distance)):
+        _hit_bundle(world, body, starts, headings, live, limits, answers)
+    return answers
+
+
+def _bundle_castable(world: Any, ignored: set, starts: np.ndarray,
+                     headings: np.ndarray, limit: float) -> list[int]:
+    """The bodies worth testing against any ray in the bundle.
+
+    One box test per body against the box the whole bundle sweeps: a superset
+    of what each ray's own slab test would keep, and the exact tests below
+    still decide. Not sorted by distance -- there is no one distance for a
+    bundle, and each ray shrinks its own reach as it finds something.
+    """
+    count = int(world.body_count)
+    if not count:                                # pragma: no cover - empty world
+        return []
+    shapes = np.asarray(world.collider_shape[:count])
+    live = shapes >= 0
+    if ignored:
+        live[np.fromiter(ignored, dtype=int, count=len(ignored))] = False
+    if not live.any():
+        return []
+    ends = starts + headings * limit
+    low = np.minimum(starts.min(axis=0), ends.min(axis=0))
+    high = np.maximum(starts.max(axis=0), ends.max(axis=0))
+    boxes_low = np.asarray(world.aabb_min[:count], dtype='d')
+    boxes_high = np.asarray(world.aabb_max[:count], dtype='d')
+    fitted = (np.all(np.isfinite(boxes_low), axis=1)
+              & np.all(np.isfinite(boxes_high), axis=1)
+              & np.all(boxes_high >= boxes_low, axis=1)
+              & np.any(boxes_high > boxes_low, axis=1))
+    overlaps = (np.all(boxes_low <= high, axis=1)
+                & np.all(boxes_high >= low, axis=1))
+    # A box that is not a box tells the cast nothing, so the body behind it is
+    # tested exactly rather than skipped.
+    live &= overlaps | ~fitted
+    return np.nonzero(live)[0].tolist()
+
+
+def _hit_bundle(world: Any, body: int, starts: np.ndarray, headings: np.ndarray,
+                live: np.ndarray, limits: np.ndarray,
+                answers: list) -> None:
+    """Test one body against every live ray, keeping each ray's nearest."""
+    shape = world.shapes[int(world.collider_shape[body])]
+    if str(shape.type) == 'trimesh':
+        _hit_bundle_trimesh(world, body, shape, starts, headings, live, limits,
+                            answers)
+        return
+    for index in np.nonzero(live)[0]:
+        found = _hit_body(world, body, starts[index], headings[index],
+                          float(limits[index]))
+        if found is not None:
+            answers[index] = found
+            limits[index] = found.distance
+
+
+def _hit_bundle_trimesh(world: Any, body: int, shape: Any, starts: np.ndarray,
+                        headings: np.ndarray, live: np.ndarray,
+                        limits: np.ndarray, answers: list) -> None:
+    """The shared half: one set of candidate triangles for the whole bundle.
+
+    Walking the mesh's grid is what a cast against a landscape costs, and four
+    wheels of one car walk very nearly the same cells. Asking for the triangles
+    near the bundle's box instead trades a slightly larger candidate set for
+    one query, and the exact test each ray then runs is a single numpy pass.
+    """
+    centre = np.asarray(world.position[body], dtype='d')
+    rotation = _rotation(np.asarray(world.orientation[body], dtype='d'))
+    placed = _placed(world, body, shape, centre, rotation)
+    if placed is None:                           # pragma: no cover - no mesh
+        return
+    rays = np.nonzero(live)[0]
+    ends = starts[rays] + headings[rays] * limits[rays, None]
+    low = np.minimum(starts[rays].min(axis=0), ends.min(axis=0))
+    high = np.maximum(starts[rays].max(axis=0), ends.max(axis=0))
+    if np.any(low > placed.high) or np.any(high < placed.low):
+        return
+    candidates = placed.grid.box(low, high)
+    if not len(candidates):
+        return
+    triangles = placed.triangles[candidates]
+    for index in rays:
+        found = _hit_triangles(starts[index], headings[index], triangles,
+                               float(limits[index]))
+        if found is None:
+            continue
+        distance, normal, among = found
+        if float(np.dot(normal, headings[index])) > 0.0:
+            normal = -normal
+        answers[index] = RayHit(
+            body=int(body), distance=distance,
+            point=starts[index] + headings[index] * distance, normal=normal,
+            triangle=int(candidates[among]))
+        limits[index] = distance
 
 
 def line_of_sight(world: Any, start: Vec, end: Vec,
@@ -561,8 +691,9 @@ def bodies_along(world: Any, origin: Vec, direction: Vec,
         return []
     heading = heading / length
     ignored = set(skip)
+    limit = float(max_distance)
     found = [hit for hit in
-             (_hit_body(world, body, start, heading, float(max_distance))
-              for body in _castable(world, ignored))
+             (_hit_body(world, body, start, heading, limit)
+              for body in _castable(world, ignored, start, heading, limit))
              if hit is not None]
     return sorted(found, key=lambda hit: hit.distance)
