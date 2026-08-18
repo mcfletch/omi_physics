@@ -180,8 +180,24 @@ class PhysicsWorld:
 
     @property
     def body_count(self) -> int:
-        """The number of live bodies."""
+        """How many rows the columnar arrays hold.
+
+        What anything walking the columns wants -- the solver, the broadphase,
+        a backend uploading them. An emptied slot keeps its row, because other
+        code holds body indices as handles and compacting would renumber every
+        body above it, so this is not the number of bodies that are *there*:
+        see :attr:`live_body_count`.
+        """
         return self._n
+
+    @property
+    def live_body_count(self) -> int:
+        """How many of the rows hold a body.
+
+        What a caller streaming a world in and out asks when it wants to know
+        whether what it added has come out again.
+        """
+        return self._n - len(self._free)
 
     # -- document tables -------------------------------------------------
     def add_shape(self, shape: model.Shape) -> int:
