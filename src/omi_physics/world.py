@@ -354,6 +354,39 @@ class PhysicsWorld:
         self._aabb_min[i] = lo - margin
         self._aabb_max[i] = hi + margin
 
+    def place_body(self, i: int, position: Optional[Vec] = None,
+                   orientation: Optional[Vec] = None,
+                   margin: float = 0.05) -> None:
+        """Put body ``i`` where the caller says it is, between steps.
+
+        For a body the caller moves itself rather than one the solver moves: an
+        animated platform, a lift, a character proxy, a body staged for one
+        query and taken away again.
+
+        A bare write to :attr:`position` is not enough on its own. The arrays
+        are views, so nothing sees the write, and a body's **world AABB** is
+        what the broadphase rejects against -- a ray, an overlap query or a
+        contact pair against a body whose box is still where it used to be is
+        answered about where it used to be. This writes the pose and refits
+        that one box, which is what keeps the cost of moving a handful of
+        bodies proportional to the handful rather than to the world.
+
+        The previous pose is set with the new one, so the body **arrives**
+        rather than travelling: an interpolating writeback would otherwise
+        smear it across the gap, and a solver reading a velocity from the two
+        would read the jump as one.
+
+        Either argument may be left out, which moves or turns the body without
+        touching the other.
+        """
+        if position is not None:
+            self._position[i] = np.asarray(position, dtype='d')
+            self._prev_position[i] = self._position[i]
+        if orientation is not None:
+            self._orientation[i] = np.asarray(orientation, dtype='d')
+            self._prev_orientation[i] = self._orientation[i]
+        self._fit_body(i, margin)
+
     def remove_body(self, i: int) -> None:
         """Take body ``i`` out of the world, freeing its slot for the next one.
 

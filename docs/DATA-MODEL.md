@@ -104,6 +104,24 @@ no per-body Python loop. This is the single most important performance decision
 in the engine, and the reason the state maps cleanly onto GPU buffers (see
 [ARCHITECTURE.md](ARCHITECTURE.md)).
 
+### Moving a body yourself
+
+A body the solver does not move — an animated platform, a lift, a character
+proxy, a body staged for one query — is placed with `place_body`:
+
+```python
+world.place_body(body, position=(10.0, 0.7, 0.0))   # and/or orientation=
+```
+
+rather than by writing `world.position[body]`. The columns are views, so a bare
+write is seen by nothing that keeps up with them: the body's row in
+`aabb_min` / `aabb_max` is what the broadphase rejects against, and a box left
+where the body used to be answers a ray, an overlap query or a contact pair
+about where the body used to be. `place_body` writes the pose, sets the previous
+pose with it so the body *arrives* rather than travelling, and refits that one
+box — the whole-world `refit_aabbs()` costs the world, and moving a handful of
+bodies should cost the handful.
+
 ### Poses for rendering
 
 The world keeps both the current pose and the previous step's pose
