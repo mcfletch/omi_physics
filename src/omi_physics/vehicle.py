@@ -94,6 +94,19 @@ class VehicleTuning:
     ``rolling_resistance`` is the fraction of the car's weight that opposes it
     rolling, and ``downforce`` presses it into the road in proportion to the
     square of its speed, which is what stops a fast car floating over crests.
+
+    ``base_speed`` is where constant torque gives way to constant power: below
+    it the drivetrain gives ``engine_force``, above it the same *power*, so the
+    pull falls away as ``base_speed / speed``. That is what a motor does, and it
+    is most of the difference between a car that feels like it is accelerating
+    and one that feels like it is on rails. Zero keeps the flat force, for a
+    caller that wants one.
+
+    ``drag`` is the aerodynamic force at one metre per second, in newtons --
+    ``0.5 * rho * Cd * A`` -- and it opposes motion in proportion to the square
+    of the speed. It is what actually decides how fast a car will go: without
+    it the top speed is whatever rolling resistance alone permits, which for
+    anything on wheels is far more than the thing could reach.
     """
 
     engine_force: float = 6000.0
@@ -103,9 +116,30 @@ class VehicleTuning:
     steer_speed: float = 4.0
     rolling_resistance: float = 0.015
     downforce: float = 0.0
+    base_speed: float = 0.0
+    drag: float = 0.0
     #: Steering lock falls off with speed, or a car twitches out of control at
     #: the top end. This is the speed, in m/s, at which the lock has halved.
     steer_falloff_speed: float = 30.0
+
+    def drive_force(self, speed: float) -> float:
+        """What the drivetrain can push with at this speed, in newtons.
+
+        ``engine_force`` up to :attr:`base_speed`, and the same power above it.
+        """
+        travelling = abs(float(speed))
+        if self.base_speed <= 0.0 or travelling <= self.base_speed:
+            return float(self.engine_force)
+        return float(self.engine_force) * float(self.base_speed) / travelling
+
+    def drag_force(self, speed: float) -> float:
+        """What the air pushes back with at this speed, in newtons.
+
+        Always positive: which way it acts is the caller's, and it is always
+        against.
+        """
+        travelling = float(speed)
+        return float(self.drag) * travelling * travelling
     #: How far *above* each wheel the ground is still looked for, in metres.
     #:
     #: A wheel looks below itself for the road, so a road that arrives above it
@@ -429,7 +463,7 @@ class RaycastVehicle:
 
         drive = 0.0
         if spec.driven and self.throttle:
-            share = self.tuning.engine_force / driven
+            share = self.tuning.drive_force(self.speed()) / driven
             drive = share * self.throttle * (
                 1.0 if self.throttle > 0 else self.tuning.reverse_fraction)
         if spec.braked and self.brake:
@@ -443,6 +477,12 @@ class RaycastVehicle:
         rolling = self.tuning.rolling_resistance + on.rolling
         drive -= rolling * wheel.load * math.copysign(
             1.0, along) if abs(along) > CREEPING else 0.0
+        # Air, shared between the wheels touching the road. Through the contact
+        # rather than at the body's centre so it is inside the friction budget:
+        # drag a tyre cannot hold is drag a sliding car does not feel.
+        if self.tuning.drag and abs(along) > CREEPING:
+            drive -= (self.tuning.drag_force(self.speed())
+                      / max(len(self.wheels), 1) * math.copysign(1.0, along))
 
         # The sideways force needed to stop the tyre scrubbing this step, and
         # the longitudinal force asked of it, share one friction budget -- which
