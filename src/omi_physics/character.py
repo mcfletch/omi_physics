@@ -110,6 +110,13 @@ class CharacterController:
         self.gravity_mag = gravity
         self.position = np.asarray(position, dtype='d')     # capsule centre
         self.vy = 0.0
+        #: World velocity the capsule actually moved at over the last
+        #: :meth:`update`, in metres a second.  Measured from where it ended up
+        #: rather than from what it was asked for, so a body stopped by a wall
+        #: or turned by a slope reports where it went, which is what anything
+        #: following the motion -- an animation, a footstep, a leaning camera --
+        #: needs rather than the intent behind it.
+        self.velocity = np.zeros(3)
         self.grounded = False
         #: Surface normal underfoot while grounded, else None.  What the move
         #: direction is projected onto, so speed is spent along the ground
@@ -473,6 +480,7 @@ class CharacterController:
         stopped by.  Stepping it in shorter pieces is what makes the landing
         depend on the geometry rather than on the frame rate.
         """
+        start = self.position.copy()
         for piece in self._substeps(dt):
             was_grounded = self.grounded
             self._step(piece)
@@ -481,6 +489,7 @@ class CharacterController:
             # covered.
             if not self.flying:
                 self._tick_jump_windows(piece, was_grounded)
+        self.velocity = (self.position - start) / dt if dt > 0 else np.zeros(3)
 
     def _reach(self) -> Tuple[float, float]:
         """How far the capsule may travel before a surface stops overlapping it.
@@ -879,6 +888,7 @@ class CharacterController:
         self.flying = False                         # a fresh bind starts on foot
         self.push = np.zeros(3)                     # ...and at rest
         self.vy = 0.0
+        self.velocity = np.zeros(3)
         resolved, ground_n = self._push_out(self.position, iterations=12)
         self.position = resolved
         if self._overlaps(self._proxy()):
