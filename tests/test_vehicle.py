@@ -13,7 +13,12 @@ import numpy as np
 import pytest
 
 from omi_physics import model
-from omi_physics.vehicle import RaycastVehicle, VehicleTuning, car_wheels
+from omi_physics.vehicle import (
+    RaycastVehicle,
+    VehicleTuning,
+    WheelSpec,
+    car_wheels,
+)
 from omi_physics.world import PhysicsWorld
 
 #: A floor big enough that a car at speed does not drive off it in the two or
@@ -687,3 +692,66 @@ class TestGroundThatRisesUnderIt:
         _world, vehicle, _surface = self._buried(
             seconds=0.5, tuning=VehicleTuning(ground_recovery=0.0))
         assert not any(wheel.grounded for wheel in vehicle.wheels)
+
+
+class TestWhatACarCanSayAboutItsOwnShape:
+    """A controller aiming a car along a path needs the car's geometry.
+
+    Pure pursuit, Ackermann, a turning circle: all of them are the wheelbase and
+    the steering lock, and a controller that guesses either is tuned to one car.
+    """
+
+    def _car(self, front=-1.3, rear=1.3):
+        world = PhysicsWorld()
+        body = world.add_body(model.Motion(mass=1200.0),
+                              position=(0.0, 1.0, 0.0))
+        return RaycastVehicle(world, body, [
+            WheelSpec(position=(-0.8, -0.2, front), steering=True),
+            WheelSpec(position=(0.8, -0.2, front), steering=True),
+            WheelSpec(position=(-0.8, -0.2, rear)),
+            WheelSpec(position=(0.8, -0.2, rear))])
+
+    def test_the_wheelbase_is_front_axle_to_rear_axle(self):
+        assert self._car(front=-1.3, rear=1.3).wheelbase() == pytest.approx(2.6)
+
+    def test_a_longer_car_says_so(self):
+        assert self._car(front=-1.6, rear=1.6).wheelbase() == pytest.approx(3.2)
+
+    def test_it_is_the_distance_whichever_way_round_the_wheels_are_given(self):
+        assert self._car(front=1.3, rear=-1.3).wheelbase() == pytest.approx(2.6)
+
+    def test_a_car_with_no_steered_wheels_still_has_a_length(self):
+        """Everything is a rear wheel, so the answer is the axle spread."""
+        world = PhysicsWorld()
+        body = world.add_body(model.Motion(mass=1200.0), position=(0, 1, 0))
+        car = RaycastVehicle(world, body, [
+            WheelSpec(position=(-0.8, -0.2, -1.2)),
+            WheelSpec(position=(0.8, -0.2, 1.2))])
+        assert car.wheelbase() == pytest.approx(2.4)
+
+    def test_a_one_wheeled_vehicle_has_no_wheelbase(self):
+        world = PhysicsWorld()
+        body = world.add_body(model.Motion(mass=1200.0), position=(0, 1, 0))
+        car = RaycastVehicle(world, body,
+                             [WheelSpec(position=(0.0, -0.2, 0.0))])
+        assert car.wheelbase() == 0.0
+
+    def test_the_turning_radius_is_the_wheelbase_over_the_lock(self):
+        car = self._car()
+        radius = car.turning_radius(0.0)
+        assert radius == pytest.approx(
+            car.wheelbase() / math.tan(car.tuning.steer_lock(0.0)), rel=0.01)
+
+    def test_it_opens_out_with_speed_as_the_lock_closes(self):
+        """A car park at rest and a long sweep at the top end."""
+        car = self._car()
+        assert car.turning_radius(40.0) > car.turning_radius(0.0) * 2.5
+
+    def test_a_car_that_cannot_steer_goes_straight_on_for_ever(self):
+        world = PhysicsWorld()
+        body = world.add_body(model.Motion(mass=1200.0), position=(0, 1, 0))
+        car = RaycastVehicle(world, body, [
+            WheelSpec(position=(-0.8, -0.2, -1.2)),
+            WheelSpec(position=(0.8, -0.2, 1.2))],
+            tuning=VehicleTuning(maximum_steer=0.0))
+        assert math.isinf(car.turning_radius(0.0))

@@ -385,6 +385,40 @@ class RaycastVehicle:
         """Whether any wheel is on the ground."""
         return any(wheel.grounded for wheel in self.wheels)
 
+    # -- the shape of it -------------------------------------------------------
+
+    def wheelbase(self) -> float:
+        """Front axle to rear axle, in metres.
+
+        What anything aiming this car along a path needs from it: a car on a
+        steady steering angle follows a circle, and which circle is the
+        wheelbase and the angle. A controller that guesses it is tuned to one
+        car, so the car is asked.
+
+        Measured from the steered wheels to the rest where there are steered
+        wheels, and from the spread of every wheel where there are none.
+        """
+        along = [float(wheel.spec.position[2]) for wheel in self.wheels]
+        steered = [float(wheel.spec.position[2]) for wheel in self.wheels
+                   if wheel.spec.steering]
+        if steered and len(steered) < len(along):
+            rest = [at for at in along if at not in steered]
+            return abs(sum(steered) / len(steered) - sum(rest) / len(rest))
+        return abs(max(along) - min(along)) if along else 0.0
+
+    def turning_radius(self, speed: float = 0.0) -> float:
+        """The tightest circle this car can hold at that speed, in metres.
+
+        The bicycle model: ``wheelbase / tan(lock)``. Since the lock closes as
+        the speed rises (:meth:`VehicleTuning.steer_lock`), so does this -- a
+        car park at rest and a long sweep at the top end. A car that cannot
+        steer answers infinity, which is a straight line.
+        """
+        lock = self.tuning.steer_lock(speed)
+        if lock <= 0.0:
+            return float('inf')
+        return self.wheelbase() / math.tan(lock)
+
     def place(self, position: Vec, heading: float = 0.0) -> None:
         """Put the car somewhere, facing ``heading`` radians round from -Z, still.
 
