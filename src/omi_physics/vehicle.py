@@ -51,6 +51,27 @@ RIGHT = np.array([1.0, 0.0, 0.0])
 #: nothing else, and the brake holds it rather than fighting it.
 CREEPING = 0.15
 
+#: How much of a tyre's sideways scrub is taken out in one step. Under one for
+#: two reasons that agree.
+#:
+#: A tyre does not build its side force the instant it is asked: the tread has
+#: to be laid down and deflected, which takes a fraction of a wheel's turn --
+#: the relaxation length, and about a third of a metre on a road tyre. At the
+#: usual step that is what this number is.
+#:
+#: And four wheels correct the same body in the same step. Each one taking all
+#: of what it can see takes more yaw and more roll out of the car than there
+#: was, puts some back the other way, and the car shakes its head at the rate of
+#: the physics loop -- worst where the wheels are not on parallel ground, which
+#: is any crowned road.
+SCRUB_RELAXATION = 0.6
+
+#: Below this speed, in m/s, a vehicle nobody is driving holds its place rather
+#: than rolling -- see :attr:`VehicleTuning.holding`. Low enough that a car
+#: coasting to a junction is still coasting, high enough to catch one before a
+#: slope has it.
+HOLDING_SPEED = 0.5
+
 
 @dataclass
 class WheelSpec:
@@ -118,9 +139,17 @@ class VehicleTuning:
     downforce: float = 0.0
     base_speed: float = 0.0
     drag: float = 0.0
-    #: Steering lock falls off with speed, or a car twitches out of control at
-    #: the top end. This is the speed, in m/s, at which the lock has halved.
+    #: The speed, in m/s, at which the steering lock has halved. Zero leaves
+    #: the lock the same at every speed. See :meth:`steer_lock`.
     steer_falloff_speed: float = 30.0
+
+    #: How hard a car with nothing asked of it holds its place, in newtons.
+    #: A car left alone is in gear or on its handbrake and stays where it was
+    #: put; one that coasts away makes stopping anywhere but the flat a
+    #: mistake, and turns every gentle grade into something to hold a key
+    #: against. Divided by the car's weight this is the steepest slope it holds
+    #: on. Zero is a vehicle out of gear, free to roll.
+    holding: float = 6000.0
 
     def drive_force(self, speed: float) -> float:
         """What the drivetrain can push with at this speed, in newtons.
@@ -131,6 +160,29 @@ class VehicleTuning:
         if self.base_speed <= 0.0 or travelling <= self.base_speed:
             return float(self.engine_force)
         return float(self.engine_force) * float(self.base_speed) / travelling
+
+    def steer_lock(self, speed: float) -> float:
+        """How far the front wheels may turn at this speed, in radians.
+
+        A steering lock is chosen for a car park. Full lock at walking pace is
+        a three-point turn; the same lock at forty metres a second asks for ten
+        g and ends with the car pointing at the trees, so it has to fall away as
+        the speed rises.
+
+        It falls with the *square* of the speed against
+        :attr:`steer_falloff_speed`, because that is the rate at which what the
+        lock asks of the tyres stops growing: cornering is ``v**2 / radius``,
+        and a radius that only widens in step with the speed is a demand that
+        still doubles with it. Falling this way, the same input means a gentler
+        turn the faster the car goes, and the tightest corner it will ask for
+        settles at one the tyres can hold instead of running away with the
+        speedometer.
+        """
+        falloff = float(self.steer_falloff_speed)
+        if falloff <= 0.0:
+            return float(self.maximum_steer)
+        share = abs(float(speed)) / falloff
+        return float(self.maximum_steer) / (1.0 + share * share)
 
     def drag_force(self, speed: float) -> float:
         """What the air pushes back with at this speed, in newtons.
@@ -285,6 +337,10 @@ class RaycastVehicle:
         self.brake = 0.0
         self.steer = 0.0
         self._steer_angle = 0.0
+        #: The body as every wheel of one step sees it, and what they push on
+        #: it, while a step is being worked out. See :meth:`update`.
+        self._stance: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._pending: list[tuple[np.ndarray, np.ndarray]] = []
 
     # -- the driver ------------------------------------------------------------
 
@@ -352,7 +408,19 @@ class RaycastVehicle:
     # -- the step --------------------------------------------------------------
 
     def update(self, dt: float) -> None:
-        """Cast the wheels and apply a step's worth of impulses to the body."""
+        """Cast the wheels and apply a step's worth of impulses to the body.
+
+        **Every wheel is worked out against the same body.** Four wheels push on
+        one chassis in one step, and they touch the ground at the same instant;
+        applying each one's impulse as it is calculated means the second wheel
+        answers about a body the first has already moved, and the four stop
+        being symmetric. What that looks like from the driver's seat is a car
+        that wanders to whichever side is worked out first -- a road's width in
+        a few seconds of straight-line acceleration -- and a wander that changes
+        sides if the wheels are listed in another order. So the step reads one
+        stance of the body, works every wheel against it, and applies what they
+        all asked for together.
+        """
         if dt <= 0.0:
             return
         self._steer_angle = self._steered(dt)
@@ -364,6 +432,13 @@ class RaycastVehicle:
         braked = sum(1 for wheel in self.wheels if wheel.spec.braked) or 1
 
         self._cast_all(rotation, centre)
+        self._stance = (
+            centre,
+            np.asarray(self.world.linear_velocity[self.body], dtype='d').copy(),
+            np.asarray(self.world.angular_velocity[self.body], dtype='d').copy())
+        # The springs first, all of them, because what the air is allowed to
+        # hold the car back with depends on how the weight is spread across the
+        # wheels -- and that is not known until every spring has been asked.
         for wheel in self.wheels:
             wheel.steer_angle = self._steer_angle if wheel.spec.steering else 0.0
             if not wheel.grounded:
@@ -371,8 +446,14 @@ class RaycastVehicle:
                 wheel.slip = 0.0
                 continue
             self._suspend(wheel, dt, mass, gravity)
-            self._drive(wheel, dt, rotation, mass, gravity, driven, braked)
+        carried = sum(wheel.load for wheel in self.wheels if wheel.grounded)
+        for wheel in self.wheels:
+            if not wheel.grounded:
+                continue
+            self._drive(wheel, dt, rotation, mass, gravity, driven, braked,
+                        carried)
         self._press_down(dt, mass)
+        self._settle_up()
 
     # -- the three forces ------------------------------------------------------
 
@@ -451,8 +532,13 @@ class RaycastVehicle:
         self._impulse(wheel.contact, normal * (wheel.load * dt))
 
     def _drive(self, wheel: Wheel, dt: float, rotation: np.ndarray, mass: float,
-               gravity: float, driven: int, braked: int) -> None:
-        """Push it along, hold it back, and stop it sliding sideways."""
+               gravity: float, driven: int, braked: int,
+               carried: float = 0.0) -> None:
+        """Push it along, hold it back, and stop it sliding sideways.
+
+        ``carried`` is what the whole car weighs on the ground this step, which
+        is how much of the air's drag this wheel is asked for.
+        """
         spec = wheel.spec
         heading = _project(self._heading(wheel, rotation), wheel.normal)
         sideways = np.cross(wheel.normal, heading)
@@ -466,11 +552,24 @@ class RaycastVehicle:
             share = self.tuning.drive_force(self.speed()) / driven
             drive = share * self.throttle * (
                 1.0 if self.throttle > 0 else self.tuning.reverse_fraction)
+        # What one braked wheel may take out of the car this step: enough to
+        # stop it, divided among the wheels doing the stopping. Given the whole
+        # car's worth each, four wheels take four times the speed there is and
+        # the car is thrown backwards a little harder every step.
+        settling = abs(along) * mass / braked / max(dt, 1e-6)
         if spec.braked and self.brake:
             stopping = self.tuning.brake_force / braked * self.brake
             # Brake to a stop, not backwards through it.
-            drive -= _clamp(stopping * math.copysign(1.0, along), -abs(along) *
-                            mass / max(dt, 1e-6), abs(along) * mass / max(dt, 1e-6))
+            drive -= _clamp(stopping * math.copysign(1.0, along),
+                            -settling, settling)
+        elif (spec.braked and self.tuning.holding and not self.throttle
+                and abs(along) < HOLDING_SPEED):
+            # Nothing asked of it and barely moving: a car in gear stays where
+            # it is. The same clamp as the brake, so it takes away the speed
+            # the slope has just given it and no more.
+            holding = self.tuning.holding / braked
+            drive -= _clamp(holding * math.copysign(1.0, along),
+                            -settling, settling)
         # Rolling resistance: the road's own, plus whatever the ground under
         # this wheel adds. Soft going is mostly this.
         on = wheel.surface()
@@ -481,13 +580,24 @@ class RaycastVehicle:
         # rather than at the body's centre so it is inside the friction budget:
         # drag a tyre cannot hold is drag a sliding car does not feel.
         if self.tuning.drag and abs(along) > CREEPING:
-            drive -= (self.tuning.drag_force(self.speed())
-                      / max(len(self.wheels), 1) * math.copysign(1.0, along))
+            # Shared by what each wheel is carrying, not in equal quarters. A
+            # wheel the weight has come off has almost no friction to spend,
+            # and a quarter of the drag spends all of it -- taking the sideways
+            # hold with it, since the two come out of one budget. What that
+            # looks like from the driver's seat is a car that wanders off the
+            # straight under acceleration, further the harder it pulls.
+            share = (wheel.load / carried if carried > 0.0
+                     else 1.0 / max(len(self.wheels), 1))
+            drive -= (self.tuning.drag_force(self.speed()) * share
+                      * math.copysign(1.0, along))
 
-        # The sideways force needed to stop the tyre scrubbing this step, and
-        # the longitudinal force asked of it, share one friction budget -- which
-        # is what the ground under the wheel has to offer.
-        grip_force = -across * mass / max(1, len(self.wheels)) / max(dt, 1e-6)
+        # The sideways force needed to stop the tyre scrubbing, and the
+        # longitudinal force asked of it, share one friction budget -- which is
+        # what the ground under the wheel has to offer.
+        #
+        # Not all of the scrub in one step: see :data:`SCRUB_RELAXATION`.
+        grip_force = (-across * SCRUB_RELAXATION * mass
+                      / max(1, len(self.wheels)) / max(dt, 1e-6))
         budget = spec.grip * on.grip * max(wheel.load, 0.0)
         combined = math.hypot(drive, grip_force)
         if combined > budget > 0.0:
@@ -508,11 +618,7 @@ class RaycastVehicle:
 
     def _steered(self, dt: float) -> float:
         """The steer angle, rate-limited and eased off at speed."""
-        lock = self.tuning.maximum_steer
-        falloff = self.tuning.steer_falloff_speed
-        if falloff > 0:
-            lock = lock / (1.0 + abs(self.forward_speed()) / falloff)
-        wanted = self.steer * lock
+        wanted = self.steer * self.tuning.steer_lock(self.forward_speed())
         step = self.tuning.steer_speed * self.tuning.maximum_steer * dt
         return _clamp(wanted, self._steer_angle - step, self._steer_angle + step)
 
@@ -525,19 +631,47 @@ class RaycastVehicle:
         return rotation @ local
 
     def _point_velocity(self, point: np.ndarray) -> np.ndarray:
-        """How fast a point fixed to the body is moving through the world."""
-        offset = point - self.position()
-        return (np.asarray(self.world.linear_velocity[self.body], dtype='d')
-                + np.cross(np.asarray(self.world.angular_velocity[self.body],
-                                      dtype='d'), offset))
+        """How fast a point fixed to the body is moving through the world.
+
+        Against the stance the step began with while one is being worked out,
+        so every wheel is answered about the same body.
+        """
+        if self._stance is not None:
+            centre, linear, angular = self._stance
+        else:                                    # pragma: no cover - outside a step
+            centre = self.position()
+            linear = np.asarray(self.world.linear_velocity[self.body], dtype='d')
+            angular = np.asarray(self.world.angular_velocity[self.body],
+                                 dtype='d')
+        return linear + np.cross(angular, point - centre)
 
     def _impulse(self, point: np.ndarray, impulse: np.ndarray) -> None:
-        """Apply an impulse at a world point: a push and the spin it imparts."""
+        """Push on the body at a world point, and spin it as that push does.
+
+        Held until the step's wheels have all had their say where one is being
+        worked out; applied at once otherwise.
+        """
         if not np.any(impulse):
             return
-        offset = point - self.position()
+        if self._stance is not None:
+            self._pending.append((np.asarray(point, dtype='d').copy(),
+                                  np.asarray(impulse, dtype='d').copy()))
+            return
+        self._apply(self.position(), point, impulse)
+
+    def _settle_up(self) -> None:
+        """Give the body everything this step's wheels asked of it."""
+        stance, self._stance = self._stance, None
+        pending, self._pending = self._pending, []
+        centre = stance[0] if stance is not None else self.position()
+        for point, impulse in pending:
+            self._apply(centre, point, impulse)
+
+    def _apply(self, centre: np.ndarray, point: np.ndarray,
+               impulse: np.ndarray) -> None:
         self.world.apply_impulse(self.body, impulse)
-        self.world.apply_angular_impulse(self.body, np.cross(offset, impulse))
+        self.world.apply_angular_impulse(self.body,
+                                         np.cross(point - centre, impulse))
 
 
 def _clamp(value: float, low: float, high: float) -> float:

@@ -32,6 +32,41 @@ def _world_with_floor(height=0.0, tilt=0.0):
     return world
 
 
+#: A road's cut across, as one is actually built: two lanes falling away from a
+#: crown so that it drains, a shoulder, and a verge dropping to the ground.
+#: Offsets from the middle in metres, and how far each is below the crown.
+CARRIAGEWAY = ((-5.3, -0.472), (-4.3, -0.122), (-3.6, -0.072), (0.0, 0.0),
+               (3.6, -0.072), (4.3, -0.122), (5.3, -0.472))
+
+#: How far apart the rings of a swept road are written, in metres.
+RING = 5.0
+
+
+def _world_with_crown(section=CARRIAGEWAY, ring=RING, length=1600.0):
+    """A road, as a road is built: a ridge down the middle falling either side.
+
+    This is the surface that asks the hardest question of four wheels at once.
+    The two sides of the car stand on ground tilted opposite ways, so the
+    sideways correction one wheel needs is not the one the other needs; and it
+    is swept in rings a few metres apart, as any generated road is, so the
+    ground under a wheel is a new triangle several times a second.
+    """
+    world = PhysicsWorld()
+    rings = np.arange(-length / 2.0, length / 2.0 + ring, ring)
+    points = np.array([(x, y, z) for z in rings for x, y in section], dtype='d')
+    across = len(section)
+    faces = []
+    for row in range(len(rings) - 1):
+        for column in range(across - 1):
+            a = row * across + column
+            faces += [(a, a + across, a + 1), (a + 1, a + across, a + across + 1)]
+    shape = world.add_shape(model.Shape.trimesh(points,
+                                                np.asarray(faces, dtype='i')))
+    world.add_body(model.Motion(type=model.STATIC),
+                   collider=model.Collider(shape=shape))
+    return world
+
+
 def _car(world, position=(0.0, 1.0, 0.0), tuning=None, wheels=None):
     chassis = world.add_shape(model.Shape.box((1.8, 0.6, 4.0)))
     body = world.add_body(
@@ -180,6 +215,102 @@ class TestItGoes:
         assert vehicle.speed() < rolling
 
 
+#: A fast road car: enough power to matter, wings that press it down and air
+#: that holds it back. The combination is what a game tunes for, and what asks
+#: the hardest questions of the wheels.
+_FAST = VehicleTuning(engine_force=9000.0, brake_force=16000.0, base_speed=15.0,
+                      downforce=6.0, drag=0.9)
+
+
+class TestItGoesStraight:
+    """A symmetric car, pointed straight and given the throttle, goes straight.
+
+    What makes that a question at all is that four wheels push on one body in
+    the same step: work each one out against a body the wheel before it has
+    already moved and the four stop being symmetric, so the car wanders to
+    whichever side happens to be worked out first. Five metres in eight seconds
+    is a road's width, and a player correcting for it is correcting for the
+    order of a loop.
+    """
+
+    def _driven(self, world, vehicle, seconds=8.0):
+        _settle(world, vehicle, seconds=1.5)
+        start = world.position[vehicle.body].copy()
+        _settle(world, vehicle, seconds=seconds, throttle=1.0)
+        return float((world.position[vehicle.body] - start)[0])
+
+    def test_it_does_not_wander_off_to_one_side(self) -> None:
+        world = _world_with_floor()
+        vehicle = _car(world, position=(0, 1.0, 0))
+        assert abs(self._driven(world, vehicle)) < 0.5
+
+    def test_and_which_side_is_not_decided_by_the_order_of_the_wheels(self) -> None:
+        world = _world_with_floor()
+        forwards = self._driven(world, _car(world, position=(0, 1.0, 0)))
+        other = _world_with_floor()
+        backwards = self._driven(
+            other, _car(other, position=(0, 1.0, 0),
+                        wheels=list(reversed(car_wheels()))))
+        assert forwards == pytest.approx(backwards, abs=0.2)
+
+    def test_it_stays_pointed_where_it_started(self) -> None:
+        world = _world_with_floor()
+        vehicle = _car(world, position=(0, 1.0, 0))
+        self._driven(world, vehicle)
+        forward = vehicle.forward()
+        assert abs(math.degrees(math.atan2(float(forward[0]),
+                                           -float(forward[2])))) < 0.5
+
+    def test_it_does_not_shake_its_head_while_it_does(self) -> None:
+        """Straight is a heading held steady, not one averaging out.
+
+        Four wheels correct the same body's sideways scrub in the same step. Let
+        each take all of what it sees and together they take more yaw out than
+        there was, put some back the other way, and the car shimmies at the
+        rate of the physics loop -- which averages to straight and looks like a
+        car with a wheel out of balance.
+        """
+        world = _world_with_crown()
+        vehicle = _car(world, position=(0, 1.0, 0), tuning=_FAST,
+                       wheels=car_wheels(drive='rear', suspension_travel=0.22,
+                                         suspension_stiffness=26.0,
+                                         suspension_damping=0.55, grip=1.9))
+        _settle(world, vehicle, seconds=1.5)
+        worst = 0.0
+        for _ in range(int(6.0 / STEP)):
+            vehicle.control(throttle=1.0)
+            vehicle.update(STEP)
+            world.step(STEP)
+            worst = max(worst, abs(float(
+                world.angular_velocity[vehicle.body][1])))
+        assert worst < 0.05, "shimmied at %.3f rad/s" % worst
+
+    def test_it_goes_straight_along_a_crowned_road_too(self) -> None:
+        """Which is every road: the two sides of the car stand on ground tilted
+        opposite ways, and a car that cannot hold that line wanders off a road
+        nobody has steered it away from."""
+        world = _world_with_crown()
+        vehicle = _car(world, position=(0, 1.0, 0), tuning=_FAST,
+                       wheels=car_wheels(drive='rear', suspension_travel=0.22,
+                                         suspension_stiffness=26.0,
+                                         suspension_damping=0.55, grip=1.9))
+        assert abs(self._driven(world, vehicle, seconds=12.0)) < 0.5
+
+    def test_a_fast_car_with_wings_and_air_goes_straight_too(self) -> None:
+        """The case that matters, because it is the one a game tunes for.
+
+        Air resistance is a force on the *body*, handed to the wheels so that a
+        tyre with nothing to push against cannot hold the car back with it.
+        Handed out in equal quarters instead, the wheel the weight has come off
+        under acceleration is asked for a quarter of the drag it has no grip to
+        carry -- and what it gives up to find it is the sideways hold that was
+        keeping the car straight.
+        """
+        world = _world_with_floor()
+        vehicle = _car(world, position=(0, 1.0, 0), tuning=_FAST)
+        assert abs(self._driven(world, vehicle, seconds=12.0)) < 0.5
+
+
 class TestItTurns:
     def _driving(self, seconds=2.5):
         world = _world_with_floor()
@@ -230,6 +361,147 @@ class TestItTurns:
         vehicle.control(steer=10.0)
         vehicle.update(STEP)
         assert max(abs(wheel.steer_angle) for wheel in vehicle.wheels) <= 0.5
+
+
+class TestACarLeftAlone:
+    """It stays where it is.
+
+    A car parked on a hill does not roll away: it is in gear, or it is on its
+    handbrake, and either way letting go of the controls is not a decision to
+    coast down the slope. A vehicle that does roll makes stopping anywhere but
+    the flat a mistake, and turns every gentle grade in a world into something
+    the player has to hold a key against.
+    """
+
+    #: About five and a half degrees, which is a steep road and a gentle hill.
+    SLOPE = 0.1
+
+    def _parked(self, world, vehicle, seconds=10.0):
+        """Bring it to rest the way a driver does, let go, and see if it stays.
+
+        On the brake while it settles, because a car put down on a hill is a car
+        somebody stopped there: what is being asked is whether letting go of the
+        controls is the same as deciding to coast away.
+        """
+        _settle(world, vehicle, seconds=1.5, brake=1.0)
+        start = world.position[vehicle.body].copy()
+        _settle(world, vehicle, seconds=seconds)
+        return float(np.linalg.norm(world.position[vehicle.body] - start))
+
+    def test_it_does_not_roll_down_a_slope(self) -> None:
+        world = _world_with_floor(tilt=self.SLOPE)
+        assert self._parked(world, _car(world, position=(0, 1.0, 0))) < 0.5
+
+    def test_nor_creep_away_on_the_flat(self) -> None:
+        world = _world_with_floor()
+        assert self._parked(world, _car(world, position=(0, 1.0, 0))) < 0.2
+
+    def test_a_car_told_not_to_hold_itself_rolls(self) -> None:
+        """The holding is a number, and zero is a vehicle out of gear."""
+        world = _world_with_floor(tilt=self.SLOPE)
+        vehicle = _car(world, position=(0, 1.0, 0),
+                       tuning=VehicleTuning(holding=0.0))
+        assert self._parked(world, vehicle) > 5.0
+
+    def test_the_throttle_still_gets_it_going(self) -> None:
+        world = _world_with_floor(tilt=self.SLOPE)
+        vehicle = _car(world, position=(0, 1.0, 0))
+        _settle(world, vehicle, seconds=1.5)
+        _settle(world, vehicle, seconds=3.0, throttle=1.0)
+        assert vehicle.speed() > 3.0
+
+    def test_and_it_still_coasts_when_it_is_moving(self) -> None:
+        """Holding is what a stopped car does, not a brake that is always on."""
+        world = _world_with_floor()
+        vehicle = _car(world, position=(0, 1.0, 0))
+        _settle(world, vehicle, seconds=1.5)
+        _settle(world, vehicle, seconds=3.0, throttle=1.0)
+        rolling = vehicle.speed()
+        _settle(world, vehicle, seconds=1.0)
+        assert vehicle.speed() > rolling * 0.7
+
+    def test_and_then_stays_stopped_once_it_has_stopped(self) -> None:
+        world = _world_with_floor(tilt=self.SLOPE)
+        vehicle = _car(world, position=(0, 1.0, 0))
+        _settle(world, vehicle, seconds=1.5)
+        _settle(world, vehicle, seconds=3.0, throttle=1.0)
+        _settle(world, vehicle, seconds=6.0, brake=1.0)
+        assert self._parked(world, vehicle, seconds=8.0) < 0.5
+
+
+class TestTheSteeringEasesOffWithSpeed:
+    """The same input has to mean a gentler turn the faster the car is going.
+
+    A steering lock is chosen for a car park: full lock at walking pace is a
+    three-point turn, and full lock at forty metres a second is a request for
+    ten g that ends with the car pointing at the trees. So the lock falls away
+    as the speed rises, and it has to fall *fast enough that what it asks of the
+    tyres stops growing* -- otherwise every extra ten miles an hour is another
+    way to spin, and the driver's real control is how briefly they can touch a
+    key.
+    """
+
+    #: The tuning the numbers below are read against: full lock is a third of a
+    #: radian and it has halved by twenty metres a second.
+    TUNING = VehicleTuning(maximum_steer=0.33, steer_falloff_speed=20.0)
+
+    def _demand(self, speed):
+        """What the lock asks of the tyres at this speed, bar the wheelbase.
+
+        Cornering is ``v**2 / radius`` and the radius a steered wheel asks for
+        is the wheelbase over its angle, so this is the acceleration a full-lock
+        input is asking for, in metres a second squared per metre of wheelbase.
+        """
+        return speed ** 2 * self.TUNING.steer_lock(speed)
+
+    def test_a_standing_car_has_all_of_its_lock(self) -> None:
+        assert self.TUNING.steer_lock(0.0) == pytest.approx(0.33)
+
+    def test_at_the_falloff_speed_it_has_half(self) -> None:
+        assert self.TUNING.steer_lock(20.0) == pytest.approx(0.165)
+
+    def test_and_well_past_it_far_less_than_half_again(self) -> None:
+        """Halving once more for every doubling is not enough: the speed is
+        squaring while the lock is only halving."""
+        assert self.TUNING.steer_lock(40.0) < 0.33 / 4.0
+
+    def test_what_it_asks_of_the_tyres_stops_growing(self) -> None:
+        assert self._demand(80.0) < self._demand(40.0) * 1.3
+
+    def test_though_it_still_grows_at_the_speeds_a_car_park_is_driven_at(self) -> None:
+        """The fall-off is for the top end; at walking pace the lock is the
+        lock, and a car that could not turn in its own length would be no use."""
+        assert self._demand(5.0) > self._demand(1.0) * 4.0
+
+    def test_a_lock_that_never_falls_off_is_still_allowed(self) -> None:
+        assert VehicleTuning(maximum_steer=0.4, steer_falloff_speed=0.0
+                             ).steer_lock(50.0) == pytest.approx(0.4)
+
+    def test_a_tap_turns_the_car_more_at_low_speed_than_at_high(self) -> None:
+        """The whole point of it, measured the way a road measures it.
+
+        Not degrees a second -- a fast car covers more ground while it turns, so
+        it swings further by that count however gently it is cornering. Degrees
+        *per metre travelled* is what decides whether a touch of the key is a
+        lane change or a lap of the car park, and it has to be the smaller
+        number at speed.
+        """
+        def curved(seconds, throttle):
+            world = _world_with_floor()
+            vehicle = _car(world, position=(0, 1.0, 0), tuning=self.TUNING)
+            _settle(world, vehicle, seconds=1.5)
+            _settle(world, vehicle, seconds=seconds, throttle=throttle)
+            before = vehicle.forward().copy()
+            was = np.asarray(world.position[vehicle.body], dtype='d').copy()
+            _settle(world, vehicle, seconds=0.5, throttle=throttle, steer=1.0)
+            after = vehicle.forward()
+            turned = abs(math.atan2(float(np.cross(before, after)[1]),
+                                    float(np.dot(before, after))))
+            travelled = float(np.linalg.norm(
+                np.asarray(world.position[vehicle.body], dtype='d') - was))
+            return math.degrees(turned) / max(travelled, 1e-6)
+        assert curved(seconds=1.0, throttle=0.3) > \
+            curved(seconds=8.0, throttle=1.0) * 3.0
 
 
 class TestItHandlesSlopes:

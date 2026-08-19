@@ -111,6 +111,48 @@ piece of the world, so `raycast_many` decides which bodies are worth testing
 once and asks a landscape's mesh once for the triangles near all four rather
 than once per wheel; on a streamed world that is most of a physics step.
 
+**Every wheel is worked out against the same body.** Four wheels push on one
+chassis in the same step, and they touch the ground at the same instant. Working
+each one out against a body the wheel before it has already moved makes the four
+asymmetric, and the car wanders to whichever side is worked out first — a road's
+width in a few seconds of straight-line acceleration, and to the other side if
+the wheels are listed in another order. So a step reads one stance of the body,
+asks every wheel about that, and applies what they all asked for together.
+
+**The air is carried by the wheels holding the car up.** Drag is a force on the
+body, handed to the contacts so that a tyre with nothing to push against cannot
+hold the car back with it — and shared out by how much of the car each wheel is
+carrying, not in equal parts. A wheel the weight has come off under acceleration
+has almost no friction to spend, and an equal share of the drag spends all of
+it; what it gives up to find that is the sideways hold, since driving and
+gripping come out of one budget.
+
+**The steering lock falls with the square of the speed.** A lock is chosen for a
+car park — full lock at walking pace is a three-point turn — and the same lock at
+forty metres a second asks for ten g and ends with the car pointing at the trees.
+Halving it for every doubling of speed is not enough, because cornering is
+`v**2 / radius` and a radius that only widens in step with the speed is a demand
+that still doubles with it. Against `steer_falloff_speed` squared, what full lock
+asks of the tyres settles at a corner they can hold instead of running away with
+the speedometer, and the same touch of a key means a gentler turn the faster the
+car goes (`VehicleTuning.steer_lock`).
+
+**A tyre does not build its side force instantly.** The tread has to be laid
+down and deflected, which takes a fraction of a wheel's turn — the relaxation
+length, about a third of a metre on a road tyre — so a step takes out most of
+the sideways scrub and not all of it (`SCRUB_RELAXATION`). The numerics want the
+same thing: four wheels correcting one body in one step, each taking all of what
+it can see, take more yaw and more roll out of the car than there was and put
+some back the other way. What that looks like is a car shaking its head at the
+rate of the physics loop, worst on a crowned road — which is every road, since
+they are all built to drain.
+
+**A car left alone stays where it is.** With nothing asked of it and barely
+moving, `VehicleTuning.holding` newtons hold it: a parked car is in gear or on
+its handbrake, and one that coasts off down a slope makes stopping anywhere but
+the flat a mistake. Divided by the car's weight, that number is the steepest
+grade it holds on; zero is a vehicle out of gear.
+
 Each wheel also looks a little **above** itself, `VehicleTuning.ground_recovery`
 metres of it. A wheel that only looks down cannot see ground that has come up
 under the car — a lift, a moving platform, a landscape paging in at a finer
