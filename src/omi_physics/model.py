@@ -91,6 +91,11 @@ class Motion:
     """
     type: str = DYNAMIC
     mass: float = 1.0
+    #: Where the body's mass is, in its own frame. Carried and round-tripped
+    #: through glTF; **the solver does not use it yet** -- a body's origin is
+    #: its mass, the centre of its collider and its node transform all at once.
+    #: See ``plans/CENTRE-OF-MASS.md`` for what honouring it involves and what
+    #: not having it costs.
     centerOfMass: tuple = (0.0, 0.0, 0.0)
     inertiaDiagonal: tuple = (0.0, 0.0, 0.0)    # 0 => auto-derive from shape+mass
     inertiaOrientation: tuple = (0.0, 0.0, 0.0, 1.0)

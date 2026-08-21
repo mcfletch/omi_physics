@@ -74,7 +74,7 @@ def strides(character, dt=1 / 60.0, frames=120):
 #: the bug stays visible and the next attempt has a number to aim at.
 LURCH_IS_OPEN = pytest.mark.xfail(
     reason='mounting a step advances the whole climb in one frame; see '
-           'PROJECT-PLAN §3b B1', strict=True)
+           "twitch's PROJECT-PLAN §3b B1", strict=True)
 
 
 class TestThePaceOfAStep:

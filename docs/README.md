@@ -13,4 +13,6 @@ Deep-dive documentation for the `omi_physics` engine. Start with the
 - **[ACCELERATORS.md](ACCELERATORS.md)** — the Cython accelerators, the
   pure-Python fallback contract, and how they are kept honest.
 
+Work not yet done is in [plans/](../plans/PROJECT-PLAN.md).
+
 > The diagrams are [Mermaid](https://mermaid.js.org/); GitHub renders them inline.
