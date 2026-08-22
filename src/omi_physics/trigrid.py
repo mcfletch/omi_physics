@@ -150,7 +150,8 @@ class TriangleGrid:
             return self._big.copy()
         found = [self._cells[key] for key in self._walk(origin, heading, entry)
                  if key in self._cells]
-        return self._gathered(found, *_segment_bounds(origin, heading, limit))
+        return self._gathered(found, *_segment_bounds(origin, heading, limit),
+                              dedup=False)
 
     def _walk(self, origin: np.ndarray, heading: np.ndarray,
               entry: tuple[float, float]):
@@ -184,8 +185,9 @@ class TriangleGrid:
     # -- the answer ---------------------------------------------------------
 
     def _gathered(self, found: list[np.ndarray], low: np.ndarray,
-                  high: np.ndarray, tighten: bool = True) -> np.ndarray:
-        """One sorted array of candidates, with the oversized triangles added.
+                  high: np.ndarray, tighten: bool = True,
+                  dedup: bool = True) -> np.ndarray:
+        """One array of candidates, with the oversized triangles added.
 
         ``tighten`` filters by the query's own bounds on the way out. A ray
         wants it and asks for it: it is what keeps a cast from answering with
@@ -200,13 +202,26 @@ class TriangleGrid:
 
         A single cell's array is already sorted and unique, so the case such a
         box hits most often skips the merge entirely.
+
+        ``dedup`` merges the cells into one sorted, unique array. A triangle
+        large enough to lie in several of the cells a query touches is named
+        once per cell, and for anything that *counts* what it found -- a
+        contact set -- naming it twice is a wrong answer rather than slow one.
+        A **ray** does not count: it keeps the nearest of whatever it meets, and
+        meeting the same triangle twice yields the same distance and the same
+        triangle index. So it pays for the extra test rather than for the sort,
+        which is the cheaper of the two on a level's geometry.
         """
         if len(self._big):
             found = found + [self._big]
         if not found:
             return np.zeros(0, dtype='i')
-        candidates = (found[0] if len(found) == 1
-                      else np.unique(np.concatenate(found)))
+        if len(found) == 1:
+            candidates = found[0]
+        elif dedup:
+            candidates = np.unique(np.concatenate(found))
+        else:
+            candidates = np.concatenate(found)
         if not tighten:
             return candidates
         keep = (np.all(self._lows[candidates] <= high, axis=1)
