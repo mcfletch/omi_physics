@@ -49,6 +49,14 @@ SMALLEST_WORTH_BINNING = 256
 EDGE = 1e-9
 
 
+#: How many candidates a *box* query must be handed before its own bounds are
+#: worth filtering by.  Below this the filter's six array operations cost more
+#: than the exact tests they save; above it, they cost far less.  A ray always
+#: filters, because for a ray it is semantics rather than speed (see
+#: :meth:`TriangleGrid._gathered`).
+FILTER_ABOVE = 16
+
+
 class TriangleGrid:
     """Triangle indices binned by where their bounds are.
 
@@ -193,12 +201,20 @@ class TriangleGrid:
         wants it and asks for it: it is what keeps a cast from answering with
         triangles past its own limit, which is semantics rather than speed.
 
-        A box does not. Its contract is a superset -- the caller does the exact
-        test either way -- and that test is now a fraction of a microsecond a
-        triangle, while the filter is two gathers and four reductions however
-        few candidates there are. Paying it to save a cheaper thing is the
-        wrong way round, and a character-sized box is asked more often than
-        anything else here.
+        A box asks for it once there is enough to be worth filtering. Its
+        contract is a superset -- the caller does the exact test either way --
+        and the filter is two gathers and four reductions *however few*
+        candidates there are, so for a box standing in open space, which hits
+        one or two cells, it is pure overhead against a test that costs a
+        fraction of a microsecond a triangle.
+
+        That stops being true as soon as the box is somewhere detailed. A
+        character-sized box in a real level's geometry is handed hundreds of
+        triangles by the cells it touches and keeps a handful of them, and then
+        the six array operations are cheap against the hundreds of exact tests
+        they save. :data:`FILTER_ABOVE` is where the one becomes the other; it
+        is a constant-factor crossing rather than a sharp one, so it is set low
+        and the case it protects is the genuinely tiny one.
 
         A single cell's array is already sorted and unique, so the case such a
         box hits most often skips the merge entirely.
@@ -222,7 +238,7 @@ class TriangleGrid:
             candidates = np.unique(np.concatenate(found))
         else:
             candidates = np.concatenate(found)
-        if not tighten:
+        if not tighten and len(candidates) <= FILTER_ABOVE:
             return candidates
         keep = (np.all(self._lows[candidates] <= high, axis=1)
                 & np.all(self._highs[candidates] >= low, axis=1))
