@@ -58,7 +58,7 @@ sequenceDiagram
 | **refit AABBs** | `position`, `orientation`, shape half-extents | `aabb_min`, `aabb_max` |
 | **broadphase** | `aabb_min/max`, collision filters | candidate `(i, j)` pairs |
 | **narrowphase** | candidate pairs, `position`, `orientation`, shapes | `Contact` manifolds (normal, points, depth) |
-| **solver** | contacts, velocities, inverse mass/inertia, materials | `linear/angular_velocity`, positional correction |
+| **solver** | contacts, velocities, inverse mass/inertia, materials | `linear/angular_velocity`, positional correction, `Contact.approach` |
 | **joints** | joint definitions, body poses/velocities | velocities, poses |
 | **integrate positions** | velocities | `position`, `orientation` |
 | **sleeping** | velocities over time | `awake`, `sleep_timer` |
@@ -100,6 +100,13 @@ with sequential-impulse Gauss–Seidel: it iterates over the contacts applying
 velocity impulses until they stop interpenetrating, warm-starting from the
 previous step's impulses so stacks settle quickly. This is the stage the
 `_solver_native` accelerator replaces.
+
+Before any of that it writes each contact's **approach** — how fast the pair
+were closing along the contact normal when they met. Restitution is scaled by
+it, and `PhysicsWorld.impact_on` answers from it. It has to be taken here and
+nowhere later: the velocity iterations exist to remove exactly that velocity, so
+a game reading the same quantity off the bodies after the step gets a number
+that says a square-on impact never happened.
 
 ## Determinism
 

@@ -105,7 +105,9 @@ class SequentialImpulseSolver:
         """Build a constraint per contact and cache each body's world inverse inertia.
 
         Returns the constraints and the ``body index -> inverse inertia`` map the
-        velocity iterations reuse.  Seeds warm-start impulses from the last step.
+        velocity iterations reuse.  Seeds warm-start impulses from the last step,
+        and records how hard each pair met, which is readable here and nowhere
+        after (:attr:`~omi_physics.collide.Contact.approach`).
         """
         cons = []
         invI: Dict[int, np.ndarray] = {}
@@ -133,8 +135,15 @@ class SequentialImpulseSolver:
             else:
                 k.friction = model.combine(mat_a.dynamicFriction, mat_b.dynamicFriction,
                                            mat_a.frictionCombine)
-            vn0 = np.dot(self._rel_vel(world, a, b, k.rA, k.rB), k.n)
-            k.vBias = -k.restitution * vn0 if vn0 < -self.restitution_threshold else 0.0
+            # How hard they met, which restitution is a fraction of and
+            # impact_on answers from. Taken before anything is solved because
+            # the iterations below are precisely the removal of it.
+            c.approach = -float(np.dot(
+                world.linear_velocity[b] + _cross(world.angular_velocity[b], k.rB)
+                - world.linear_velocity[a] - _cross(world.angular_velocity[a], k.rA),
+                k.n))
+            k.vBias = (k.restitution * c.approach
+                       if c.approach > self.restitution_threshold else 0.0)
             if self.warm_start:
                 self._seed_from_cache(k)
             cons.append(k)
@@ -181,12 +190,6 @@ class SequentialImpulseSolver:
         k += np.dot(raxn, invI[a] @ raxn)
         k += np.dot(rbxn, invI[b] @ rbxn)
         return 1.0 / k if k > 1e-12 else 0.0
-
-    def _rel_vel(self, world: "PhysicsWorld", a: int, b: int, rA: np.ndarray,
-                 rB: np.ndarray) -> np.ndarray:
-        """Velocity of body ``b``'s contact point relative to body ``a``'s."""
-        return (world.linear_velocity[b] + _cross(world.angular_velocity[b], rB)
-                - world.linear_velocity[a] - _cross(world.angular_velocity[a], rA))
 
     # -- solve -----------------------------------------------------------
     def solve(self, world: "PhysicsWorld", contacts: List["Contact"], dt: float) -> None:
@@ -235,8 +238,9 @@ class SequentialImpulseSolver:
     def _solve_native_full(self, world: "PhysicsWorld", contacts: List["Contact"]) -> None:
         """Assemble contact arrays and run prep + velocity + position in the kernel.
 
-        Only the material combine and warm-start seeding stay in Python (both cheap
-        per contact); the geometric constraint setup and all iterations are native.
+        Only the material combine, the warm-start seeding and the record of how
+        hard each pair met stay in Python (all cheap per contact); the geometric
+        constraint setup and all iterations are native.
         """
         K = len(contacts)
         a_idx = np.empty(K, dtype=np.intp); b_idx = np.empty(K, dtype=np.intp)
@@ -261,6 +265,20 @@ class SequentialImpulseSolver:
                 seed = self._seed_pair(c)
                 if seed is not None:
                     nImp[i], tImp[i, 0], tImp[i, 1] = seed
+        # How hard each pair met, off the arrays just assembled and before the
+        # kernel resolves anything: the iterations it runs are the removal of
+        # exactly this velocity, so there is no reading it afterwards. The
+        # normal points from A to B, so the two closing is the negative of B
+        # receding along it.
+        at_a = (world.linear_velocity[a_idx]
+                + np.cross(world.angular_velocity[a_idx],
+                           point - world.position[a_idx]))
+        at_b = (world.linear_velocity[b_idx]
+                + np.cross(world.angular_velocity[b_idx],
+                           point - world.position[b_idx]))
+        for c, closing in zip(contacts,
+                              -np.einsum('ij,ij->i', at_b - at_a, normal)):
+            c.approach = float(closing)
         invIw = self._inv_inertia_world_all(world)
         _native.prepare_and_solve(
             a_idx, b_idx, point, normal, depth,

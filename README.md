@@ -98,6 +98,41 @@ The data model is OMI glTF physics (`model.Shape`, `Motion`, `Collider`,
 `Material`, `Joint`, ...), so scenes round-trip to and from glTF documents
 (`omi_physics.omi_gltf`).
 
+### How hard something was hit
+
+`world.impact_on(body)` answers what struck a body in the step just run and how
+fast the two were closing along the contact when they met, in metres per second
+— the number damage, a crash, an impact sound or a jolt of force feedback is
+decided from.
+
+```python
+for _ in range(steps):
+    world.step(1 / 120)
+    struck = world.impact_on(player, above=1.0, skip_static=True)
+    if struck is not None:
+        other, closing = struck
+        crunch(closing)
+```
+
+**Ask once a step, not once a frame.** A frame is several steps, contacts are
+rebuilt in each of them, and the speed on a contact is taken *before* the solve
+— because resolving a contact is precisely cancelling the velocity that measures
+it. Sampled a step late, a square-on impact reads as nothing while a glancing
+one reads almost undiminished, which is the wrong way round for anything that
+has to tell a crash from a scrape.
+
+`above` is the speed below which a contact is not a blow. A body held against
+something is closing on it slightly on every step: over one step gravity gives
+it `g·dt` for the solver to take away again, so a box resting on the floor at
+120 Hz reads about 0.08 m/s for as long as it sits there. `skip_static` leaves
+out what a body landed on, for a caller that wants to know what it *hit*.
+
+A body the game moves itself has to be told its velocity as well as its pose
+(`place_body`, then a write to `linear_velocity`). Without one it is a wall:
+the solver resolves against the difference between two bodies' velocities, so a
+moving platform written down as still throws off whatever lands on it and reads
+as having been hit at the full speed of anything that merely caught it up.
+
 ### Driving a car
 
 `RaycastVehicle` is the model every driving game uses: a rigid body with no

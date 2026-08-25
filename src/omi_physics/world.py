@@ -6,8 +6,8 @@ contiguous numpy, so integration and AABB refit are single array ops over all
 awake bodies — fast on the CPU today and GPU-shaped for later (see
 ``docs/PIPELINE.md``).
 """
-from typing import (Any, Callable, Dict, List, Optional, Set, Tuple,
-                    TYPE_CHECKING)
+from typing import (Any, Callable, Container, Dict, List, Optional, Set,
+                    Tuple, TYPE_CHECKING)
 import os
 
 import numpy as np
@@ -254,6 +254,61 @@ class PhysicsWorld:
     def _pair_key(a: int, b: int) -> Tuple[int, int]:
         """The order-independent key for a material pair (smaller index first)."""
         return (a, b) if a <= b else (b, a)
+
+    # -- game-facing impacts ---------------------------------------------
+    def impact_on(self, i: int, above: float = 0.0, skip_static: bool = False,
+                  among: Optional[Container[int]] = None
+                  ) -> Optional[Tuple[int, float]]:
+        """The heaviest blow body ``i`` took in the step just run.
+
+        Returns ``(other body, closing speed)`` -- how fast the two were coming
+        together along the contact normal at the moment they met, in metres per
+        second -- or ``None`` if nothing struck it that hard.
+
+        What a game asks to decide damage, a crash, an impact sound or a jolt of
+        force feedback.  Read it after :meth:`step` and before the next one:
+        contacts are rebuilt every step, and the speed on them is the one taken
+        before the solve, since resolving a contact is exactly cancelling the
+        velocity that measures it.  A caller sampling once a frame rather than
+        once a step sees only the last step of the frame, and an impact resolved
+        in an earlier one has already been answered for.
+
+        ``above`` is the speed below which a contact is not a blow.  **A body
+        held against something is closing on it slightly on every step**: over
+        one step gravity gives it ``g·dt`` to be taken away again, so a box
+        resting on the floor at 120 Hz reads about 0.08 m/s for as long as it
+        sits there.  Anything telling a landing from a rest wants ``above`` set
+        past that; anything about a horizontal contact, which gravity does not
+        push along, can leave it at zero.
+
+        ``skip_static`` ignores blows from static bodies, for a caller that
+        cares what it hit rather than what it landed on -- the ground is a
+        contact on every step of every fall.
+
+        ``among`` narrows the answer to a set of bodies, for a caller with one
+        question rather than a general one -- "did I hit one of *these*".
+        Without it the heaviest blow is the only answer, and a heavier one from
+        something the caller does not care about hides the one it does: a car
+        that clips a bollard and a rival in the same step is told about the
+        bollard and drives on.
+        """
+        found: Optional[Tuple[int, float]] = None
+        floor = max(float(above), 0.0)
+        for contact in self.contacts:
+            if contact.a == i:
+                other = contact.b
+            elif contact.b == i:
+                other = contact.a
+            else:
+                continue
+            if skip_static and self._motion_type[other] == _STATIC:
+                continue
+            if among is not None and other not in among:
+                continue
+            if contact.approach > floor and (found is None
+                                             or contact.approach > found[1]):
+                found = (int(other), float(contact.approach))
+        return found
 
     # -- game-facing impulses -------------------------------------------
     def apply_impulse(self, i: int, impulse: Vec) -> None:

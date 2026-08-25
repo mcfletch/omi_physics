@@ -42,6 +42,13 @@ class Contact:
     penetration (``> 0`` when overlapping).  ``normal_impulse`` / ``tangent_impulse``
     are scratch the solver fills in and warm-starts from — leave them at their
     defaults when constructing a contact.
+
+    ``approach`` is how fast the two were coming together along ``normal`` when
+    they met, in metres per second, positive for closing and zero or below for a
+    pair merely resting against one another.  The solver records it before it
+    resolves anything, which is the only moment it can be read: resolving a
+    contact is precisely cancelling the velocity that measures it.  See
+    :meth:`~omi_physics.world.PhysicsWorld.impact_on`.
     """
     a: int
     b: int
@@ -51,6 +58,8 @@ class Contact:
     # solver scratch (filled in solver)
     normal_impulse: float = 0.0
     tangent_impulse: np.ndarray = field(default_factory=lambda: np.zeros(2))
+    #: Closing speed along ``normal`` before the solve, in metres per second.
+    approach: float = 0.0
 
 
 def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> List[Contact]:
