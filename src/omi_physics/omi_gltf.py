@@ -11,7 +11,7 @@ This module works on plain glTF JSON dicts (no GL, no mesh loading required), so
 the whole path is unit-testable.
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 
 from . import model
@@ -23,22 +23,22 @@ SUPPORTED = ('OMI_physics_shape', 'OMI_physics_body',
 @dataclass
 class NodeBody:
     """The OMI physics attached to a single glTF node (any field may be absent)."""
-    motion: Optional[model.Motion] = None
-    collider: Optional[model.Collider] = None
-    trigger: Optional[model.Trigger] = None
-    gravity: Optional[model.Gravity] = None
-    joint: Optional[model.JointAttach] = None
+    motion: model.Motion | None = None
+    collider: model.Collider | None = None
+    trigger: model.Trigger | None = None
+    gravity: model.Gravity | None = None
+    joint: model.JointAttach | None = None
 
 
 @dataclass
 class PhysicsDocument:
     """The document-level OMI physics tables plus per-node bodies keyed by node index."""
-    shapes: List[model.Shape] = field(default_factory=list)
-    materials: List[model.Material] = field(default_factory=list)
-    filters: List[model.CollisionFilter] = field(default_factory=list)
-    joints: List[model.Joint] = field(default_factory=list)
-    global_gravity: Optional[model.Gravity] = None
-    node_bodies: Dict[int, NodeBody] = field(default_factory=dict)
+    shapes: list[model.Shape] = field(default_factory=list)
+    materials: list[model.Material] = field(default_factory=list)
+    filters: list[model.CollisionFilter] = field(default_factory=list)
+    joints: list[model.Joint] = field(default_factory=list)
+    global_gravity: model.Gravity | None = None
+    node_bodies: dict[int, NodeBody] = field(default_factory=dict)
 
 
 # ── shapes ──────────────────────────────────────────────────────────────
@@ -189,11 +189,11 @@ def _write_gravity_volume(gv: model.Gravity) -> dict:
 def _read_joint(d: dict) -> model.Joint:
     """Build a :class:`model.Joint` (its limits and drives) from a joint entry."""
     limits = [model.JointLimit(
-        linearAxes=tuple(l.get('linearAxes', [])),
-        angularAxes=tuple(l.get('angularAxes', [])),
-        min=l.get('min', -np.inf), max=l.get('max', np.inf),
-        stiffness=l.get('stiffness', np.inf), damping=l.get('damping', 0.0))
-        for l in d.get('limits', [])]
+        linearAxes=tuple(lim.get('linearAxes', [])),
+        angularAxes=tuple(lim.get('angularAxes', [])),
+        min=lim.get('min', -np.inf), max=lim.get('max', np.inf),
+        stiffness=lim.get('stiffness', np.inf), damping=lim.get('damping', 0.0))
+        for lim in d.get('limits', [])]
     drives = [model.JointDrive(
         type=dr.get('type', 'linear'), mode=dr.get('mode', 'force'),
         axis=dr.get('axis', 0), maxForce=dr.get('maxForce', np.inf),
@@ -260,15 +260,15 @@ def load_document(gltf: dict) -> PhysicsDocument:
     return doc
 
 
-def export_extensions(doc: PhysicsDocument) -> Tuple[dict, dict]:
+def export_extensions(doc: PhysicsDocument) -> tuple[dict, dict]:
     """Return ``(top_extensions, node_extensions)`` reproducing the OMI blocks.
 
     ``node_extensions`` maps node index to that node's ``extensions`` dict.
     """
-    top: Dict[str, dict] = {}
+    top: dict[str, dict] = {}
     if doc.shapes:
         top['OMI_physics_shape'] = {'shapes': [_write_shape(s) for s in doc.shapes]}
-    body: Dict[str, list] = {}
+    body: dict[str, list] = {}
     if doc.materials:
         body['physicsMaterials'] = [_write_material(m) for m in doc.materials]
     if doc.filters:
@@ -281,10 +281,10 @@ def export_extensions(doc: PhysicsDocument) -> Tuple[dict, dict]:
     if doc.global_gravity is not None:
         top['OMI_physics_gravity'] = _write_global_gravity(doc.global_gravity)
 
-    node_ext: Dict[int, dict] = {}
+    node_ext: dict[int, dict] = {}
     for idx, nb in doc.node_bodies.items():
-        ext: Dict[str, dict] = {}
-        node_body: Dict[str, dict] = {}
+        ext: dict[str, dict] = {}
+        node_body: dict[str, dict] = {}
         if nb.motion is not None:
             node_body['motion'] = _write_motion(nb.motion)
         if nb.collider is not None:
@@ -303,22 +303,22 @@ def export_extensions(doc: PhysicsDocument) -> Tuple[dict, dict]:
 
 def _write_joint(j: model.Joint) -> dict:
     """Serialize a :class:`model.Joint` (its limits and drives) to a joint entry."""
-    out: Dict[str, list] = {}
+    out: dict[str, list] = {}
     if j.limits:
-        out['limits'] = [_write_limit(l) for l in j.limits]
+        out['limits'] = [_write_limit(lim) for lim in j.limits]
     if j.drives:
         out['drives'] = [_write_drive(d) for d in j.drives]
     return out
 
 
-def _write_limit(l: model.JointLimit) -> dict:
+def _write_limit(limit: model.JointLimit) -> dict:
     """Serialize a :class:`model.JointLimit`; infinite min/max are omitted."""
-    out: Dict[str, object] = {'linearAxes': list(l.linearAxes),
-                              'angularAxes': list(l.angularAxes)}
-    if np.isfinite(l.min):
-        out['min'] = l.min
-    if np.isfinite(l.max):
-        out['max'] = l.max
+    out: dict[str, object] = {'linearAxes': list(limit.linearAxes),
+                              'angularAxes': list(limit.angularAxes)}
+    if np.isfinite(limit.min):
+        out['min'] = limit.min
+    if np.isfinite(limit.max):
+        out['max'] = limit.max
     return out
 
 

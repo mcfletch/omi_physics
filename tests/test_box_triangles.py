@@ -61,7 +61,7 @@ class TestWhetherTheyTouch:
         assert not hit.any() or float(depths.max()) < 1e-6
 
     def test_no_triangles_is_no_contact(self) -> None:
-        hit, points, normals, depths = box_triangle_batch(
+        hit, points, _normals, _depths = box_triangle_batch(
             _box(), np.zeros((0, 3, 3)))
         assert len(hit) == 0 and len(points) == 0
 

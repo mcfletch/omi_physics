@@ -34,13 +34,13 @@ two apart at a glance.
 """
 import threading
 import time
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
 from . import mathutil
 
-Snapshot = Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+Snapshot = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
 class ThreadedSimulation:
@@ -57,9 +57,9 @@ class ThreadedSimulation:
         self.sim_hz = sim_hz
         self._lock = threading.Lock()
         self._world_lock = threading.Lock()
-        self._snap: Optional[Snapshot] = None
+        self._snap: Snapshot | None = None
         self._version = 0                        # bumped each publish
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._steps = 0
         self._dropped = 0
@@ -158,7 +158,7 @@ class ThreadedSimulation:
             self._version += 1
 
     # -- consumer thread -------------------------------------------------
-    def latest(self) -> Tuple[Optional[Snapshot], int]:
+    def latest(self) -> tuple[Snapshot | None, int]:
         """The most recent published snapshot and its version.
 
         Returns ``(None, version)`` before the first publish. The version lets a

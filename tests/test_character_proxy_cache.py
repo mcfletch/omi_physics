@@ -55,6 +55,7 @@ def test_avatars_in_different_worlds_do_not():
 def test_the_shared_cache_goes_when_the_world_does():
     """Held weakly, so an unloaded map takes its collision copy with it."""
     import gc
+
     from omi_physics import character
     w = world()
     floor(w)

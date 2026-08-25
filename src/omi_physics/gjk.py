@@ -7,7 +7,8 @@ point.  Used for convex↔convex and convex↔triangle (dynamic-vs-static mesh).
 
 References: van den Bergen, *Collision Detection in Interactive 3D Environments*.
 """
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from . import mathutil
@@ -37,7 +38,7 @@ def _support(A: 'SupportProxy', B: 'SupportProxy', d: np.ndarray) -> _Vertex:
 
 
 def gjk_intersect(A: 'SupportProxy', B: 'SupportProxy',
-                  max_iter: int = 32) -> Tuple[bool, List[_Vertex]]:
+                  max_iter: int = 32) -> tuple[bool, list[_Vertex]]:
     """Test whether convex proxies A and B overlap; return ``(hit, simplex)``."""
     d = B.support(np.zeros(3)) - A.support(np.zeros(3))
     if np.dot(d, d) < EPS:
@@ -57,7 +58,7 @@ def gjk_intersect(A: 'SupportProxy', B: 'SupportProxy',
     return False, simplex
 
 
-def _do_simplex(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray]:
+def _do_simplex(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     """Advance the simplex toward the origin; return ``(contains_origin, simplex, dir)``."""
     if len(simplex) == 2:
         return _line(simplex)
@@ -66,7 +67,7 @@ def _do_simplex(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray
     return _tetra(simplex)
 
 
-def _line(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray]:
+def _line(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     """Handle a 2-vertex simplex (edge); return the reduced simplex and search direction."""
     b, a = simplex[0], simplex[1]
     ab = b.v - a.v
@@ -79,7 +80,7 @@ def _line(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray]:
     return False, [a], ao
 
 
-def _triangle(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray]:
+def _triangle(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     """Handle a 3-vertex simplex (triangle); return the reduced simplex and search direction."""
     c, b, a = simplex
     ab, ac, ao = b.v - a.v, c.v - a.v, -a.v
@@ -95,7 +96,7 @@ def _triangle(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray]:
     return False, [b, c, a], -abc
 
 
-def _tetra(simplex: List[_Vertex]) -> Tuple[bool, List[_Vertex], np.ndarray]:
+def _tetra(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     """Handle a 4-vertex simplex (tetrahedron); True if it encloses the origin."""
     d, c, b, a = simplex
     ab, ac, ad, ao = b.v - a.v, c.v - a.v, d.v - a.v, -a.v
@@ -117,8 +118,8 @@ def _any_perp(v: np.ndarray) -> np.ndarray:
     return np.cross(v, a)
 
 
-def epa(A: 'SupportProxy', B: 'SupportProxy', simplex: List[_Vertex],
-        max_iter: int = 64) -> Optional[Tuple[np.ndarray, float, np.ndarray]]:
+def epa(A: 'SupportProxy', B: 'SupportProxy', simplex: list[_Vertex],
+        max_iter: int = 64) -> tuple[np.ndarray, float, np.ndarray] | None:
     """Expand the GJK simplex to the nearest face; return ``(normal, depth, point)``.
 
     ``simplex`` is the overlapping simplex from :func:`gjk_intersect`.  Returns
@@ -153,7 +154,7 @@ def epa(A: 'SupportProxy', B: 'SupportProxy', simplex: List[_Vertex],
 
 
 def _expand_to_tetra(A: 'SupportProxy', B: 'SupportProxy',
-                     verts: List[_Vertex]) -> Optional[List[_Vertex]]:
+                     verts: list[_Vertex]) -> list[_Vertex] | None:
     """Grow a sub-tetrahedral simplex to 4 non-degenerate vertices, or ``None``."""
     dirs = [np.array([1.0, 0, 0]), np.array([-1.0, 0, 0]),
             np.array([0, 1.0, 0]), np.array([0, -1.0, 0]),
@@ -173,12 +174,15 @@ def _expand_to_tetra(A: 'SupportProxy', B: 'SupportProxy',
     return pts[:4]
 
 
-def _closest_face(verts: List[_Vertex], faces: List[Tuple[int, int, int]]
-                  ) -> Tuple[Optional[np.ndarray], float, Optional[Tuple[int, int, int]]]:
-    """Face nearest the origin as ``(outward_normal, distance, face)``, or all ``None`` if none valid."""
-    best_n: Optional[np.ndarray] = None
+def _closest_face(verts: list[_Vertex], faces: list[tuple[int, int, int]]
+                  ) -> tuple[np.ndarray | None, float, tuple[int, int, int] | None]:
+    """Face nearest the origin as ``(outward_normal, distance, face)``.
+
+    All three are ``None`` when the polytope has no valid face left.
+    """
+    best_n: np.ndarray | None = None
     best_d: float = np.inf
-    best_f: Optional[Tuple[int, int, int]] = None
+    best_f: tuple[int, int, int] | None = None
     for f in faces:
         a, b, c = verts[f[0]].v, verts[f[1]].v, verts[f[2]].v
         n = np.cross(b - a, c - a)
@@ -194,12 +198,12 @@ def _closest_face(verts: List[_Vertex], faces: List[Tuple[int, int, int]]
     return best_n, best_d, best_f
 
 
-def _rebuild(verts: List[_Vertex], faces: List[Tuple[int, int, int]],
-             new_idx: int) -> List[Tuple[int, int, int]]:
+def _rebuild(verts: list[_Vertex], faces: list[tuple[int, int, int]],
+             new_idx: int) -> list[tuple[int, int, int]]:
     """Re-triangulate the polytope after adding vertex ``new_idx`` (remove seen faces)."""
     w = verts[new_idx].v
-    visible_edges: Dict[Tuple[int, int], bool] = {}
-    kept: List[Tuple[int, int, int]] = []
+    visible_edges: dict[tuple[int, int], bool] = {}
+    kept: list[tuple[int, int, int]] = []
     for f in faces:
         a = verts[f[0]].v
         n = np.cross(verts[f[1]].v - a, verts[f[2]].v - a)
@@ -217,9 +221,9 @@ def _rebuild(verts: List[_Vertex], faces: List[Tuple[int, int, int]],
     return kept
 
 
-def _contact_from_face(verts: List[_Vertex], face: Tuple[int, int, int],
+def _contact_from_face(verts: list[_Vertex], face: tuple[int, int, int],
                        normal: np.ndarray, dist: float
-                       ) -> Tuple[np.ndarray, float, np.ndarray]:
+                       ) -> tuple[np.ndarray, float, np.ndarray]:
     """Recover ``(normal, depth, world_point)`` from the nearest EPA face's witnesses."""
     a, b, c = verts[face[0]], verts[face[1]], verts[face[2]]
     bary = _barycentric(normal * dist, a.v, b.v, c.v)
@@ -247,7 +251,7 @@ def _barycentric(p: np.ndarray, a: np.ndarray, b: np.ndarray,
 
 
 def collide_convex(a: int, b: int, PA: 'SupportProxy',
-                   PB: 'SupportProxy') -> List[Contact]:
+                   PB: 'SupportProxy') -> list[Contact]:
     """Convex↔convex (and convex↔triangle) via GJK+EPA → a single contact."""
     hit, simplex = gjk_intersect(PA, PB)
     if not hit:

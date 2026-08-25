@@ -44,7 +44,17 @@ gl = ["PyOpenGL>=4.0.0a1"]
 # A windowing backend so the GPU-parity tests can create a hidden GL context.
 gltest = ["PyOpenGL>=4.0.0a1", "glfw>=2.0"]
 # Just enough to run the test suite (the GPU-parity test skips without gltest).
-test = ["pytest", "pytest-timeout"]
+test = [
+    "pytest",
+    "pytest-timeout",
+    # CPython only. Hypothesis is a compiled package now -- it stopped shipping a
+    # pure-Python wheel -- and publishes wheels for cp310-cp315 and pp311 alone,
+    # so a PyPy row without one tries to build it from source and fails. The
+    # property files ask about the solvers rather than about the interpreter, and
+    # PyPy is in the matrix for the pure-Python fallback, which they do not need;
+    # `tests/test_properties_*.py` skip where it is absent.
+    "hypothesis>=6.0; implementation_name == 'cpython'",
+]
 dev = [
     "omi_physics[test,gltest]",
     "tox>=4.0",
@@ -78,6 +88,88 @@ filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "serial: needs a quiet machine (no concurrent CPU load); wall-clock budget checks whose margin shrinks under load. Run them alone with '-m serial' after a '-m \"not serial\"' bulk pass.",
 ]
+
+[tool.ruff]
+# Every setting ruff needs is here, so `ruff check` and `ruff format` in the
+# checkout are the same run tox and CI make -- no flags to remember and no way
+# for a local pass to mean something different from the gate.
+line-length = 100
+target-version = "py310"
+# `.claude/worktrees/` holds working copies of this same repository, checked out
+# by a tool at paths git does not track from here. Linting them means editing
+# somebody else's branch from inside this one.
+extend-exclude = [".claude", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "B",
+    "ARG",  # unused arguments -- a parameter nothing reads is a lie in a signature
+    "I",    # import order
+    "UP",   # constructs superseded by the minimum Python
+    "SIM",  # simplifications
+    "C4",   # comprehensions
+    "RUF",
+]
+ignore = [
+    # Paired assignments on one line: the solver and collision hot paths
+    # assemble structure-of-arrays buffers a column at a time, and each line is
+    # one logical step written the way the `.pyx` beside it writes the same
+    # step. Split one per line they read as twice as much code doing half as
+    # much.
+    "E702",
+    # Diagnostics are written with `%` formatting throughout, so that the
+    # message and the values it interpolates read as two separate things. That
+    # is a house style, consistently applied, and `%` is not deprecated.
+    "UP031",
+    # The docstrings use mathematical notation -- a real minus sign, a real
+    # multiplication sign, `⊗`, `↔`, `⁻¹` -- because the formulae are what they
+    # are describing. Nothing here is a typo for an ASCII character.
+    "RUF002",
+    "RUF003",
+    # A shape is built by joining tuples -- `q.shape[:-1] + (3, 3)` -- which is
+    # how numpy shapes are written everywhere else; unpacking them into a new
+    # literal says the same thing at more length.
+    "RUF005",
+    # `__slots__` is ordered to match the constructor and the solver's own
+    # sequence -- contact, arms, basis, masses, materials -- which is how the
+    # class is read. Alphabetical order would cost a reader more than it buys.
+    "RUF023",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A test that pins an error signature or a callback's shape has to accept the
+# arguments it is handed, and `pytest.raises` is itself the assertion -- so the
+# unused ones are deliberate.
+"tests/*" = ["ARG001", "ARG002", "ARG005"]
+
+[tool.ruff.format]
+# Prose in docstrings is wrapped by hand to read at a comfortable width, and the
+# array expressions are laid out so the arithmetic keeps its shape: a cross
+# product is three rows because it is three rows, and a quaternion product is
+# four. `ruff format` would set both as filled paragraphs of code. The
+# formatter is configured here so that a deliberate `ruff format` on a new file
+# matches the house style, and the gate in tox.ini runs `ruff check` only.
+quote-style = "single"
+exclude = ["*.md"]
+
+[tool.mypy]
+# As with ruff: the settings live here, so a bare `mypy` in the checkout is the
+# gate. `files` is what makes that work with no argument.
+files = ["src/omi_physics"]
+# The version mypy analyses *as*, which is not the package's floor of 3.10:
+# NumPy's shipped stubs use `type` statements, so mypy reads them only at 3.12
+# and above. What 3.10 can and cannot express is held by ruff's
+# `target-version` instead.
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true
+# Without these, mypy skips the bodies of untyped functions entirely.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+# NumPy's shipped stubs type array arithmetic as `Any`, so `warn_return_any`
+# fires on nearly every function here that returns an array -- burying the real
+# type errors it would otherwise find. Every other check stays on.
+warn_return_any = false
 
 # Prebuilt binary wheels so end users need no compiler; the accelerators are
 # optional (pure-Python/NumPy fallback), so a build without a toolchain still works.

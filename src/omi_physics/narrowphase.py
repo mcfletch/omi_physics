@@ -6,25 +6,30 @@ body in many pairs is transformed once.  When the compiled accelerator is
 present, box↔box pairs -- the common case -- skip proxy construction entirely and
 go straight to the native contact generator over batched rotation matrices.
 """
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
-from .body import make_proxy, pose_key, Proxy
 from . import collide
-from .mathutil import quat_to_matrix
 from ._accel import accelerators_disabled
+from .body import Proxy, make_proxy, pose_key
+from .mathutil import quat_to_matrix
 
+#: The compiled accelerator, or None where it was not built or was switched
+#: off. Declared, because what is called on it lives in the extension module
+#: rather than in anything a checker can read.
+_native: Any
 if accelerators_disabled():
     _native = None
 else:
     try:
-        from . import _collide_native as _native
+        from . import _collide_native as _native  # type: ignore[no-redef,attr-defined]
     except ImportError:                        # pragma: no cover - pure-Python fallback
         _native = None
 
 if TYPE_CHECKING:
-    from .world import PhysicsWorld
     from .collide import Contact
+    from .world import PhysicsWorld
 
 _SPHERE = 1   # world._refit_kind codes
 _BOX = 2
@@ -43,7 +48,7 @@ class NarrowPhase:
 
     def __init__(self) -> None:
         """Start with an empty proxy cache and no step recorded."""
-        self._proxy_cache: Dict[int, tuple] = {}
+        self._proxy_cache: dict[int, tuple] = {}
         self._stamp = -1
 
     def _proxy(self, world: "PhysicsWorld", i: int) -> Proxy:
@@ -66,11 +71,14 @@ class NarrowPhase:
         return proxy
 
     def generate(self, world: "PhysicsWorld",
-                 pairs: List[Tuple[int, int]]) -> "List[Contact]":
+                 pairs: list[tuple[int, int]]) -> "list[Contact]":
         """Contacts for every collidable pair; pairs missing a collider are skipped."""
         self._stamp += 1
-        contacts: List[Contact] = []
-        Contact = collide.Contact
+        contacts: list[Contact] = []
+        # Hoisted out of the loops below, which build one per contact point.
+        # Named apart from `Contact` so the annotation above still refers to
+        # the class rather than to this local.
+        make_contact = collide.Contact
         cshape = world.collider_shape
 
         if _native is None:
@@ -114,5 +122,5 @@ class NarrowPhase:
             if cnt:
                 nrm = np.array(normal)
                 for pi in range(cnt):
-                    contacts.append(Contact(a, b, np.array(pts[pi]), nrm, deps[pi]))
+                    contacts.append(make_contact(a, b, np.array(pts[pi]), nrm, deps[pi]))
         return contacts

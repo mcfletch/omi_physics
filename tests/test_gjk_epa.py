@@ -2,12 +2,13 @@
 import numpy as np
 import pytest
 
-from omi_physics import mathutil
-from omi_physics.body import ConvexProxy, BoxProxy, SphereProxy
-from omi_physics import gjk
+from omi_physics import gjk, mathutil
+from omi_physics.body import ConvexProxy, SphereProxy
+
+I3 = np.eye(3)
 
 
-def box_cloud(center, half=(0.5, 0.5, 0.5), R=np.eye(3)):
+def box_cloud(center, half=(0.5, 0.5, 0.5), R=I3):
     corners = np.array([(sx, sy, sz) for sx in (-1, 1) for sy in (-1, 1)
                         for sz in (-1, 1)], dtype='d') * half
     return ConvexProxy(corners, center, R)

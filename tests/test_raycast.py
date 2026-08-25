@@ -244,6 +244,37 @@ class TestEachShape:
         assert hit.distance == pytest.approx(6.0, abs=1e-6)
 
 
+class TestArithmeticTheRayIsAllowedToDo:
+    """The slab and triangle tests divide by the ray's own numbers, and reach
+    infinity on purpose when one of them is zero -- the infinities cancel and
+    the comparisons come out right. What they must not do is *signal*: a game
+    hunting a NaN through its physics runs under ``np.seterr(all='raise')``, and
+    a cast that is behaving correctly cannot be what stops it."""
+
+    @pytest.mark.parametrize('heading', [
+        (0.0, -1.0, 0.0),                  # straight down: the ground check
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    ])
+    def test_a_cast_along_an_axis_signals_nothing(self, heading):
+        w = world()
+        box(w, position=(0.0, -5.0, 0.0))
+        wall(w, x=3.0)
+        with np.errstate(all='raise'):
+            raycast.raycast(w, (0.0, 0.0, 0.0), heading, max_distance=100.0)
+            raycast.raycast_many(w, [(0.0, 0.0, 0.0)], [heading], max_distance=100.0)
+
+    def test_a_ray_that_starts_on_a_face_still_answers(self):
+        """Exactly on the boundary and exactly parallel to it: every slab
+        comparison is then a NaN, which is false however it is asked."""
+        w = world()
+        body = box(w, position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 2.0))
+        with np.errstate(all='raise'):
+            hit = raycast.raycast(w, (-5.0, 1.0, 0.0), (1.0, 0.0, 0.0),
+                                  max_distance=100.0)
+        assert hit is not None and hit.body == body
+
+
 class TestWhatToIgnore:
 
     def test_a_body_can_be_skipped(self):

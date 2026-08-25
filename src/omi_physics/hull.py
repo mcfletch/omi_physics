@@ -6,14 +6,14 @@ No scipy dependency: a compact incremental 3D hull builds the face set used for
 V-HACD) — enough to turn a concave mesh into a compound of convex pieces that
 round-trips as OMI ``convex`` shapes.
 """
-from typing import Dict, List, Optional, Tuple
-from numpy.typing import ArrayLike
+
 import numpy as np
+from numpy.typing import ArrayLike
 
 EPS = 1e-9
 
 
-def convex_hull(points: ArrayLike) -> Tuple[np.ndarray, np.ndarray]:
+def convex_hull(points: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(vertices, faces)`` — hull vertex array and triangle indices.
 
     Degenerate input (fewer than 4 non-coplanar points) returns the unique
@@ -33,7 +33,7 @@ def convex_hull(points: ArrayLike) -> Tuple[np.ndarray, np.ndarray]:
     return verts, tris
 
 
-def _initial_tetra(pts: np.ndarray) -> Optional[List[Tuple[int, int, int]]]:
+def _initial_tetra(pts: np.ndarray) -> list[tuple[int, int, int]] | None:
     """Seed four outward-oriented faces from a non-degenerate tetrahedron, or ``None``."""
     i0 = 0
     i1 = int(np.argmax(np.linalg.norm(pts - pts[i0], axis=1)))
@@ -57,12 +57,12 @@ def _initial_tetra(pts: np.ndarray) -> Optional[List[Tuple[int, int, int]]]:
 
 
 def _incremental(pts: np.ndarray,
-                 faces: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+                 faces: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
     """Add each point to the hull, replacing the faces it sees with new ones."""
     faces = list(faces)
     for p in range(len(pts)):
         point = pts[p]
-        visible: List[Tuple[int, int, int]] = []
+        visible: list[tuple[int, int, int]] = []
         for f in faces:
             n, ref = _face_plane(pts, f)
             if np.dot(n, point - ref) > EPS:
@@ -77,7 +77,7 @@ def _incremental(pts: np.ndarray,
 
 
 def _face_plane(pts: np.ndarray,
-                f: Tuple[int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
+                f: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray]:
     """Return a face's ``(unit_normal, reference_point)``."""
     a, b, c = pts[f[0]], pts[f[1]], pts[f[2]]
     n = np.cross(b - a, c - a)
@@ -87,14 +87,14 @@ def _face_plane(pts: np.ndarray,
     return n, a
 
 
-def _horizon_edges(visible: List[Tuple[int, int, int]]) -> List[Tuple[int, int]]:
+def _horizon_edges(visible: list[tuple[int, int, int]]) -> list[tuple[int, int]]:
     """Boundary edges of the visible-face patch (each belonging to one visible face)."""
-    edge_count: Dict[Tuple[int, ...], int] = {}
+    edge_count: dict[tuple[int, ...], int] = {}
     for f in visible:
         for e in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
             key = tuple(sorted(e))
             edge_count[key] = edge_count.get(key, 0) + 1
-    horizon: List[Tuple[int, int]] = []
+    horizon: list[tuple[int, int]] = []
     for f in visible:
         for e in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
             if edge_count[tuple(sorted(e))] == 1:
@@ -132,7 +132,7 @@ def concavity(points: ArrayLike) -> float:
 
 def approximate_convex_decomposition(points: ArrayLike, max_pieces: int = 8,
                                      threshold: float = 0.30,
-                                     depth: int = 0) -> List[np.ndarray]:
+                                     depth: int = 0) -> list[np.ndarray]:
     """Recursively split a concave cloud into convex-ish pieces.
 
     Splits on the widest axis at the centroid until each piece is convex enough

@@ -24,6 +24,8 @@ Two ways to ask, because the callers want different things:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import numpy as np
 
 __all__ = ['TriangleGrid']
@@ -162,7 +164,7 @@ class TriangleGrid:
                               dedup=False)
 
     def _walk(self, origin: np.ndarray, heading: np.ndarray,
-              entry: tuple[float, float]):
+              entry: tuple[float, float]) -> Iterator[tuple[int, int, int]]:
         """The cells the ray crosses, from where it enters to where it stops.
 
         The standard voxel traversal: hold, per axis, the distance at which the

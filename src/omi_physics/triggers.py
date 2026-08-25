@@ -6,9 +6,10 @@ current overlap set against the previous one and emits ``enter`` / ``stay`` /
 ``TouchSensor``-style routing).  Pickups, pressure plates, and gravity-zone
 bounds all use triggers.
 """
-from typing import List, Optional, Set, Tuple, TYPE_CHECKING
-from .body import make_proxy
+from typing import TYPE_CHECKING
+
 from . import collide
+from .body import make_proxy
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld
@@ -19,16 +20,16 @@ class TriggerSystem:
 
     def __init__(self) -> None:
         """Start with no recorded overlaps."""
-        self.overlaps: Set[Tuple[int, int]] = set()   # {(trigger_body, other_body)}
+        self.overlaps: set[tuple[int, int]] = set()   # {(trigger_body, other_body)}
 
     def update(self, world: "PhysicsWorld",
-               pairs: List[Tuple[int, int]]) -> List[Tuple[str, int, int]]:
+               pairs: list[tuple[int, int]]) -> list[tuple[str, int, int]]:
         """Diff this step's overlaps against the last; return ``(event, trigger_body, other_body)``.
 
         ``event`` is ``'enter'``, ``'stay'``, or ``'exit'``.  Mutates the stored
         overlap set to the current one.
         """
-        new: Set[Tuple[int, int]] = set()
+        new: set[tuple[int, int]] = set()
         for i, j in pairs:
             pair = self._sensor_pair(world, i, j)
             if pair is None:
@@ -36,7 +37,7 @@ class TriggerSystem:
             trg, tshape, other, oshape = pair
             if self._overlapping(world, trg, tshape, other, oshape):
                 new.add((trg, other))
-        events: List[Tuple[str, int, int]] = []
+        events: list[tuple[str, int, int]] = []
         events += [('enter', t, o) for (t, o) in new - self.overlaps]
         events += [('stay', t, o) for (t, o) in new & self.overlaps]
         events += [('exit', t, o) for (t, o) in self.overlaps - new]
@@ -44,8 +45,11 @@ class TriggerSystem:
         return events
 
     def _sensor_pair(self, world: "PhysicsWorld", i: int,
-                     j: int) -> Optional[Tuple[int, int, int, int]]:
-        """Order a pair as ``(trigger, trigger_shape, other, other_shape)``, or None if neither is a sensor."""
+                     j: int) -> tuple[int, int, int, int] | None:
+        """Order a pair as ``(trigger, trigger_shape, other, other_shape)``.
+
+        None when neither of the two is a sensor.
+        """
         ti = world.trigger_shape[i] >= 0
         tj = world.trigger_shape[j] >= 0
         if not (ti or tj):

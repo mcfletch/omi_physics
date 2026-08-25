@@ -1,12 +1,13 @@
 """Phase 7 scale: broad phase stays sub-quadratic, islands, sleeping ≈ free."""
 import time
+
 import numpy as np
 import pytest
 
 from omi_physics import model
-from omi_physics.world import PhysicsWorld
 from omi_physics.broadphase import BroadPhase, brute_force_pairs
 from omi_physics.solver import build_islands
+from omi_physics.world import PhysicsWorld
 
 
 def grid_world(n_side=10, spacing=2.5):

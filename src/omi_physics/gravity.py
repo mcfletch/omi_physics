@@ -5,10 +5,10 @@ that decides which bodies it affects.  ``resolve_gravity`` applies volumes in
 ascending ``priority`` (highest wins), honouring ``replace`` (override) and
 ``stop`` (halt accumulation).
 """
-from typing import List, Optional, Union
+
 import numpy as np
 
-from . import model, mathutil
+from . import mathutil, model
 from .mathutil import Vec
 
 
@@ -39,18 +39,22 @@ class BoxRegion:
 class InfiniteRegion:
     """A region covering all of space (the default for a global field)."""
 
-    def contains(self, pos: np.ndarray) -> bool:
-        """Always True: every point is inside."""
+    def contains(self, _pos: np.ndarray) -> bool:
+        """Always True: every point is inside.
+
+        The point is named as unused because every region answers this question
+        and this one answers it without looking.
+        """
         return True
 
 
-Region = Union[SphereRegion, BoxRegion, InfiniteRegion]
+Region = SphereRegion | BoxRegion | InfiniteRegion
 
 
 class GravityVolume:
     """A gravity field with a region of influence."""
 
-    def __init__(self, field: model.Gravity, region: Optional[Region] = None):
+    def __init__(self, field: model.Gravity, region: Region | None = None):
         self.field = field
         self.region = region or InfiniteRegion()
 
@@ -76,7 +80,7 @@ class GravityVolume:
         return mathutil.normalize(np.asarray(f.direction, dtype='d')) * f.gravity
 
 
-def apply_volumes(volumes: List[GravityVolume], positions: np.ndarray,
+def apply_volumes(volumes: list[GravityVolume], positions: np.ndarray,
                   out: np.ndarray) -> np.ndarray:
     """Resolve gravity per body given a list of volumes (in place on ``out``).
 

@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from omi_physics import model
+from omi_physics.broadphase import BroadPhase, DynamicAABBTree, brute_force_pairs
 from omi_physics.world import PhysicsWorld
-from omi_physics.broadphase import BroadPhase, brute_force_pairs, DynamicAABBTree
 
 
 def make_world(n, seed=0, spread=6.0):
@@ -57,12 +57,12 @@ def test_filters_drop_non_interacting_pairs():
     shape = world.add_shape(model.Shape.sphere(1.0))
     players = world.add_filter(model.CollisionFilter(
         collisionSystems=('player',), notCollideWithSystems=('player',)))
-    a = world.add_body(model.Motion(type=model.DYNAMIC),
-                       collider=model.Collider(shape=shape, collisionFilter=players),
-                       position=(0, 0, 0))
-    b = world.add_body(model.Motion(type=model.DYNAMIC),
-                       collider=model.Collider(shape=shape, collisionFilter=players),
-                       position=(0.5, 0, 0))
+    world.add_body(model.Motion(type=model.DYNAMIC),
+                   collider=model.Collider(shape=shape, collisionFilter=players),
+                   position=(0, 0, 0))
+    world.add_body(model.Motion(type=model.DYNAMIC),
+                   collider=model.Collider(shape=shape, collisionFilter=players),
+                   position=(0.5, 0, 0))
     world.refit_aabbs(margin=0.0)
     bp = BroadPhase()
     assert bp.pairs(world) == []                  # same group, excluded

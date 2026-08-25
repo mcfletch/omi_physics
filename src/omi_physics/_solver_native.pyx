@@ -106,21 +106,34 @@ def solve_velocity(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
 def solve_positions(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
                     double[:, ::1] n, double[::1] depth,
                     double[::1] ima, double[::1] imb,
-                    double[:, ::1] position, double correction, double slop):
-    """One split-impulse position pass: push overlapping bodies apart along ``n``."""
+                    double[:, ::1] position, double correction, double slop,
+                    double max_correction):
+    """One split-impulse position pass: push overlapping bodies apart along ``n``.
+
+    Each contact is corrected against what the pass has already done -- see
+    ``solver.SequentialImpulseSolver._solve_positions``, whose answer this has
+    to match -- so the ``start`` copy is the pass's own before-and-after.
+    """
     cdef Py_ssize_t K = a_idx.shape[0]
+    cdef double[:, ::1] start = np.array(position, dtype=np.float64, copy=True)
     cdef Py_ssize_t k, a, b
-    cdef double corr, inv_sum, mv
+    cdef double corr, inv_sum, mv, done
     with nogil:
         for k in range(K):
-            corr = depth[k] - slop
+            a = a_idx[k]; b = b_idx[k]
+            done = (((position[b, 0] - start[b, 0]) - (position[a, 0] - start[a, 0])) * n[k, 0]
+                    + ((position[b, 1] - start[b, 1]) - (position[a, 1] - start[a, 1])) * n[k, 1]
+                    + ((position[b, 2] - start[b, 2]) - (position[a, 2] - start[a, 2])) * n[k, 2])
+            corr = depth[k] - done - slop
             if corr <= 0.0:
                 continue
             inv_sum = ima[k] + imb[k]
             if inv_sum <= 1e-12:
                 continue
-            mv = correction * corr / inv_sum
-            a = a_idx[k]; b = b_idx[k]
+            corr = correction * corr
+            if corr > max_correction:
+                corr = max_correction
+            mv = corr / inv_sum
             position[a, 0] -= ima[k] * mv * n[k, 0]
             position[a, 1] -= ima[k] * mv * n[k, 1]
             position[a, 2] -= ima[k] * mv * n[k, 2]
@@ -183,7 +196,7 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
                       double[::1] restitution, double[::1] friction,
                       double[::1] nImp, double[:, ::1] tImp,
                       double restitution_threshold, int iters, bint warm_start,
-                      double correction, double slop):
+                      double correction, double slop, double max_correction):
     """Build constraints from contacts, then solve velocity + position, natively.
 
     Mirrors the pure-Python solver's ``_prepare`` (arms, tangent basis, effective
@@ -202,6 +215,11 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
     cdef double[::1] vBias = np.empty(K)
     cdef double[::1] ima = np.empty(K)
     cdef double[::1] imb = np.empty(K)
+    # Positions as they stand before the position pass, so each contact there
+    # can be corrected against the movement the earlier ones already applied.
+    # The velocity iterations in between move nothing, so this is still what
+    # the pass starts from when it reaches them.
+    cdef double[:, ::1] startpos = np.array(pos, dtype=np.float64, copy=True)
     cdef Py_ssize_t k, it, a, b
     cdef double nx, ny, nz, axx, ayy, azz, ln, inv, dvx, dvy, dvz, vn0
     cdef double t1x, t1y, t1z, imak, imbk, maxf, vn, new, dL, vt, newt
@@ -294,16 +312,24 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
                 _apply_w(lv, av, a, b, ima[k], imb[k], invIw, &rA[k, 0], &rB[k, 0],
                          dL * t2[k, 0], dL * t2[k, 1], dL * t2[k, 2])
 
-        # split-impulse position pass
+        # Split-impulse position pass, each contact corrected against what the
+        # pass has already done: four points of one manifold acting on the same
+        # narrow-phase depth would push the pair four times as far as it is in.
         for k in range(K):
-            vn = depth[k] - slop
+            a = a_idx[k]; b = b_idx[k]
+            vn = (((pos[b, 0] - startpos[b, 0]) - (pos[a, 0] - startpos[a, 0])) * normal[k, 0]
+                  + ((pos[b, 1] - startpos[b, 1]) - (pos[a, 1] - startpos[a, 1])) * normal[k, 1]
+                  + ((pos[b, 2] - startpos[b, 2]) - (pos[a, 2] - startpos[a, 2])) * normal[k, 2])
+            vn = depth[k] - vn - slop
             if vn <= 0.0:
                 continue
             imak = ima[k]; imbk = imb[k]
             if imak + imbk <= 1e-12:
                 continue
-            dL = correction * vn / (imak + imbk)
-            a = a_idx[k]; b = b_idx[k]
+            vn = correction * vn
+            if vn > max_correction:
+                vn = max_correction
+            dL = vn / (imak + imbk)
             pos[a, 0] -= imak * dL * normal[k, 0]
             pos[a, 1] -= imak * dL * normal[k, 1]
             pos[a, 2] -= imak * dL * normal[k, 2]

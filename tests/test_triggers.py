@@ -14,10 +14,9 @@ def test_body_passing_through_trigger_fires_enter_and_exit():
     world.add_body(model.Motion(type=model.STATIC),
                    trigger=model.Trigger(shape=zone_shape), position=(0, 0, 0))
     ball_shape = world.add_shape(model.Shape.sphere(0.2))
-    ball = world.add_body(model.Motion(type=model.DYNAMIC,
-                                       linearVelocity=(2.0, 0, 0)),
-                          collider=model.Collider(shape=ball_shape),
-                          position=(-3.0, 0, 0))
+    world.add_body(model.Motion(type=model.DYNAMIC, linearVelocity=(2.0, 0, 0)),
+                   collider=model.Collider(shape=ball_shape),
+                   position=(-3.0, 0, 0))
     events = []
     world.add_trigger_listener(lambda kind, t, o: events.append((kind, o)))
     for _ in range(120):
@@ -35,8 +34,7 @@ def test_trigger_does_not_perturb_trajectory():
     world.add_body(model.Motion(type=model.STATIC),
                    trigger=model.Trigger(shape=zone), position=(0, 0, 0))
     ball_shape = world.add_shape(model.Shape.sphere(0.3))
-    ball = world.add_body(model.Motion(type=model.DYNAMIC,
-                                       linearVelocity=(2.0, 0, 0)),
+    ball = world.add_body(model.Motion(type=model.DYNAMIC, linearVelocity=(2.0, 0, 0)),
                           collider=model.Collider(shape=ball_shape),
                           position=(-3.0, 0, 0))
     for _ in range(120):

@@ -2,9 +2,8 @@
 import numpy as np
 import pytest
 
-from omi_physics import mathutil
-from omi_physics.body import SphereProxy, BoxProxy
-from omi_physics import collide
+from omi_physics import collide, mathutil
+from omi_physics.body import BoxProxy, SphereProxy
 
 I3 = np.eye(3)
 

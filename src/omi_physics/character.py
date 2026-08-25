@@ -13,15 +13,14 @@ Pure CPU; the GL-facing :class:`PhysicsViewPlatform` wraps this.
 import math
 import sys
 import weakref
-from typing import (Any, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING,
-                    cast)
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
+
 import numpy as np
 
-from dataclasses import dataclass
-
-from . import model
-from .body import CapsuleProxy, TriangleMeshProxy, make_proxy, Proxy
-from . import collide
+from . import collide, model
+from .body import CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy
 from .mathutil import Vec
 
 if TYPE_CHECKING:
@@ -34,11 +33,11 @@ IDENT = np.array([0.0, 0.0, 0.0, 1.0])
 #: then by body index.  Weak, so an unloaded level takes its collision copy
 #: with it rather than keeping it alive for the rest of the process.  See
 #: :meth:`CharacterController._static_proxy` for why it is shared.
-_STATIC_PROXIES: "weakref.WeakKeyDictionary[Any, Dict[int, Proxy]]" = \
+_STATIC_PROXIES: "weakref.WeakKeyDictionary[Any, dict[int, Proxy]]" = \
     weakref.WeakKeyDictionary()
 
 
-def _static_proxies(world: "PhysicsWorld") -> Dict[int, Proxy]:
+def _static_proxies(world: "PhysicsWorld") -> dict[int, Proxy]:
     """The proxy cache belonging to ``world``, made on first use."""
     found = _STATIC_PROXIES.get(world)
     if found is None:
@@ -102,7 +101,7 @@ class CharacterController:
     """Kinematic capsule avatar: move-and-slide against the world's static colliders."""
 
     def __init__(self, world: "PhysicsWorld",
-                 capabilities: Optional[CharacterCapabilities] = None,
+                 capabilities: CharacterCapabilities | None = None,
                  position: Vec = (0, 0, 0), gravity: float = 9.81) -> None:
         """Place a capsule of ``capabilities`` at ``position`` (its centre) in ``world``."""
         self.world = world
@@ -121,7 +120,7 @@ class CharacterController:
         #: Surface normal underfoot while grounded, else None.  What the move
         #: direction is projected onto, so speed is spent along the ground
         #: rather than along the horizon.
-        self.ground_normal: Optional[np.ndarray] = None
+        self.ground_normal: np.ndarray | None = None
         self.crouching = False
         self.flying = False
         #: Under water: collides like walking, moves like flying, and is
@@ -140,20 +139,20 @@ class CharacterController:
         self.stuck = False
         #: Seconds since the capsule last left the ground by *falling*, or None
         #: when it is grounded or left by jumping.  See ``coyoteTime``.
-        self._airborne_for: Optional[float] = None
+        self._airborne_for: float | None = None
         #: Seconds since a jump was asked for and refused, or None.  See
         #: ``jumpBuffer``.
-        self._jump_wanted_for: Optional[float] = None
+        self._jump_wanted_for: float | None = None
         #: Metres a step-up advanced beyond what its frame was due, taken back
         #: out of the frames that follow.  See :meth:`_try_step_up`.
         self._step_debt: float = 0.0
         # Static body -> world-space proxy, shared with every other avatar in
         # this world.  See `_static_proxy`.
-        self._proxy_cache: Dict[int, Proxy] = _static_proxies(world)
+        self._proxy_cache: dict[int, Proxy] = _static_proxies(world)
         # Per *avatar*, unlike the proxy cache above: it is keyed on where this
         # capsule is, and two avatars are in different places.  See
         # `_near_triangles`.
-        self._near_cache: Dict[int, Tuple[np.ndarray, np.ndarray,
+        self._near_cache: dict[int, tuple[np.ndarray, np.ndarray,
                                           np.ndarray]] = {}
 
     # -- geometry --------------------------------------------------------
@@ -162,14 +161,14 @@ class CharacterController:
         """Current capsule height (crouch or stand, per pose)."""
         return self.caps.crouchHeight if self.crouching else self.caps.standHeight
 
-    def _shape(self, height: Optional[float] = None) -> model.Shape:
+    def _shape(self, height: float | None = None) -> model.Shape:
         """Capsule shape at ``height`` (defaults to the current pose height)."""
         h = self.height if height is None else height
         mid = max(h - 2 * self.caps.radius, 1e-3)
         return model.Shape.capsule(height=mid, radius=self.caps.radius)
 
-    def _proxy(self, position: Optional[Vec] = None,
-               height: Optional[float] = None) -> Proxy:
+    def _proxy(self, position: Vec | None = None,
+               height: float | None = None) -> Proxy:
         """World-space collision proxy for the capsule at ``position`` and ``height``."""
         pos = self.position if position is None else position
         return make_proxy(self._shape(height), pos, IDENT)
@@ -413,7 +412,7 @@ class CharacterController:
         return verts
 
     def _push_out(self, position: Vec,
-                  iterations: int = 3) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+                  iterations: int = 3) -> tuple[np.ndarray, np.ndarray | None]:
         """Depenetrate the capsule from static colliders; return (pos, ground_n).
 
         Contacts are resolved by sequential projection (deepest first): each
@@ -425,9 +424,9 @@ class CharacterController:
         makes it bounce off columns instead of sliding/stopping.
         """
         pos = np.asarray(position, dtype='d').copy()
-        ground_n: Optional[np.ndarray] = None
+        ground_n: np.ndarray | None = None
         for _ in range(iterations):
-            contacts: List[Tuple[np.ndarray, float]] = []
+            contacts: list[tuple[np.ndarray, float]] = []
             for j in self._static_bodies():
                 Pj = self._static_proxy(j)
                 if isinstance(Pj, TriangleMeshProxy):
@@ -491,7 +490,7 @@ class CharacterController:
                 self._tick_jump_windows(piece, was_grounded)
         self.velocity = (self.position - start) / dt if dt > 0 else np.zeros(3)
 
-    def _reach(self) -> Tuple[float, float]:
+    def _reach(self) -> tuple[float, float]:
         """How far the capsule may travel before a surface stops overlapping it.
 
         Two numbers because the capsule is not round: it is **as wide as its
@@ -532,7 +531,7 @@ class CharacterController:
             return sys.maxsize
         return max(1, math.ceil(limit * dt / along))
 
-    def _substeps(self, dt: float) -> List[float]:
+    def _substeps(self, dt: float) -> list[float]:
         """``dt`` cut into pieces no one of which can outrun collision.
 
         Sized from the speed the capsule will actually reach this frame,
@@ -627,7 +626,7 @@ class CharacterController:
             self._apply_slope_slide(ground_n, dt)
 
     def _snap_down(self, max_drop: float,
-                   step: float = 0.04) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+                   step: float = 0.04) -> tuple[np.ndarray, np.ndarray | None]:
         """Find ground within ``max_drop`` below the capsule and seat on it."""
         drop = step
         while drop <= max_drop + 1e-9:
@@ -729,7 +728,7 @@ class CharacterController:
         self._step_debt -= paid
         return horiz * (1.0 - paid / due)
 
-    def _try_step_up(self, horiz: np.ndarray, dt: float) -> Optional[np.ndarray]:
+    def _try_step_up(self, horiz: np.ndarray, dt: float) -> np.ndarray | None:
         """Try to climb a small ledge ahead; return the seated position or None if not a step."""
         speed = np.linalg.norm(horiz[[0, 2]])
         if speed < 1e-6:
@@ -829,7 +828,7 @@ class CharacterController:
     #: enough not to hunt for ground that is not there.
     GROUND_PROBE = 0.05
 
-    def _update_grounded(self, ground_n: Optional[np.ndarray]) -> None:
+    def _update_grounded(self, ground_n: np.ndarray | None) -> None:
         """Set the grounded flag from the vertical contact, probing just below if needed.
 
         **A rising capsule is never grounded**, whatever is under it.  One frame
@@ -860,7 +859,7 @@ class CharacterController:
             self.grounded = False
             self.ground_normal = None
 
-    def _apply_slope_slide(self, ground_n: Optional[np.ndarray], dt: float) -> None:
+    def _apply_slope_slide(self, ground_n: np.ndarray | None, dt: float) -> None:
         """Slide the avatar downhill and unground it when the slope exceeds ``maxSlope``."""
         if ground_n is None:
             return
@@ -889,7 +888,7 @@ class CharacterController:
         self.push = np.zeros(3)                     # ...and at rest
         self.vy = 0.0
         self.velocity = np.zeros(3)
-        resolved, ground_n = self._push_out(self.position, iterations=12)
+        resolved, _ground_n = self._push_out(self.position, iterations=12)
         self.position = resolved
         if self._overlaps(self._proxy()):
             self.stuck = True

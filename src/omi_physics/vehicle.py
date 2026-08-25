@@ -30,9 +30,9 @@ game that mounts it.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 import numpy as np
 
@@ -40,8 +40,15 @@ from . import mathutil
 from .mathutil import Vec
 from .raycast import raycast_many
 
-__all__ = ['RaycastVehicle', 'Surface', 'TARMAC', 'VehicleTuning', 'Wheel',
-           'WheelSpec', 'car_wheels']
+__all__ = [
+    'TARMAC',
+    'RaycastVehicle',
+    'Surface',
+    'VehicleTuning',
+    'Wheel',
+    'WheelSpec',
+    'car_wheels',
+]
 
 UP = np.array([0.0, 1.0, 0.0])
 FORWARD = np.array([0.0, 0.0, -1.0])
@@ -265,9 +272,9 @@ class Wheel:
     bottomed: float = 0.0
     #: What *this* wheel is on, when it is not what the car is on. Two wheels
     #: on the verge is the usual way of finding out about the verge.
-    on: "Optional[Surface]" = None
+    on: Surface | None = None
     #: What the car is on, shared; set by the vehicle when the wheel is made.
-    _car_surface: "Optional[Callable[[], Surface]]" = field(
+    _car_surface: Callable[[], Surface] | None = field(
         default=None, repr=False)
 
     def surface(self) -> Surface:
@@ -484,9 +491,8 @@ class RaycastVehicle:
         for wheel in self.wheels:
             if not wheel.grounded:
                 continue
-            self._drive(wheel, dt, rotation, mass, gravity, driven, braked,
-                        carried)
-        self._press_down(dt, mass)
+            self._drive(wheel, dt, rotation, mass, driven, braked, carried)
+        self._press_down(dt)
         self._settle_up()
 
     # -- the three forces ------------------------------------------------------
@@ -566,8 +572,7 @@ class RaycastVehicle:
         self._impulse(wheel.contact, normal * (wheel.load * dt))
 
     def _drive(self, wheel: Wheel, dt: float, rotation: np.ndarray, mass: float,
-               gravity: float, driven: int, braked: int,
-               carried: float = 0.0) -> None:
+               driven: int, braked: int, carried: float = 0.0) -> None:
         """Push it along, hold it back, and stop it sliding sideways.
 
         ``carried`` is what the whole car weighs on the ground this step, which
@@ -640,7 +645,7 @@ class RaycastVehicle:
             grip_force *= scale
         self._impulse(wheel.contact, (heading * drive + sideways * grip_force) * dt)
 
-    def _press_down(self, dt: float, mass: float) -> None:
+    def _press_down(self, dt: float) -> None:
         """Aerodynamic downforce: what keeps a fast car on the road over a crest."""
         if not self.tuning.downforce or not self.grounded:
             return

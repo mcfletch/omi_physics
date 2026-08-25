@@ -18,18 +18,17 @@ never touches GL unless you explicitly select the GPU backend.
    guarantees** of correctness, accuracy, or fitness for any purpose (see the
    MIT ``LICENSE``). Review it before relying on it for anything that matters.
 """
-from . import model
-from . import mathutil
-from .world import PhysicsWorld
+from . import mathutil, model
 from .backend import NumpyBackend, select_backend
+from .world import PhysicsWorld
 
 __version__ = "0.3.1"
 
 __all__ = [
-    "PhysicsWorld",
     "NumpyBackend",
-    "select_backend",
-    "model",
-    "mathutil",
+    "PhysicsWorld",
     "__version__",
+    "mathutil",
+    "model",
+    "select_backend",
 ]

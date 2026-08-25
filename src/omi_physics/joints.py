@@ -7,7 +7,8 @@ body index of ``-1`` means the world (an infinite-mass anchor).  These map onto
 the OMI limits/drives vocabulary (locked linear axes → point; a linear limit with
 ``min==max`` → distance; a drive → motor).
 """
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from . import mathutil
@@ -30,7 +31,7 @@ class _JointBase:
     so applying an impulse to it does nothing.
     """
     baumgarte = 0.2
-    _invI: Dict[int, np.ndarray]
+    _invI: dict[int, np.ndarray]
 
     def _inv_inertia_world(self, world: "PhysicsWorld", i: int) -> np.ndarray:
         """World-space inverse inertia tensor of body ``i`` (zero for the world)."""
@@ -64,8 +65,8 @@ class PointConstraint(_JointBase):
     """
 
     def __init__(self, a: int, b: int, anchor: Vec,
-                 local_a: Optional[np.ndarray] = None,
-                 local_b: Optional[np.ndarray] = None):
+                 local_a: np.ndarray | None = None,
+                 local_b: np.ndarray | None = None):
         self.a, self.b = a, b
         self.anchor = np.asarray(anchor, dtype='d')
         self.local_a = local_a
@@ -73,7 +74,7 @@ class PointConstraint(_JointBase):
         self._invI = {}
 
     def _world_anchor(self, world: "PhysicsWorld", i: int,
-                      local: Optional[np.ndarray]) -> np.ndarray:
+                      local: np.ndarray | None) -> np.ndarray:
         """World position of body ``i``'s anchor (``anchor`` itself for the world)."""
         if i < 0:
             return self.anchor
@@ -104,7 +105,7 @@ class PointConstraint(_JointBase):
         return self.anchor if i < 0 else world.position[i]
 
     def _to_local(self, world: "PhysicsWorld", i: int,
-                  world_pt: np.ndarray) -> Optional[np.ndarray]:
+                  world_pt: np.ndarray) -> np.ndarray | None:
         """World point expressed in body ``i``'s local frame (``None`` for the world)."""
         if i < 0:
             return None
@@ -129,7 +130,7 @@ class DistanceConstraint(_JointBase):
     """
 
     def __init__(self, a: int, b: int, anchor_a: Vec, anchor_b: Vec,
-                 length: Optional[float] = None):
+                 length: float | None = None):
         self.a, self.b = a, b
         self.anchor_a = np.asarray(anchor_a, dtype='d')
         self.anchor_b = np.asarray(anchor_b, dtype='d')

@@ -106,15 +106,22 @@ class TestAgainstGeometryWorkedOutByHand:
         assert normals[0] == pytest.approx(
             [-np.sqrt(0.5), 0.0, -np.sqrt(0.5)], abs=1e-6)
 
-    def test_a_degenerate_triangle_does_not_produce_a_contact(self):
-        """A zero-area triangle has no plane to be pushed out of."""
-        sliver = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0))
+    @pytest.mark.parametrize('name,tri', [
+        ('collinear', ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0))),
+        ('repeated vertex', ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0))),
+        ('one point', ((0.0, 0.0, 0.0),) * 3),
+    ])
+    def test_a_degenerate_triangle_does_not_produce_a_contact(self, name, tri):
+        """A zero-area triangle is not a surface: it has no side to be on and no
+        direction to be pushed along, and whatever solid it belongs to is bounded
+        by its neighbours. Exporters and decimators leave them in meshes, so the
+        answer has to be "nothing here" rather than a push along no direction."""
         cap = _capsule(centre=(0.5, 0.0, 0.0), half=0.01, radius=0.4)
-        hit, _points, normals, _depths = collide.capsule_triangles(
-            cap, *_tris(sliver))
-        # It may still contact the degenerate edge, but never with a NaN normal.
-        if bool(hit[0]):
-            assert np.all(np.isfinite(normals[0]))
+        hit, _points, _normals, _depths = collide.capsule_triangles(
+            cap, *_tris(tri))
+        assert not bool(hit[0])
+        assert collide.capsule_triangle(
+            cap, TriangleProxy(*np.array(tri, dtype='d'))) is None
 
 
 class TestTheBatchIsTheSameAnswerAsTheLoop:
@@ -324,8 +331,8 @@ class TestTheBudgetThisExistsFor:
     @pytest.mark.serial
     def test_a_hundred_characters_walking_fit_in_a_frame(self):
         import time
-        from omi_physics.character import (CharacterCapabilities,
-                                           CharacterController)
+
+        from omi_physics.character import CharacterCapabilities, CharacterController
         world = self._world_with_floor()
         rng = np.random.default_rng(4)
         walkers = []

@@ -30,7 +30,8 @@ float32 vs float64.  The world is float64; the GPU computes in float32 (FP64 is
 match the CPU backend only within tolerance, not bit-for-bit — exactly the
 best-effort-on-GPU caveat the plan records for the determinism guarantee.
 """
-from typing import Any, List, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
 from .backend import NumpyBackend
@@ -212,7 +213,7 @@ class GLComputeBackend(NumpyBackend):
             self._prog_pos = self._compile(_POS_SRC)
             self._prog_fused = self._compile(_FUSED_SRC)
         except Exception as err:
-            raise RuntimeError('compute shader compilation failed: %s' % err)
+            raise RuntimeError('compute shader compilation failed: %s' % err) from err
 
         self._pos = _Buffer(GL, 4)
         self._ori = _Buffer(GL, 4)
@@ -296,7 +297,7 @@ class GLComputeBackend(NumpyBackend):
         self._scal.upload(self._f4[:n * 4])
 
     def _dispatch(self, program: int, n: int,
-                  uniforms: List[Tuple[str, str, Any]]) -> None:
+                  uniforms: list[tuple[str, str, Any]]) -> None:
         """Set uniforms, dispatch ``program`` over ``n`` bodies, and barrier on storage.
 
         Each ``uniforms`` entry is ``(name, kind, value)`` with ``kind`` ``'f'`` for

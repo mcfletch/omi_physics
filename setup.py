@@ -11,7 +11,7 @@ users need no compiler.
 import os
 import sys
 
-from setuptools import setup, Extension
+from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext as _build_ext
 
 # Extension name -> path to its .pyx (falling back to a shipped .c).

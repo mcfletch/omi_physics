@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from omi_physics import model, backend
+from omi_physics import backend, model
 from omi_physics.world import PhysicsWorld
 
 

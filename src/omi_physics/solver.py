@@ -6,23 +6,28 @@ Coulomb friction on two tangents, and corrects penetration with a split-impulse
 Material friction/restitution combine per the OMI combine modes.  Contacts
 partition into islands so disjoint groups solve independently.
 """
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
-from . import model, mathutil
+from . import mathutil, model
 from ._accel import accelerators_disabled
 
+#: The compiled accelerator, or None where it was not built or was switched
+#: off. Declared, because what is called on it lives in the extension module
+#: rather than in anything a checker can read.
+_native: Any
 if accelerators_disabled():
     _native = None
 else:
     try:
-        from . import _solver_native as _native   # compiled Cython inner loops
+        from . import _solver_native as _native  # type: ignore[no-redef,attr-defined]
     except ImportError:                            # pragma: no cover - pure-Python fallback
         _native = None
 
 if TYPE_CHECKING:
-    from .world import PhysicsWorld
     from .collide import Contact
+    from .world import PhysicsWorld
 
 
 def _cross(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -44,7 +49,7 @@ def _skew_apply(inv_inertia_world: np.ndarray, r: np.ndarray,
     return inv_inertia_world @ _cross(r, impulse)
 
 
-def _basis(n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _basis(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Two orthonormal tangents spanning the plane perpendicular to unit normal ``n``."""
     a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     t1 = mathutil.normalize(_cross(a, n))
@@ -80,15 +85,21 @@ class SequentialImpulseSolver:
     def __init__(self, velocity_iterations: int = 10, position_iterations: int = 3,
                  baumgarte: float = 0.2, slop: float = 0.005,
                  restitution_threshold: float = 0.5,
-                 warm_start: bool = True) -> None:
+                 warm_start: bool = True,
+                 max_correction: float = 0.2) -> None:
         self.velocity_iterations = velocity_iterations
         self.position_iterations = position_iterations
         self.baumgarte = baumgarte
         self.slop = slop
         self.restitution_threshold = restitution_threshold
         self.warm_start = warm_start
+        #: The furthest, in metres, the position pass will push a pair apart in
+        #: one step.  A body that arrives deep inside another -- placed there,
+        #: or driven there at speed -- then climbs out over a few frames rather
+        #: than being flung out of the level in one.
+        self.max_correction = max_correction
         # (a,b) -> [(point, nImpulse, t0, t1)] carried to the next step for warm start
-        self._cache: Dict[Tuple[int, int], List[Tuple[np.ndarray, float, float, float]]] = {}
+        self._cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
 
     # -- setup -----------------------------------------------------------
     def _inv_inertia_world(self, world: "PhysicsWorld", i: int) -> np.ndarray:
@@ -100,8 +111,8 @@ class SequentialImpulseSolver:
         """Physics material of body ``i`` (the default material when it has none)."""
         return world.material_for(world.collider_material[i])
 
-    def _prepare(self, world: "PhysicsWorld", contacts: List["Contact"],
-                 ) -> Tuple[List[_ContactConstraint], Dict[int, np.ndarray]]:
+    def _prepare(self, world: "PhysicsWorld", contacts: list["Contact"],
+                 ) -> tuple[list[_ContactConstraint], dict[int, np.ndarray]]:
         """Build a constraint per contact and cache each body's world inverse inertia.
 
         Returns the constraints and the ``body index -> inverse inertia`` map the
@@ -110,7 +121,7 @@ class SequentialImpulseSolver:
         after (:attr:`~omi_physics.collide.Contact.approach`).
         """
         cons = []
-        invI: Dict[int, np.ndarray] = {}
+        invI: dict[int, np.ndarray] = {}
         for c in contacts:
             a, b = c.a, c.b
             if a not in invI:
@@ -154,7 +165,7 @@ class SequentialImpulseSolver:
         cached = self._cache.get((k.c.a, k.c.b))
         if not cached:
             return
-        best: Optional[Tuple[float, float, float]] = None
+        best: tuple[float, float, float] | None = None
         best_d = 0.04                       # (0.2 m)² match tolerance
         for point, nImp, t0, t1 in cached:
             d = float(np.dot(k.c.point - point, k.c.point - point))
@@ -163,24 +174,24 @@ class SequentialImpulseSolver:
         if best is not None:
             k.c.normal_impulse, k.c.tangent_impulse[0], k.c.tangent_impulse[1] = best
 
-    def _apply_warm_start(self, world: "PhysicsWorld", cons: List[_ContactConstraint],
-                          invI: Dict[int, np.ndarray]) -> None:
+    def _apply_warm_start(self, world: "PhysicsWorld", cons: list[_ContactConstraint],
+                          invI: dict[int, np.ndarray]) -> None:
         """Apply each contact's seeded impulse so the solver starts near the solution."""
         for k in cons:
             P = k.c.normal_impulse * k.n + k.c.tangent_impulse[0] * k.t1 \
                 + k.c.tangent_impulse[1] * k.t2
             self._apply_impulse(world, invI, k.c.a, k.c.b, k.rA, k.rB, P)
 
-    def _store_cache(self, cons: List[_ContactConstraint]) -> None:
+    def _store_cache(self, cons: list[_ContactConstraint]) -> None:
         """Save converged impulses keyed by body pair for next step's warm start."""
-        cache: Dict[Tuple[int, int], List[Tuple[np.ndarray, float, float, float]]] = {}
+        cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
         for k in cons:
             cache.setdefault((k.c.a, k.c.b), []).append(
                 (k.c.point.copy(), k.c.normal_impulse,
                  k.c.tangent_impulse[0], k.c.tangent_impulse[1]))
         self._cache = cache
 
-    def _effective_mass(self, world: "PhysicsWorld", invI: Dict[int, np.ndarray],
+    def _effective_mass(self, world: "PhysicsWorld", invI: dict[int, np.ndarray],
                         a: int, b: int, rA: np.ndarray, rB: np.ndarray,
                         dir: np.ndarray) -> float:
         """Reciprocal of the pair's inverse mass along ``dir`` (0 for two immovable bodies)."""
@@ -192,10 +203,17 @@ class SequentialImpulseSolver:
         return 1.0 / k if k > 1e-12 else 0.0
 
     # -- solve -----------------------------------------------------------
-    def solve(self, world: "PhysicsWorld", contacts: List["Contact"], dt: float) -> None:
+    def solve(self, world: "PhysicsWorld", contacts: list["Contact"],
+              dt: float) -> None:  # noqa: ARG002 - see below
         """Resolve ``contacts`` in place: velocity iterations then a position pass.
 
         Mutates the world's velocities and positions.  Empty ``contacts`` is a no-op.
+
+        ``dt`` is part of the interface a solver implements --
+        :class:`~omi_physics.world._CollisionStages` hands the step to whatever
+        solver it was given -- and this one does not read it.  The position pass
+        is a split impulse rather than a Baumgarte bias, so how far it moves a
+        pair apart does not depend on how long the step was.
         """
         if not contacts:
             return
@@ -222,7 +240,7 @@ class SequentialImpulseSolver:
         scaled = R * world.inv_inertia[:n][:, None, :]              # scale columns
         return np.ascontiguousarray(np.einsum('nij,nkj->nik', scaled, R))
 
-    def _seed_pair(self, c: "Contact"):
+    def _seed_pair(self, c: "Contact") -> tuple[float, float, float] | None:
         """Nearest cached ``(nImpulse, t0, t1)`` for this contact's pair, or None."""
         cached = self._cache.get((c.a, c.b))
         if not cached:
@@ -235,7 +253,7 @@ class SequentialImpulseSolver:
                 best, best_d = (nImp, t0, t1), d
         return best
 
-    def _solve_native_full(self, world: "PhysicsWorld", contacts: List["Contact"]) -> None:
+    def _solve_native_full(self, world: "PhysicsWorld", contacts: list["Contact"]) -> None:
         """Assemble contact arrays and run prep + velocity + position in the kernel.
 
         Only the material combine, the warm-start seeding and the record of how
@@ -277,7 +295,8 @@ class SequentialImpulseSolver:
                 + np.cross(world.angular_velocity[b_idx],
                            point - world.position[b_idx]))
         for c, closing in zip(contacts,
-                              -np.einsum('ij,ij->i', at_b - at_a, normal)):
+                              -np.einsum('ij,ij->i', at_b - at_a, normal),
+                              strict=True):
             c.approach = float(closing)
         invIw = self._inv_inertia_world_all(world)
         _native.prepare_and_solve(
@@ -285,9 +304,9 @@ class SequentialImpulseSolver:
             world.position, world.linear_velocity, world.angular_velocity,
             world.inv_mass, invIw, restitution, friction, nImp, tImp,
             self.restitution_threshold, self.velocity_iterations, warm,
-            0.8, self.slop)
+            0.8, self.slop, self.max_correction)
         if warm:
-            cache: Dict[Tuple[int, int], List[Tuple[np.ndarray, float, float, float]]] = {}
+            cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
             for i, c in enumerate(contacts):
                 c.normal_impulse = nImp[i]
                 c.tangent_impulse[0] = tImp[i, 0]; c.tangent_impulse[1] = tImp[i, 1]
@@ -295,8 +314,8 @@ class SequentialImpulseSolver:
                     (c.point.copy(), nImp[i], tImp[i, 0], tImp[i, 1]))
             self._cache = cache
 
-    def _solve_native(self, world: "PhysicsWorld", cons: List[_ContactConstraint],
-                      invI: Dict[int, np.ndarray]) -> None:
+    def _solve_native(self, world: "PhysicsWorld", cons: list[_ContactConstraint],
+                      invI: dict[int, np.ndarray]) -> None:
         """Run the velocity and position iterations in the Cython kernel.
 
         Packs the per-contact constraint data into SoA arrays once, then the
@@ -334,9 +353,10 @@ class SequentialImpulseSolver:
             k.c.tangent_impulse[0] = tImp[i, 0]
             k.c.tangent_impulse[1] = tImp[i, 1]
         _native.solve_positions(a_idx, b_idx, nrm, depth, ima, imb,
-                                world.position, 0.8, self.slop)
+                                world.position, 0.8, self.slop,
+                                self.max_correction)
 
-    def _wake_sleepers(self, world: "PhysicsWorld", contacts: List["Contact"],
+    def _wake_sleepers(self, world: "PhysicsWorld", contacts: list["Contact"],
                        wake_speed: float = 0.15) -> None:
         """A body wakes a sleeping neighbour only on a real impact (relative speed
         above ``wake_speed``) — a body merely resting against a sleeper leaves it
@@ -354,7 +374,7 @@ class SequentialImpulseSolver:
             if not world.awake[c.a] and wakes(c.b):
                 world.wake(c.a)
 
-    def _apply_impulse(self, world: "PhysicsWorld", invI: Dict[int, np.ndarray],
+    def _apply_impulse(self, world: "PhysicsWorld", invI: dict[int, np.ndarray],
                        a: int, b: int, rA: np.ndarray, rB: np.ndarray,
                        P: np.ndarray) -> None:
         """Apply impulse ``P`` to body ``b`` and ``-P`` to body ``a`` (linear and angular)."""
@@ -363,8 +383,8 @@ class SequentialImpulseSolver:
         world.linear_velocity[b] += world.inv_mass[b] * P
         world.angular_velocity[b] += _skew_apply(invI[b], rB, P)
 
-    def _solve_velocity(self, world: "PhysicsWorld", cons: List[_ContactConstraint],
-                        invI: Dict[int, np.ndarray]) -> None:
+    def _solve_velocity(self, world: "PhysicsWorld", cons: list[_ContactConstraint],
+                        invI: dict[int, np.ndarray]) -> None:
         """One velocity iteration: clamp the normal impulse, then Coulomb friction.
 
         The world velocity/mass arrays are bound once (in-place writes still hit
@@ -411,29 +431,47 @@ class SequentialImpulseSolver:
                 lv[b] += imb * Pt
                 av[b] += iIb @ _cross(rB, Pt)
 
-    def _solve_positions(self, world: "PhysicsWorld", contacts: List["Contact"],
+    def _solve_positions(self, world: "PhysicsWorld", contacts: list["Contact"],
                          correction: float = 0.8) -> None:
-        """One split-impulse pass: push overlapping bodies apart along the normal."""
+        """One split-impulse pass: push overlapping bodies apart along the normal.
+
+        Each contact is corrected against what the pass has **already** done,
+        not against the overlap the narrow phase measured.  A box resting on a
+        floor meets it at four points that all report the same overlap; four
+        full corrections push it four times as far as it is in, the pair comes
+        back the next step further out of place than it started, and the
+        overshoot grows from there rather than settling.  Subtracting the
+        movement already applied leaves the deepest point of a manifold in
+        charge and the rest of it with little left to do.
+
+        The correction is bounded by :attr:`max_correction` as well, so a body
+        that arrives deep inside another comes out over a few frames.
+        """
+        moved: dict[int, np.ndarray] = {}
+        unmoved = np.zeros(3)
         for c in contacts:
             a, b = c.a, c.b
-            corr = correction * max(c.depth - self.slop, 0.0)
+            done = float(np.dot(moved.get(b, unmoved) - moved.get(a, unmoved), c.normal))
+            corr = correction * max(c.depth - done - self.slop, 0.0)
             if corr <= 0:
                 continue
             inv_sum = world.inv_mass[a] + world.inv_mass[b]
             if inv_sum <= 1e-12:
                 continue
-            move = corr / inv_sum * c.normal
+            move = min(corr, self.max_correction) / inv_sum * c.normal
             world.position[a] -= world.inv_mass[a] * move
             world.position[b] += world.inv_mass[b] * move
+            moved[a] = moved.get(a, unmoved) - world.inv_mass[a] * move
+            moved[b] = moved.get(b, unmoved) + world.inv_mass[b] * move
 
 
-def build_islands(world: "PhysicsWorld", contacts: List["Contact"]) -> List[List["Contact"]]:
+def build_islands(world: "PhysicsWorld", contacts: list["Contact"]) -> list[list["Contact"]]:
     """Union-find over dynamic bodies sharing contacts → list of contact lists.
 
     Each returned list is an island that can be solved independently; contacts
     touching no dynamic body are gathered into one final island.
     """
-    parent: Dict[int, int] = {}
+    parent: dict[int, int] = {}
 
     def find(x: int) -> int:
         parent.setdefault(x, x)
@@ -449,10 +487,10 @@ def build_islands(world: "PhysicsWorld", contacts: List["Contact"]) -> List[List
     for c in contacts:
         if dyn[c.a] and dyn[c.b]:
             union(c.a, c.b)
-    groups: Dict[int, List["Contact"]] = {}
-    singles: List["Contact"] = []
+    groups: dict[int, list[Contact]] = {}
+    singles: list[Contact] = []
     for c in contacts:
-        anchor: Optional[int] = c.a if dyn[c.a] else (c.b if dyn[c.b] else None)
+        anchor: int | None = c.a if dyn[c.a] else (c.b if dyn[c.b] else None)
         if anchor is None:
             singles.append(c)
             continue

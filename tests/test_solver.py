@@ -94,6 +94,42 @@ def test_incline_slides_iff_tan_exceeds_friction(angle_deg, friction, should_sli
         assert slid < 0.05
 
 
+@pytest.mark.parametrize('heavy', [10.0, 75.0, 1000.0])
+def test_a_heavy_body_does_not_push_a_light_one_through_the_floor(heavy):
+    """The position pass corrects each contact against what it has already done.
+
+    A box meets a floor at four points that all report the same overlap. Four
+    full corrections push it four times as far as it is in, so the pair comes
+    back the next step further out of place than it started -- and with a heavy
+    body pressing a light one down, that grows instead of settling until the
+    light one is thrown out the far side of the floor.
+    """
+    world, mat = ground_world(restitution=0.0)
+    cube = world.add_shape(model.Shape.box((1, 1, 1)))
+    light = world.add_body(model.Motion(type=model.DYNAMIC, mass=1.0),
+                           collider=model.Collider(shape=cube, physicsMaterial=mat),
+                           position=(0, 0.5, 0))
+    world.add_body(model.Motion(type=model.DYNAMIC, mass=heavy),
+                   collider=model.Collider(shape=cube, physicsMaterial=mat),
+                   position=(0, 1.55, 0))
+    for _ in range(400):
+        world.step(DT)
+    assert world.position[light][1] == pytest.approx(0.5, abs=0.1)
+
+
+def test_a_body_placed_deep_inside_another_climbs_out():
+    """Depenetration is bounded per step, so recovery is a handful of frames
+    rather than a body flung across the level in one."""
+    world, mat = ground_world(restitution=0.0)
+    shape = world.add_shape(model.Shape.sphere(0.5))
+    body = world.add_body(model.Motion(type=model.DYNAMIC, mass=1.0),
+                          collider=model.Collider(shape=shape, physicsMaterial=mat),
+                          position=(0, -0.4, 0))          # most of the way in
+    for _ in range(240):
+        world.step(DT)
+    assert world.position[body][1] == pytest.approx(0.5, abs=0.05)
+
+
 def test_determinism_bit_identical_runs():
     def run():
         world, mat = ground_world(restitution=0.3)

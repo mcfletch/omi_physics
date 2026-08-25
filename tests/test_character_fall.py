@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 
 from omi_physics import model
+from omi_physics.character import CharacterCapabilities, CharacterController
 from omi_physics.world import PhysicsWorld
-from omi_physics.character import CharacterController, CharacterCapabilities
 
 STOREY = 3.0
 

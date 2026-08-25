@@ -11,7 +11,7 @@ three calls the narrow phase relies on: ``aabb()`` for the broad-phase box,
 ``center_hint()`` for a representative interior point.  The type aliases
 :data:`SupportProxy` and :data:`Proxy` name these two proxy families for callers.
 """
-from typing import Iterator, Tuple, Union
+from collections.abc import Iterator
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -20,7 +20,7 @@ from . import mathutil, model
 from .mathutil import Vec
 from .trigrid import TriangleGrid
 
-_AABB = Tuple[np.ndarray, np.ndarray]           # (lo, hi) corner pair
+_AABB = tuple[np.ndarray, np.ndarray]           # (lo, hi) corner pair
 
 
 def _box_corners(half: np.ndarray) -> np.ndarray:
@@ -207,8 +207,8 @@ class TriangleMeshProxy:
 
 # A support proxy answers ``support(direction)``; the mesh proxy does not (it is
 # collided triangle-by-triangle instead).  ``Proxy`` is any collision proxy.
-SupportProxy = Union[SphereProxy, BoxProxy, CapsuleProxy, ConvexProxy, TriangleProxy]
-Proxy = Union[SupportProxy, TriangleMeshProxy]
+SupportProxy = SphereProxy | BoxProxy | CapsuleProxy | ConvexProxy | TriangleProxy
+Proxy = SupportProxy | TriangleMeshProxy
 
 
 def make_proxy(shape: 'model.Shape', position: ArrayLike,

@@ -30,5 +30,7 @@ jobs:
 
       # tox-gh reads the [gh] table in tox.ini and runs the envs mapped to this
       # interpreter: CPython runs both -accel and -fallback, PyPy runs -fallback.
+      # The 3.12 row additionally runs `lint` and `typecheck`, so ruff and mypy
+      # gate a merge.
       - name: Run tox
         run: tox

@@ -16,7 +16,9 @@ it should be next.  Two consequences matter:
 * Because it is a real velocity, the contact solver **carries riders**: a marble
   resting on a rising platform is pushed up with it, exactly as a player expects.
 """
-from typing import Any, Callable, Tuple, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
 from . import mathutil
@@ -42,7 +44,7 @@ class KinematicAnimator:
         self.time = time
 
     @staticmethod
-    def _split_pose(pose: Any) -> Tuple[np.ndarray, np.ndarray]:
+    def _split_pose(pose: Any) -> tuple[np.ndarray, np.ndarray]:
         """Normalize a pose return value into ``(position(3,), quaternion(4,))``."""
         if len(pose) == 2 and np.ndim(pose[0]) == 1:
             position, orientation = pose

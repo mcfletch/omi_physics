@@ -5,7 +5,8 @@ queries walk the tree for fat-box overlaps, then keep only pairs whose *real*
 boxes overlap and whose ``collisionFilters`` interact — so the reported set
 equals the brute-force O(N²) set with no false negatives.
 """
-from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+
 import numpy as np
 
 if TYPE_CHECKING:
@@ -16,15 +17,15 @@ if TYPE_CHECKING:
 # per-call ufunc/broadcast overhead dwarfs the arithmetic (a union is ~10x
 # cheaper as tuple min/max). World AABBs arrive as numpy rows and are converted
 # once at the insert/update/query boundary.
-_Box = Tuple[float, float, float]
+_Box = tuple[float, float, float]
 
 
 class _Node:
     """One tree node: a fat AABB plus parent/child links; a leaf carries ``obj``."""
     __slots__ = ('lo', 'hi', 'parent', 'child1', 'child2', 'obj', 'height')
 
-    lo: Optional[_Box]
-    hi: Optional[_Box]
+    lo: _Box | None
+    hi: _Box | None
     parent: Optional['_Node']
     child1: Optional['_Node']
     child2: Optional['_Node']
@@ -54,7 +55,7 @@ def _area(lo: _Box, hi: _Box) -> float:
     return 2.0 * (dx * dy + dy * dz + dz * dx)
 
 
-def _union(a_lo: _Box, a_hi: _Box, b_lo: _Box, b_hi: _Box) -> Tuple[_Box, _Box]:
+def _union(a_lo: _Box, a_hi: _Box, b_lo: _Box, b_hi: _Box) -> tuple[_Box, _Box]:
     """Smallest box enclosing both input boxes, as ``(lo, hi)``."""
     return ((a_lo[0] if a_lo[0] < b_lo[0] else b_lo[0],
              a_lo[1] if a_lo[1] < b_lo[1] else b_lo[1],
@@ -69,8 +70,8 @@ class DynamicAABBTree:
 
     def __init__(self, fatten: float = 0.1) -> None:
         self.fatten = fatten
-        self.root: Optional[_Node] = None
-        self.leaves: Dict[int, _Node] = {}       # obj index -> _Node
+        self.root: _Node | None = None
+        self.leaves: dict[int, _Node] = {}       # obj index -> _Node
 
     # -- insertion / removal --------------------------------------------
     def insert(self, obj: int, lo: np.ndarray, hi: np.ndarray) -> None:
@@ -174,7 +175,7 @@ class DynamicAABBTree:
             sibling.parent = grand
             self._refit_ancestors(grand)
 
-    def _refit_ancestors(self, node: Optional[_Node]) -> None:
+    def _refit_ancestors(self, node: _Node | None) -> None:
         """Recompute each ancestor's box and height from ``node`` up to the root."""
         while node is not None:
             c1, c2 = node.child1, node.child2
@@ -187,9 +188,9 @@ class DynamicAABBTree:
 
     # -- queries ---------------------------------------------------------
     def query(self, lo: np.ndarray, hi: np.ndarray,
-              skip: Optional[int] = None) -> List[int]:
+              skip: int | None = None) -> list[int]:
         """Object indices whose fat box overlaps ``[lo, hi]`` (excluding ``skip``)."""
-        out: List[int] = []
+        out: list[int] = []
         if self.root is None:
             return out
         lo0, lo1, lo2 = float(lo[0]), float(lo[1]), float(lo[2])
@@ -211,7 +212,7 @@ class DynamicAABBTree:
                 stack.append(n.child2)
         return out
 
-    def all_leaves(self) -> List[_Node]:
+    def all_leaves(self) -> list[_Node]:
         """Every leaf node currently in the tree."""
         return list(self.leaves.values())
 
@@ -229,7 +230,7 @@ class BroadPhase:
 
     def __init__(self, fatten: float = 0.1) -> None:
         self.tree = DynamicAABBTree(fatten=fatten)
-        self._known: Set[int] = set()
+        self._known: set[int] = set()
 
     def sync(self, world: "PhysicsWorld") -> None:
         """Insert/remove/refit tree leaves to match the world's current bodies."""
@@ -240,7 +241,7 @@ class BroadPhase:
             self.tree.update(i, world.aabb_min[i], world.aabb_max[i])
         self._known = current
 
-    def pairs(self, world: "PhysicsWorld") -> List[Tuple[int, int]]:
+    def pairs(self, world: "PhysicsWorld") -> list[tuple[int, int]]:
         """Candidate colliding body pairs ``(i, j)``, real-box- and filter-checked.
 
         Skips pairs of two non-dynamic bodies and pairs whose collision filters
@@ -289,8 +290,8 @@ class BroadPhase:
         cf = world.collider_filter[:n]
         if n == 0 or (int(cf.max()) == 0 and int(cf.min()) == 0
                       and world.filter_for(0).collides_with(world.filter_for(0))):
-            return list(zip(lo_idx, hi_idx))
-        return [(p, q) for p, q in zip(lo_idx, hi_idx)
+            return list(zip(lo_idx, hi_idx, strict=True))
+        return [(p, q) for p, q in zip(lo_idx, hi_idx, strict=True)
                 if _filters_interact(world, p, q)]
 
 
@@ -301,9 +302,9 @@ def _filters_interact(world: "PhysicsWorld", a: int, b: int) -> bool:
     return fa.collides_with(fb)
 
 
-def brute_force_pairs(world: "PhysicsWorld") -> List[Tuple[int, int]]:
+def brute_force_pairs(world: "PhysicsWorld") -> list[tuple[int, int]]:
     """Reference O(N²) overlap set for tests."""
-    out: List[Tuple[int, int]] = []
+    out: list[tuple[int, int]] = []
     n = world.body_count
     for i in range(n):
         for j in range(i + 1, n):

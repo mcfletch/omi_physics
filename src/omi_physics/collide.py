@@ -14,22 +14,31 @@ drives the pair further together instead of apart.  :func:`capsule_triangle` is
 where that matters most, because a character landing hard is the common way to
 get deeply inside anything.
 """
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, cast
+from typing import cast
+
 import numpy as np
 
 from . import mathutil
 from ._accel import accelerators_disabled
-from .body import (SphereProxy, BoxProxy, CapsuleProxy, ConvexProxy, TriangleProxy,
-                   TriangleMeshProxy, Proxy, SupportProxy)
+from .body import (
+    BoxProxy,
+    CapsuleProxy,
+    Proxy,
+    SphereProxy,
+    SupportProxy,
+    TriangleMeshProxy,
+    TriangleProxy,
+)
 
 if accelerators_disabled():
     _native = None
 else:
     try:
-        from . import _collide_native as _native   # type: ignore[no-redef,attr-defined]
+        from . import _collide_native as _native  # type: ignore[no-redef,attr-defined]
     except ImportError:                # pragma: no cover - pure-Python fallback
-        _native = None                 # type: ignore[assignment]
+        _native = None
 
 EPS = 1e-9
 
@@ -62,7 +71,7 @@ class Contact:
     approach: float = 0.0
 
 
-def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> List[Contact]:
+def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> list[Contact]:
     """Sphere↔sphere contact (empty if the spheres are apart)."""
     d = B.center - A.center
     dist = np.linalg.norm(d)
@@ -75,7 +84,7 @@ def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> List[Contac
     return [Contact(a, b, point, n, depth)]
 
 
-def sphere_box(a: int, b: int, S: SphereProxy, B: BoxProxy) -> List[Contact]:
+def sphere_box(a: int, b: int, S: SphereProxy, B: BoxProxy) -> list[Contact]:
     """Sphere↔oriented-box contact, handling the sphere centre inside the box."""
     local = B.R.T @ (S.center - B.center)
     clamped = np.clip(local, -B.half, B.half)
@@ -97,14 +106,14 @@ def sphere_box(a: int, b: int, S: SphereProxy, B: BoxProxy) -> List[Contact]:
 
 
 def _project(half: np.ndarray, R: np.ndarray, center: np.ndarray,
-             axis: np.ndarray) -> Tuple[float, float]:
+             axis: np.ndarray) -> tuple[float, float]:
     """Return the ``(min, max)`` extent of an oriented box projected onto ``axis``."""
-    r = np.sum(np.abs((R.T @ axis)) * half)
+    r = np.sum(np.abs(R.T @ axis) * half)
     c = np.dot(center, axis)
     return c - r, c + r
 
 
-def box_box(a: int, b: int, A: BoxProxy, B: BoxProxy) -> List[Contact]:
+def box_box(a: int, b: int, A: BoxProxy, B: BoxProxy) -> list[Contact]:
     """Oriented box↔box contact via SAT plus face clipping (multi-point manifold)."""
     # Candidate separating axes: A's 3 face normals, B's 3, and the (up to 9)
     # edge-edge cross products. Face normals are already unit (rotation columns).
@@ -133,7 +142,7 @@ def box_box(a: int, b: int, A: BoxProxy, B: BoxProxy) -> List[Contact]:
 
 
 def _clip_manifold(a: int, b: int, A: BoxProxy, B: BoxProxy, normal: np.ndarray,
-                   depth: float) -> List[Contact]:
+                   depth: float) -> list[Contact]:
     """Clip the incident face against the reference face into up to 4 contacts."""
     ref, inc, flip = _pick_reference(A, B, normal)
     ref_n = -normal if flip else normal          # outward from ref toward inc
@@ -159,7 +168,7 @@ def _clip_manifold(a: int, b: int, A: BoxProxy, B: BoxProxy, normal: np.ndarray,
 
 
 def _pick_reference(A: BoxProxy, B: BoxProxy,
-                    normal: np.ndarray) -> Tuple[BoxProxy, BoxProxy, bool]:
+                    normal: np.ndarray) -> tuple[BoxProxy, BoxProxy, bool]:
     """Choose reference/incident box: the reference face is most aligned with the normal.
 
     Returns ``(reference, incident, flip)`` where ``flip`` is True when B is the
@@ -172,7 +181,7 @@ def _pick_reference(A: BoxProxy, B: BoxProxy,
     return B, A, True
 
 
-def _face_axis(box: BoxProxy, direction: np.ndarray) -> Tuple[int, float]:
+def _face_axis(box: BoxProxy, direction: np.ndarray) -> tuple[int, float]:
     """Local axis index and sign of the box face most facing ``direction``."""
     dots = box.R.T @ direction
     axis = int(np.argmax(np.abs(dots)))
@@ -180,17 +189,18 @@ def _face_axis(box: BoxProxy, direction: np.ndarray) -> Tuple[int, float]:
     return axis, sign
 
 
-def _incident_face(box: BoxProxy, ref_normal: np.ndarray) -> Tuple[list, int]:
+def _incident_face(box: BoxProxy, ref_normal: np.ndarray) -> tuple[list, int]:
     """The box face most anti-parallel to ``ref_normal``, as ``(vertices, axis)``."""
     axis, sign = _face_axis(box, -ref_normal)
     return _face_vertices(box, axis, sign), axis
 
 
-def _reference_face(box: BoxProxy, ref_normal: np.ndarray):
+def _reference_face(box: BoxProxy, ref_normal: np.ndarray
+                    ) -> tuple[list, list[tuple[np.ndarray, float]],
+                               list[float], np.ndarray]:
     """Reference face vertices, its side clip planes, offsets, and outward normal."""
     axis, sign = _face_axis(box, ref_normal)
     verts = _face_vertices(box, axis, sign)
-    n0 = box.R[:, axis] * sign
     side_planes = []
     offsets = []
     for other in range(3):
@@ -230,7 +240,7 @@ def _clip_face(poly: list, plane_n: np.ndarray, offset: float) -> list:
     return out
 
 
-def _reduce_manifold(contacts: List[Contact], max_points: int = 4) -> List[Contact]:
+def _reduce_manifold(contacts: list[Contact], max_points: int = 4) -> list[Contact]:
     """Keep the ``max_points`` most spread-out contacts (a stable, well-conditioned set)."""
     if len(contacts) <= max_points:
         return contacts
@@ -250,14 +260,14 @@ def _reduce_manifold(contacts: List[Contact], max_points: int = 4) -> List[Conta
     return uniq
 
 
-_DISPATCH: Dict[Tuple[str, str], Callable[..., List[Contact]]] = {
+_DISPATCH: dict[tuple[str, str], Callable[..., list[Contact]]] = {
     ('sphere', 'sphere'): sphere_sphere,
     ('sphere', 'box'): sphere_box,
     ('box', 'box'): box_box,
 }
 
 
-def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
+def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     """Dispatch a proxy pair to the right routine, normalizing order.
 
     The returned contacts always point from body ``a`` toward body ``b`` regardless
@@ -278,7 +288,7 @@ def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
     return collide_convex(a, b, cast(SupportProxy, PA), cast(SupportProxy, PB))
 
 
-def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
+def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     """Convex↔triangle-soup: collide the mover against overlapping triangles.
 
     A capsule mover (the character) uses the analytic capsule↔triangle test — far
@@ -327,7 +337,7 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> List[Contact]:
 
 
 def capsule_triangle(cap: CapsuleProxy,
-                     tri: TriangleProxy) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+                     tri: TriangleProxy) -> tuple[np.ndarray, np.ndarray, float] | None:
     """Analytic capsule↔triangle. Returns ``(point, normal, depth)`` with the
     normal pointing from the triangle toward the capsule, or ``None`` if apart.
 
@@ -353,34 +363,42 @@ def capsule_triangle(cap: CapsuleProxy,
     pushed further in.  Contacts against an **edge** or a **vertex** keep the
     nearest-point direction: there is no face to be in front of at a rim, and
     that is where a neighbouring triangle has the say.
+
+    A triangle with **no area** is not a surface and makes no contact.  It has
+    no side for the capsule to be on and no direction to be pushed along, and
+    whatever solid it belongs to is bounded by its neighbours.  Exporters and
+    decimators leave them in meshes, so the answer has to be that there is
+    nothing there.
     """
     v0, v1, v2 = tri.verts
     face = np.cross(v1 - v0, v2 - v0)
     face_len = float(np.linalg.norm(face))
+    if face_len <= EPS:
+        return None                             # no area, no surface -- see above
+    unit_face = face / face_len
     r = cap.radius
 
-    if face_len > EPS:
-        face_n = face / face_len
-        centre = (cap.p0 + cap.p1) * 0.5
-        if float(np.dot(centre - v0, face_n)) < 0:
-            face_n = -face_n                    # the side the capsule is on
-        deepest: Optional[Tuple[float, np.ndarray]] = None
-        for sp in (cap.p0, cap.p1):
-            # Over the face itself rather than off one of its rims: the foot of
-            # the perpendicular is then the closest point on the triangle.
-            height = float(np.dot(sp - v0, face_n))
-            foot = sp - face_n * height
-            tp = _closest_point_on_triangle(sp, v0, v1, v2)
-            if float(np.dot(foot - tp, foot - tp)) > EPS * EPS:
-                continue
-            reach = r - height
-            if reach > 0 and (deepest is None or reach > deepest[0]):
-                deepest = (reach, tp)
-        if deepest is not None:
-            reach, tp = deepest
-            return tp, face_n, reach
+    face_n = unit_face
+    centre = (cap.p0 + cap.p1) * 0.5
+    if float(np.dot(centre - v0, face_n)) < 0:
+        face_n = -face_n                        # the side the capsule is on
+    deepest: tuple[float, np.ndarray] | None = None
+    for sp in (cap.p0, cap.p1):
+        # Over the face itself rather than off one of its rims: the foot of
+        # the perpendicular is then the closest point on the triangle.
+        height = float(np.dot(sp - v0, face_n))
+        foot = sp - face_n * height
+        tp = _closest_point_on_triangle(sp, v0, v1, v2)
+        if float(np.dot(foot - tp, foot - tp)) > EPS * EPS:
+            continue
+        reach = r - height
+        if reach > 0 and (deepest is None or reach > deepest[0]):
+            deepest = (reach, tp)
+    if deepest is not None:
+        reach, tp = deepest
+        return tp, face_n, reach
 
-    best: Tuple[float, Optional[np.ndarray], Optional[np.ndarray]] = (np.inf, None, None)
+    best: tuple[float, np.ndarray | None, np.ndarray | None] = (np.inf, None, None)
     for sp in (cap.p0, cap.p1):
         tp = _closest_point_on_triangle(sp, v0, v1, v2)
         d2 = float(np.dot(sp - tp, sp - tp))
@@ -395,15 +413,14 @@ def capsule_triangle(cap: CapsuleProxy,
     if best_d2 >= r * r or best_sp is None or best_tp is None:
         return None
     d = np.sqrt(best_d2)
-    if d > EPS:
-        normal = (best_sp - best_tp) / d        # triangle -> capsule
-    else:
-        normal = mathutil.normalize(face)       # capsule axis through the face
+    # From the triangle toward the capsule; where the axis runs exactly through
+    # the contact point there is no such direction, and the face's own stands in.
+    normal = (best_sp - best_tp) / d if d > EPS else unit_face
     return best_tp, normal, r - d
 
 
 def capsule_triangles(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
-                      v2: np.ndarray) -> Tuple[np.ndarray, np.ndarray,
+                      v2: np.ndarray) -> tuple[np.ndarray, np.ndarray,
                                                np.ndarray, np.ndarray]:
     """:func:`capsule_triangle` for N triangles at once.
 
@@ -422,8 +439,8 @@ def capsule_triangles(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
 
 
 def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
-                        verts: Optional[np.ndarray] = None
-                        ) -> Tuple[np.ndarray, np.ndarray]:
+                        verts: np.ndarray | None = None
+                        ) -> tuple[np.ndarray, np.ndarray]:
     """Depenetration for a capsule against a mesh, as ``(pushes, depths)``.
 
     ``pushes`` is ``(N,3)`` unit normals pointing **from the world into the
@@ -456,7 +473,7 @@ def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
 
 
 def box_triangle_batch(box: BoxProxy, verts: np.ndarray
-                       ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
                                   np.ndarray]:
     """An oriented box against ``(N, 3, 3)`` triangles, all at once.
 
@@ -529,7 +546,11 @@ def box_triangle_batch(box: BoxProxy, verts: np.ndarray
         overlap = np.where(closer, this, overlap)
         direction = np.where(closer[:, None], unit * sign[:, None], direction)
 
-    hit = ~separated & np.isfinite(overlap) & (overlap > 1e-9)
+    # A triangle with no area is not a surface -- it has no plane to separate
+    # along, and whatever solid it belongs to is bounded by its neighbours -- so
+    # it makes no contact, as it makes none against a capsule.
+    has_face = np.linalg.norm(face, axis=1) > 1e-9
+    hit = has_face & ~separated & np.isfinite(overlap) & (overlap > 1e-9)
     if not hit.any():
         return hit, points, normals, depths
     # Back to the world, and pointing from the triangle toward the box.
@@ -579,7 +600,7 @@ def _closest_on_triangles(point: np.ndarray, verts: np.ndarray) -> np.ndarray:
 
 
 def capsule_triangle_batch(cap: CapsuleProxy, verts: np.ndarray
-                           ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
                                       np.ndarray]:
     """:func:`capsule_triangles` taking the triangles already as ``(N, 3, 3)``.
 
@@ -606,7 +627,7 @@ def capsule_triangle_batch(cap: CapsuleProxy, verts: np.ndarray
 
 
 def _capsule_triangles_numpy(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
-                             v2: np.ndarray) -> Tuple[np.ndarray, np.ndarray,
+                             v2: np.ndarray) -> tuple[np.ndarray, np.ndarray,
                                                       np.ndarray, np.ndarray]:
     """:func:`capsule_triangle` for N triangles at once, in numpy.
 
@@ -647,13 +668,14 @@ def _capsule_triangles_numpy(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
     face = np.cross(v1 - v0, v2 - v0)
     face_len = np.linalg.norm(face, axis=1)
     has_face = face_len > EPS
-    # Divide only where there is a face; a degenerate triangle keeps a zero
-    # normal and is answered by the edge path below.
+    # Divide only where there is a face. A triangle without one is not a
+    # surface and makes no contact at all -- see `capsule_triangle` -- so the
+    # numbers computed for it below are never read.
     safe_len = np.where(has_face, face_len, 1.0)
-    face_n = face / safe_len[:, None]
+    unit_face = face / safe_len[:, None]
     # The side the capsule is on, from its axis centre.
-    flip = np.einsum('ij,ij->i', centre - v0, face_n) < 0
-    face_n = np.where(flip[:, None], -face_n, face_n)
+    flip = np.einsum('ij,ij->i', centre - v0, unit_face) < 0
+    face_n = np.where(flip[:, None], -unit_face, unit_face)
 
     # -- over the face --------------------------------------------------
     best_reach = np.full(count, -np.inf)
@@ -698,8 +720,8 @@ def _capsule_triangles_numpy(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
     # pushed along but the face's own.
     rim_n = np.where(apart[:, None],
                      (best_sp - best_tp) / np.where(apart, distance, 1.0)[:, None],
-                     _normalize_rows(face))
-    rim_hit = best_d2 < r * r
+                     unit_face)
+    rim_hit = has_face & (best_d2 < r * r)
 
     hit = face_hit | rim_hit
     use_face = face_hit
@@ -707,12 +729,6 @@ def _capsule_triangles_numpy(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
     normals = np.where(use_face[:, None], face_n, rim_n)
     depths = np.where(use_face, best_reach, r - distance)
     return hit, points, normals, depths
-
-
-def _normalize_rows(vectors: np.ndarray) -> np.ndarray:
-    """Each row scaled to unit length; a zero row stays zero."""
-    length = np.linalg.norm(vectors, axis=1)
-    return vectors / np.where(length > EPS, length, 1.0)[:, None]
 
 
 def _closest_points_on_triangles(p: np.ndarray, a: np.ndarray, b: np.ndarray,
@@ -765,7 +781,7 @@ def _closest_points_on_triangles(p: np.ndarray, a: np.ndarray, b: np.ndarray,
 
 def _closest_segments_to_segment(p1: np.ndarray, q1: np.ndarray,
                                  p2: np.ndarray, q2: np.ndarray
-                                 ) -> Tuple[np.ndarray, np.ndarray]:
+                                 ) -> tuple[np.ndarray, np.ndarray]:
     """:func:`_closest_segment_segment` for one segment against N segments.
 
     Answers ``(on_the_single, on_each)``, both ``(N,3)``.  The scalar routine's
@@ -841,7 +857,7 @@ def _closest_point_on_triangle(p: np.ndarray, a: np.ndarray, b: np.ndarray,
 
 
 def _closest_segment_segment(p1: np.ndarray, q1: np.ndarray, p2: np.ndarray,
-                             q2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                             q2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Closest pair of points between segments ``p1q1`` and ``p2q2``."""
     d1, d2 = q1 - p1, q2 - p2
     r = p1 - p2

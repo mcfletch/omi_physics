@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from omi_physics import model
+from omi_physics.character import CharacterCapabilities, CharacterController
 from omi_physics.world import PhysicsWorld
-from omi_physics.character import CharacterController, CharacterCapabilities
 
 DT = 1.0 / 60.0
 GRAVITY = 9.81
@@ -30,7 +30,7 @@ def standing_character(caps=None):
 def fly_for(character, seconds):
     """Step ``seconds`` of simulation, returning the highest base height seen."""
     peak = character.base()[1]
-    for _ in range(int(round(seconds / DT))):
+    for _ in range(round(seconds / DT)):
         character.update(DT)
         peak = max(peak, character.base()[1])
     return peak

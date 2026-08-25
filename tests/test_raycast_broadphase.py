@@ -11,7 +11,8 @@ the behaviour rather than a speed that depends on the machine.
 import numpy as np
 import pytest
 
-from omi_physics import model, raycast as raycast_module
+from omi_physics import model
+from omi_physics import raycast as raycast_module
 from omi_physics.raycast import raycast
 from omi_physics.world import PhysicsWorld
 

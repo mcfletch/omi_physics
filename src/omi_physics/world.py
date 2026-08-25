@@ -6,16 +6,15 @@ contiguous numpy, so integration and AABB refit are single array ops over all
 awake bodies — fast on the CPU today and GPU-shaped for later (see
 ``docs/PIPELINE.md``).
 """
-from typing import (Any, Callable, Container, Dict, List, Optional, Set,
-                    Tuple, TYPE_CHECKING)
 import os
+from collections.abc import Callable, Container
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from . import model
-from . import mathutil
-from .mathutil import Vec
+from . import mathutil, model
 from .backend import NumpyBackend, select_backend
+from .mathutil import Vec
 
 if TYPE_CHECKING:
     from .collide import Contact
@@ -27,18 +26,18 @@ _STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
 class PhysicsWorld:
     """A rigid-body world.  Add shapes/materials/filters, then bodies, then step."""
 
-    def __init__(self, gravity: Optional[model.Gravity] = None,
+    def __init__(self, gravity: model.Gravity | None = None,
                  fixed_dt: float = 1.0 / 60.0, max_frame: float = 0.25,
                  backend: Any = None, sleep_enabled: bool = True,
                  default_linear_damping: float = 0.0,
                  default_angular_damping: float = 0.0,
                  gpu_threshold: int = 10000) -> None:
         self.gravity = gravity if gravity is not None else model.Gravity()
-        self.gravity_volumes: List[Any] = []
+        self.gravity_volumes: list[Any] = []
         #: Exact AABBs of the shapes that need a proxy to measure, and the pose
         #: each was measured at, so a body that has not moved is not measured
         #: again -- nor even asked. See :meth:`_refit_measured`.
-        self._aabb_cache: Dict[int, tuple] = {}
+        self._aabb_cache: dict[int, tuple] = {}
         self._refit_lo: np.ndarray = np.zeros((0, 3), dtype='d')
         self._refit_hi: np.ndarray = np.zeros((0, 3), dtype='d')
         self._refit_pose: np.ndarray = np.zeros((0, 3), dtype='d')
@@ -54,33 +53,33 @@ class PhysicsWorld:
         self.default_linear_damping = default_linear_damping
         self.default_angular_damping = default_angular_damping
 
-        self.shapes: List[model.Shape] = []
-        self.materials: List[model.Material] = []
-        self.filters: List[model.CollisionFilter] = []
-        self.joints: List[model.Joint] = []
-        self.joint_attachments: List[model.JointAttach] = []
+        self.shapes: list[model.Shape] = []
+        self.materials: list[model.Material] = []
+        self.filters: list[model.CollisionFilter] = []
+        self.joints: list[model.Joint] = []
+        self.joint_attachments: list[model.JointAttach] = []
         # Per-material-pair friction overrides, keyed by the sorted (a, b) index
         # tuple -> (static_mu, dynamic_mu).  Consulted by the solver ahead of the
         # material-combine rule, so a specific pairing (e.g. rubber-on-ice) can be
         # tuned without disturbing any other pairing.
-        self.pair_friction: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        self.pair_friction: dict[tuple[int, int], tuple[float, float]] = {}
 
         self._n = 0
         self._cap = 0
         #: Slots whose body has been removed, ready for the next one. A
         #: streaming world adds and removes a body per tile for as long as it
         #: runs, and without reuse the arrays only ever grow.
-        self._free: List[int] = []
+        self._free: list[int] = []
         self._accumulator = 0.0
         self.time = 0.0
-        self.bodies: List[Any] = []            # optional per-index user handle
+        self.bodies: list[Any] = []            # optional per-index user handle
 
         self._alloc(8)
-        self._collision: Optional["_CollisionStages"] = None  # built when a collider exists
-        self.contacts: List["Contact"] = []
-        self.triggers_overlaps: Set[Any] = set()
-        self.trigger_listeners: List[Callable[..., None]] = []
-        self.joint_constraints: List[Any] = []
+        self._collision: _CollisionStages | None = None  # built when a collider exists
+        self.contacts: list[Contact] = []
+        self.triggers_overlaps: set[Any] = set()
+        self.trigger_listeners: list[Callable[..., None]] = []
+        self.joint_constraints: list[Any] = []
         self.joint_iterations = 10
 
     # -- storage ---------------------------------------------------------
@@ -246,19 +245,19 @@ class PhysicsWorld:
             float(static_mu), float(dynamic_mu))
 
     def pair_friction_for(self, material_a: int,
-                          material_b: int) -> Optional[Tuple[float, float]]:
+                          material_b: int) -> tuple[float, float] | None:
         """Return ``(static_mu, dynamic_mu)`` for the pair, or ``None`` if unset."""
         return self.pair_friction.get(self._pair_key(material_a, material_b))
 
     @staticmethod
-    def _pair_key(a: int, b: int) -> Tuple[int, int]:
+    def _pair_key(a: int, b: int) -> tuple[int, int]:
         """The order-independent key for a material pair (smaller index first)."""
         return (a, b) if a <= b else (b, a)
 
     # -- game-facing impacts ---------------------------------------------
     def impact_on(self, i: int, above: float = 0.0, skip_static: bool = False,
-                  among: Optional[Container[int]] = None
-                  ) -> Optional[Tuple[int, float]]:
+                  among: Container[int] | None = None
+                  ) -> tuple[int, float] | None:
         """The heaviest blow body ``i`` took in the step just run.
 
         Returns ``(other body, closing speed)`` -- how fast the two were coming
@@ -292,7 +291,7 @@ class PhysicsWorld:
         that clips a bollard and a rival in the same step is told about the
         bollard and drives on.
         """
-        found: Optional[Tuple[int, float]] = None
+        found: tuple[int, float] | None = None
         floor = max(float(above), 0.0)
         for contact in self.contacts:
             if contact.a == i:
@@ -333,9 +332,9 @@ class PhysicsWorld:
         self.wake(i)
 
     # -- bodies ----------------------------------------------------------
-    def add_body(self, motion: Optional[model.Motion] = None,
-                 collider: Optional[model.Collider] = None,
-                 trigger: Optional[model.Trigger] = None,
+    def add_body(self, motion: model.Motion | None = None,
+                 collider: model.Collider | None = None,
+                 trigger: model.Trigger | None = None,
                  position: Vec = (0, 0, 0),
                  orientation: Vec = (0, 0, 0, 1),
                  handle: Any = None) -> int:
@@ -370,7 +369,7 @@ class PhysicsWorld:
         self._awake[i] = True
         self._sleep_timer[i] = 0.0
 
-        shape: Optional[model.Shape] = None
+        shape: model.Shape | None = None
         if collider is not None and 0 <= collider.shape < len(self.shapes):
             shape = self.shapes[collider.shape]
             self._collider_shape[i] = collider.shape
@@ -409,8 +408,8 @@ class PhysicsWorld:
         self._aabb_min[i] = lo - margin
         self._aabb_max[i] = hi + margin
 
-    def place_body(self, i: int, position: Optional[Vec] = None,
-                   orientation: Optional[Vec] = None,
+    def place_body(self, i: int, position: Vec | None = None,
+                   orientation: Vec | None = None,
                    margin: float = 0.05) -> None:
         """Put body ``i`` where the caller says it is, between steps.
 
@@ -505,7 +504,7 @@ class PhysicsWorld:
         self._refit_cache_n = -1
 
     def _set_mass_properties(self, i: int, motion: model.Motion,
-                             shape: Optional[model.Shape]) -> None:
+                             shape: model.Shape | None) -> None:
         """Fill body ``i``'s mass and inverse inertia; static/kinematic bodies get zero."""
         if motion.type != model.DYNAMIC:
             self._inv_mass[i] = 0.0
@@ -635,7 +634,7 @@ class PhysicsWorld:
             self._update_sleep(dt)
         self.time += dt
 
-    def writeback(self, alpha: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+    def writeback(self, alpha: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Interpolated poses for rendering: lerp prev→current by ``alpha``."""
         pos = self.prev_position * (1 - alpha) + self.position * alpha
         quat = mathutil.quat_normalize(
@@ -784,13 +783,13 @@ class PhysicsWorld:
         self._linear_velocity[:self._n][~self.awake & dyn] = 0.0
         self._angular_velocity[:self._n][~self.awake & dyn] = 0.0
 
-    def _contact_islands(self, dyn: np.ndarray) -> Tuple[List[List[int]], Set[int]]:
+    def _contact_islands(self, dyn: np.ndarray) -> tuple[list[list[int]], set[int]]:
         """Union-find the touching dynamic bodies into islands.
 
         Returns the list of islands (each a list of body indices) and the set of
         dynamic bodies that are in contact with anything.
         """
-        parent: Dict[int, int] = {}
+        parent: dict[int, int] = {}
 
         def find(x: int) -> int:
             parent.setdefault(x, x)
@@ -799,7 +798,7 @@ class PhysicsWorld:
                 x = parent[x]
             return x
 
-        contacted: Set[int] = set()
+        contacted: set[int] = set()
         for c in self.contacts:
             a, b = c.a, c.b
             if dyn[a]:
@@ -808,7 +807,7 @@ class PhysicsWorld:
                 contacted.add(b)
             if dyn[a] and dyn[b]:
                 parent[find(a)] = find(b)
-        groups: Dict[int, List[int]] = {}
+        groups: dict[int, list[int]] = {}
         for i in contacted:
             groups.setdefault(find(i), []).append(i)
         return list(groups.values()), contacted
@@ -858,7 +857,7 @@ class PhysicsWorld:
                 c.solve(self, dt)
 
 
-def inertia_diagonal(shape: Optional[model.Shape], mass: float) -> np.ndarray:
+def inertia_diagonal(shape: model.Shape | None, mass: float) -> np.ndarray:
     """Solid-body inertia diagonal for a primitive shape about its centre."""
     if shape is None:
         return np.zeros(3)
@@ -900,21 +899,21 @@ class _CollisionStages:
         self.solver = solver or SequentialImpulseSolver(
             velocity_iterations=velocity_iterations)
         self.triggers = TriggerSystem()
-        self.contacts: List["Contact"] = []
+        self.contacts: list[Contact] = []
 
     def run(self, world: "PhysicsWorld", dt: float) -> None:
         """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
         pairs = self.broadphase.pairs(world)
-        solid: List[Tuple[int, int]] = []
+        solid: list[tuple[int, int]] = []
         has_trigger = False
         for i, j in pairs:
             if world.trigger_shape[i] >= 0 or world.trigger_shape[j] >= 0:
                 has_trigger = True
-            elif world.collider_shape[i] >= 0 and world.collider_shape[j] >= 0:
-                # A pair at rest (both asleep/static) needs no work; it is revived
-                # when a mover touches one of them (solver wakes the sleeper).
-                if world.is_awake_mover(i) or world.is_awake_mover(j):
-                    solid.append((i, j))
+            # A pair at rest (both asleep/static) needs no work; it is revived
+            # when a mover touches one of them (solver wakes the sleeper).
+            elif (world.collider_shape[i] >= 0 and world.collider_shape[j] >= 0
+                    and (world.is_awake_mover(i) or world.is_awake_mover(j))):
+                solid.append((i, j))
         self.contacts = self.narrowphase.generate(world, solid)
         world.contacts = self.contacts
         self.solver.solve(world, self.contacts, dt)

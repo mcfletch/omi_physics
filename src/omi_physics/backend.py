@@ -8,10 +8,10 @@ a future ``GLComputeBackend`` drops in behind the same surface.
 The backend operates on the :class:`~omi_physics.world.PhysicsWorld`'s
 structure-of-arrays state; it never touches scenegraph objects.
 """
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 
-from . import model
 from . import mathutil
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ def _has_gl_compute() -> bool:
     being selected where it would crash, so ``auto`` falls back to numpy instead.
     """
     try:
-        from OpenGL.GL import glGetString, GL_VERSION
+        from OpenGL.GL import GL_VERSION, glGetString
         version = glGetString(GL_VERSION)
     except Exception:
         return False

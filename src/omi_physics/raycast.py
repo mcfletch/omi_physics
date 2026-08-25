@@ -360,8 +360,9 @@ def _hit_body(world: Any, body: int, origin: np.ndarray, heading: np.ndarray,
     elif kind in ('capsule', 'cylinder'):
         found = _hit_capsule(origin, heading, centre, rotation, shape, limit)
     elif kind == 'trimesh':
-        met = _hit_trimesh(origin, heading, centre, rotation, shape, limit,
-                           _placed(world, body, shape, centre, rotation))
+        placed = _placed(world, body, shape, centre, rotation)
+        met = (None if placed is None
+               else _hit_trimesh(origin, heading, limit, placed))
         found = None if met is None else met[:2]
         triangle = NO_TRIANGLE if met is None else met[2]
     else:
@@ -558,10 +559,8 @@ def _placed(world: Any, body: int, shape: Any, centre: np.ndarray,
     return found
 
 
-def _hit_trimesh(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
-                 rotation: np.ndarray, shape: Any, limit: float,
-                 placed: _Placed | None = None
-                 ) -> tuple[float, np.ndarray, int] | None:
+def _hit_trimesh(origin: np.ndarray, heading: np.ndarray, limit: float,
+                 placed: _Placed) -> tuple[float, np.ndarray, int] | None:
     """Ray against a triangle soup, narrowed to the cells the ray crosses.
 
     Through the mesh's spatial grid rather than by testing every triangle's
@@ -570,12 +569,13 @@ def _hit_trimesh(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
     cast.  What the grid hands back is a superset of what the ray can meet, so
     the exact test below still decides.
 
+    ``placed`` is the mesh in world space, cached against the pose it was built
+    for; where the mesh is and which shape it came from are already in it.
+
     The third value is the winner's index in the *mesh*, not among the
     candidates the grid offered: the grid is an optimisation and its numbering
     is nobody else's business.
     """
-    if placed is None:
-        return None
     if not _hits_box(origin, heading, placed.low, placed.high, limit):
         return None
     candidates = placed.grid.ray(origin, heading, limit)

@@ -11,9 +11,9 @@ References:
     https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0
 """
 from dataclasses import dataclass, field
-from typing import List, Optional
-from numpy.typing import ArrayLike
+
 import numpy as np
+from numpy.typing import ArrayLike
 
 from .mathutil import Vec
 
@@ -44,8 +44,8 @@ class Shape:
     height: float = 2.0                         # capsule (mid) / cylinder (total)
     radiusBottom: float = 0.5                   # capsule / cylinder
     radiusTop: float = 0.5                      # capsule / cylinder
-    points: Optional[np.ndarray] = None         # convex / trimesh vertices (M,3)
-    indices: Optional[np.ndarray] = None        # trimesh triangle indices (T,3)
+    points: np.ndarray | None = None         # convex / trimesh vertices (M,3)
+    indices: np.ndarray | None = None        # trimesh triangle indices (T,3)
     mesh: int = -1                              # glTF mesh index (convex / trimesh)
 
     @classmethod
@@ -142,7 +142,7 @@ class CollisionFilter:
     with everything not explicitly excluded".
     """
     collisionSystems: tuple = ()
-    collideWithSystems: Optional[tuple] = None
+    collideWithSystems: tuple | None = None
     notCollideWithSystems: tuple = ()
 
     def collides_with(self, other: 'CollisionFilter') -> bool:
@@ -201,8 +201,8 @@ class JointDrive:
     mode: str = 'force'                          # 'force' | 'acceleration'
     axis: int = 0
     maxForce: float = np.inf
-    positionTarget: Optional[float] = None
-    velocityTarget: Optional[float] = None
+    positionTarget: float | None = None
+    velocityTarget: float | None = None
     stiffness: float = 0.0
     damping: float = 0.0
 
@@ -210,8 +210,8 @@ class JointDrive:
 @dataclass
 class Joint:
     """A ``physicsJoints[]`` entry: limits + drives between two bodies."""
-    limits: List[JointLimit] = field(default_factory=list)
-    drives: List[JointDrive] = field(default_factory=list)
+    limits: list[JointLimit] = field(default_factory=list)
+    drives: list[JointDrive] = field(default_factory=list)
 
 
 @dataclass

@@ -18,11 +18,15 @@ src/omi_physics/_collide_native.c
 # Test / tooling caches
 .tox/
 .pytest_cache/
+.hypothesis/
 .mypy_cache/
 .ruff_cache/
 .coverage
 .coverage.*
 htmlcov/
+
+# Working copies of this repository checked out by tooling
+.claude/worktrees/
 
 # Environments
 .venv/

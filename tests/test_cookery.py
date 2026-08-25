@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 
-from omi_physics import model, hull
-from omi_physics.cookery import cook_shape, clear_cache
+from omi_physics import hull
+from omi_physics.cookery import clear_cache, cook_shape
 
 
 def box_surface(half=(1.0, 1.0, 1.0), n=4):

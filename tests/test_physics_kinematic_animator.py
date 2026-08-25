@@ -10,9 +10,9 @@ rotating arms.
 """
 import numpy as np
 
-from omi_physics import model, mathutil
-from omi_physics.world import PhysicsWorld
+from omi_physics import mathutil, model
 from omi_physics.kinematic import KinematicAnimator
+from omi_physics.world import PhysicsWorld
 
 
 def _kinematic_box(world, size=(4, 0.5, 4), position=(0, 0, 0)):

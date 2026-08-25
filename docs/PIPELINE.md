@@ -101,6 +101,33 @@ velocity impulses until they stop interpenetrating, warm-starting from the
 previous step's impulses so stacks settle quickly. This is the stage the
 `_solver_native` accelerator replaces.
 
+After the velocity iterations comes a **split-impulse position pass**, which
+moves overlapping bodies apart along the contact normal without giving them the
+velocity that movement would imply — so a stack settling does not gain the
+energy a Baumgarte bias would put into it. Two things bound what it does:
+
+- Each contact is corrected against the movement the pass has **already**
+  applied, not against the overlap the narrow phase measured. A box resting on a
+  floor meets it at four points reporting the same overlap, and four full
+  corrections would push it four times as far as it is in.
+- `SequentialImpulseSolver.max_correction` (metres, default `0.2`) caps how far
+  one step may push a pair apart, so a body that arrives deep inside another —
+  placed there, or driven there at speed — climbs out over a few frames rather
+  than being flung across the level in one.
+
+Overlap below `slop` (metres, default `0.005`) is left alone: contact is
+discrete, and a resting stack that is corrected to exactly zero overlap
+separates, falls and lands again every step.
+
+**Where the mass ratios reach.** Sequential impulses pass a load down a stack
+one contact at a time, so what a stack holds depends on how many iterations the
+load has to travel through. `velocity_iterations` (default `10`) settles a stack
+of boxes of comparable weight; a light body pinned between two much heavier ones
+is being pushed by a force those iterations cannot balance, and it is squeezed
+out sideways rather than held. Somewhere past a hundred to one, in a stack
+several bodies deep, that is what happens. More iterations buy more ratio, at
+their own cost per step.
+
 Before any of that it writes each contact's **approach** — how fast the pair
 were closing along the contact normal when they met. Restitution is scaled by
 it, and `PhysicsWorld.impact_on` answers from it. It has to be taken here and

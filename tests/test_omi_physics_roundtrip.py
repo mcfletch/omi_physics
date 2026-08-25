@@ -1,9 +1,7 @@
 """Phase 2 glTF OMI import/export round-trip (no GL)."""
-import copy
 import pytest
 
-from omi_physics import model
-from omi_physics import omi_gltf
+from omi_physics import model, omi_gltf
 
 
 def fixture_gltf():

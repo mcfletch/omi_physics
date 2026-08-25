@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from omi_physics import model
-from omi_physics.world import PhysicsWorld
 from omi_physics.gravity import GravityVolume, SphereRegion
+from omi_physics.world import PhysicsWorld
 
 DT = 1.0 / 120.0
 

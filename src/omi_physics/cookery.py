@@ -5,19 +5,18 @@ optional triangle indices) into an OMI :class:`~omi_physics.model.Shape`
 (or a compound list for ``decompose``), choosing the cheapest proxy that fits.
 Results are cached on the vertex array so a mesh is cooked once.
 """
-from typing import Dict, List, Optional, Union
-from numpy.typing import ArrayLike
+
 import numpy as np
+from numpy.typing import ArrayLike
 
-from . import model
-from . import hull
+from . import hull, model
 
-_CACHE: Dict[tuple, tuple] = {}
+_CACHE: dict[tuple, tuple] = {}
 
 
-def cook_shape(points: ArrayLike, indices: Optional[ArrayLike] = None,
+def cook_shape(points: ArrayLike, indices: ArrayLike | None = None,
                strategy: str = 'auto',
-               dynamic: bool = True) -> Union[model.Shape, List[model.Shape]]:
+               dynamic: bool = True) -> model.Shape | list[model.Shape]:
     """Return a ``model.Shape`` (or list of shapes for ``decompose``).
 
     Strategies: ``primitive`` (best-fit box/sphere), ``convex`` (hull),
@@ -33,7 +32,7 @@ def cook_shape(points: ArrayLike, indices: Optional[ArrayLike] = None,
 
     if strategy == 'auto':
         strategy = _auto_strategy(pts, indices, dynamic)
-    result: Union[model.Shape, List[model.Shape]]
+    result: model.Shape | list[model.Shape]
     if strategy == 'primitive':
         result = _fit_primitive(pts)
     elif strategy == 'convex':
@@ -50,7 +49,7 @@ def cook_shape(points: ArrayLike, indices: Optional[ArrayLike] = None,
     return result
 
 
-def _auto_strategy(pts: np.ndarray, indices: Optional[ArrayLike],
+def _auto_strategy(pts: np.ndarray, indices: ArrayLike | None,
                    dynamic: bool) -> str:
     """Pick a cook strategy: static-with-indices→trimesh, concave→decompose, else convex."""
     if not dynamic and indices is not None:
@@ -79,7 +78,7 @@ def _fit_primitive(pts: np.ndarray) -> model.Shape:
     return model.Shape.box(tuple(hi - lo))
 
 
-def _ensure_indices(pts: np.ndarray, indices: Optional[ArrayLike]) -> np.ndarray:
+def _ensure_indices(pts: np.ndarray, indices: ArrayLike | None) -> np.ndarray:
     """Triangle indices for a trimesh: the given ones, or the hull's own triangulation."""
     if indices is not None:
         return np.asarray(indices, dtype='i')

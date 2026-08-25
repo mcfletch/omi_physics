@@ -8,14 +8,15 @@ Every routine broadcasts over leading axes, so a single call handles one vector 
 a whole ``(N, ...)`` batch.  Callers pass numpy arrays (or array-likes that
 :func:`numpy.asarray` accepts); the return is always a fresh array.
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
+
 import numpy as np
 
 # A flat vector argument: a sequence of floats or an ndarray.  numpy cannot check
 # a fixed length (e.g. exactly 3) statically — its shape type parameter is only
 # ``tuple[int, ...]`` — but this excludes the scalars/strings that ``ArrayLike``
 # admits, so unpacking and ``tuple(...)`` on such a parameter type-check.
-Vec = Union[Sequence[float], np.ndarray]
+Vec = Sequence[float] | np.ndarray
 
 
 def normalize(v: Vec, axis: int = -1, eps: float = 1e-12) -> np.ndarray:
@@ -92,16 +93,21 @@ def quat_to_axis_angle(q: np.ndarray) -> np.ndarray:
 
     Batched form of :func:`physicsbody.quat_to_vrml_rotation`; a near-identity
     rotation (sin(angle/2) ~ 0) yields the canonical ``(0, 1, 0, 0)``.
+
+    The axis comes from the quaternion's own vector part and the angle from
+    ``arctan2``, rather than either being recovered through ``sqrt(1 - w*w)`` and
+    ``arccos(w)``. Both of those lose most of their digits as ``w`` approaches
+    one -- the subtraction cancels -- and a body turning slowly, which is a body
+    at rest as much as anything else, is exactly where ``w`` is near one.
     """
     q = quat_normalize(q)
-    w = np.clip(q[..., 3], -1.0, 1.0)
-    s = np.sqrt(np.maximum(1.0 - w * w, 0.0))
+    v = q[..., :3]
+    s = np.linalg.norm(v, axis=-1)
     small = s < 1e-9
-    s_safe = np.where(small, 1.0, s)
-    axis = q[..., :3] / s_safe[..., None]
+    axis = v / np.where(small, 1.0, s)[..., None]
     out = np.empty(q.shape[:-1] + (4,), dtype=q.dtype)
     out[..., :3] = np.where(small[..., None], np.array([0.0, 1.0, 0.0]), axis)
-    out[..., 3] = np.where(small, 0.0, 2.0 * np.arccos(w))
+    out[..., 3] = np.where(small, 0.0, 2.0 * np.arctan2(s, q[..., 3]))
     return out
 
 

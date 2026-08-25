@@ -227,10 +227,39 @@ python setup.py build_ext --inplace
 # Force the pure-Python fallback (delete the compiled modules)
 rm -f src/omi_physics/*.so
 
-# Type-check and lint
-mypy src/omi_physics
-ruff check src tests
+# Lint and type-check. Both read pyproject.toml for everything -- which files,
+# which rules, which Python -- so there are no flags to remember and a local
+# run is the same run CI makes.
+ruff check
+mypy
+
+# The whole matrix -- lint, types, and both accelerator paths on every
+# interpreter present
+tox
 ```
+
+`tox -e lint` and `tox -e typecheck` are the same two commands, and CI runs them
+on the 3.12 row, so a merge is gated on them. `ruff format` is configured but is
+not one of the gates: the array expressions here are laid out so the arithmetic
+keeps its shape -- a cross product is three rows because it is three rows -- and
+the formatter sets them as filled paragraphs of code. Line width is held by
+`ruff check` instead.
+
+The suite has two halves. Most of it checks the engine against scenes written
+down by hand: a ball dropped three metres, a stack of five boxes, a wheel on a
+slope. The `tests/test_properties_*.py` files check the same code against inputs
+nobody wrote down — a collider with no radius, a "triangle" whose three vertices
+are one point, a dozen bodies already inside one another, a hundred-kilogramme
+crate resting on a hundred-gramme one — and assert only what has to hold of
+every answer: that the world stays made of numbers, that a contact normal is a
+direction, that separating by the depth a contact reports separates it. They are
+written with [hypothesis](https://hypothesis.readthedocs.io/), which generates
+the cases, shrinks a failure to the smallest one that still fails, and remembers
+it — so a defect found once is a regression test from then on.
+
+Hypothesis is a **CPython-only** test dependency: it publishes no wheel for the
+PyPy in the matrix. The property files skip where it is absent, and everything
+else runs there as before.
 
 The accelerators are a **pure speedup**: every `.pyx` has an identical NumPy/
 Python implementation the engine uses when the compiled module is absent. Tests
@@ -258,6 +287,7 @@ src/omi_physics/        the engine (importable as omi_physics)
   _solver_native.pyx    Cython contact solver accelerator
   _collide_native.pyx   Cython collision accelerator
 tests/                  pytest suite (pure NumPy; GPU-parity tests skip w/o GL)
+  test_properties_*.py  property tests over generated input (hypothesis)
 docs/                   deep-dive documentation (Markdown + Mermaid)
 ```
 

@@ -36,7 +36,7 @@ def _falling_box(world, shape, position=(0.0, 5.0, 0.0)):
 
 class TestRemoving:
     def test_a_removed_body_no_longer_collides(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         falling = _falling_box(world, box)
         world.remove_body(ground)
@@ -46,7 +46,7 @@ class TestRemoving:
 
     def test_the_others_keep_their_indices(self) -> None:
         """A body index is a handle; removing one must not renumber the rest."""
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         first = _falling_box(world, box, (0.0, 5.0, 0.0))
         second = _falling_box(world, box, (10.0, 5.0, 0.0))
@@ -55,7 +55,7 @@ class TestRemoving:
         assert float(world.position[second][0]) == pytest.approx(10.0)
 
     def test_it_stops_moving(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         falling = _falling_box(world, box)
         world.remove_body(falling)
@@ -65,19 +65,19 @@ class TestRemoving:
         assert np.allclose(world.position[falling], before)
 
     def test_a_ray_passes_through_it(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, ground = _world()
         assert raycast(world, (0.0, 10.0, 0.0), (0, -1, 0)) is not None
         world.remove_body(ground)
         assert raycast(world, (0.0, 10.0, 0.0), (0, -1, 0)) is None
 
     def test_removing_twice_is_harmless(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, ground = _world()
         world.remove_body(ground)
         world.remove_body(ground)
         world.step(STEP)
 
     def test_an_index_that_was_never_a_body_is_refused(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         with pytest.raises(IndexError):
             world.remove_body(99)
 
@@ -85,14 +85,14 @@ class TestRemoving:
 class TestTheSlotComesBack:
     def test_the_next_body_reuses_it(self) -> None:
         """Otherwise a streaming world grows a slot per tile it ever loaded."""
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         first = _falling_box(world, box)
         world.remove_body(first)
         assert _falling_box(world, box) == first
 
     def test_the_count_stays_where_it_was(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         before = world.body_count
         for _ in range(50):
@@ -100,7 +100,7 @@ class TestTheSlotComesBack:
         assert world.body_count <= before + 1
 
     def test_a_reused_slot_is_a_clean_body(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         first = _falling_box(world, box, (0.0, 20.0, 0.0))
         for _ in range(60):
@@ -112,7 +112,7 @@ class TestTheSlotComesBack:
         assert not world.linear_velocity[again].any()
 
     def test_a_reused_slot_collides_again(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         world.remove_body(_falling_box(world, box))
         landing = _falling_box(world, box, (0.0, 3.0, 0.0))
@@ -121,7 +121,7 @@ class TestTheSlotComesBack:
         assert float(world.position[landing][1]) > 0.0, "it fell through"
 
     def test_the_handle_is_forgotten_with_the_body(self) -> None:
-        world, floor, ground = _world()
+        world, _floor, _ground = _world()
         box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
         first = world.add_body(model.Motion(type=model.DYNAMIC, mass=1.0),
                                collider=model.Collider(shape=box),
