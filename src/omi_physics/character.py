@@ -132,6 +132,9 @@ class CharacterController:
         #: Swimming velocity, which is state rather than input: water is
         #: pushed against, so a stroke builds speed and letting go coasts.
         self._swim_velocity = np.zeros(3)
+        #: Which way the surface last met under water lies: +1 above (a
+        #: ceiling), -1 below (a bottom), 0 for open water.  See _update_swim.
+        self._swim_contact = 0.0
         self.mode = 'walk'
         self.move_dir = np.zeros(3)                         # world horizontal unit
         self.fly_dir = np.zeros(3)
@@ -332,6 +335,7 @@ class CharacterController:
         if self.swimming != was:
             self.vy = 0.0
             self._swim_velocity = np.zeros(3)
+            self._swim_contact = 0.0
         if self.swimming:
             self.grounded = False
             self.ground_normal = None
@@ -695,6 +699,14 @@ class CharacterController:
         self._swim_velocity += ((desired - self._swim_velocity)
                                 * min(1.0, self.caps.swimDrag * dt))
         self.vy += (self.buoyancy - 1.0) * self.gravity_mag * dt
+        # A surface already being rested against opposes what pushes into it,
+        # so that push must not accumulate.  Depenetration leaves the capsule a
+        # hair clear of what it met, and a hair is room enough for a frame of
+        # buoyancy to build the speed back and cross it again: without this a
+        # swimmer held under a ceiling bounces against it for ever, a couple of
+        # millimetres at a time, and reads as still rising half the frames.
+        if self._swim_contact * self.vy > 0.0:
+            self.vy = 0.0
         self.vy *= max(0.0, 1.0 - self.caps.swimDrag * dt)
         # An impulse -- a jump pad firing into a pool -- carries through the
         # water and is bled off by the same drag, so it slows rather than
@@ -707,7 +719,11 @@ class CharacterController:
         # be undone by it: speed accumulating against the floor would rocket
         # the swimmer the moment they turned upward.
         if abs(resolved[1] - target[1]) > 1e-6:
+            self._swim_contact = 1.0 if velocity[1] > 0.0 else -1.0
             self.vy = 0.0
+        elif self._swim_contact * velocity[1] < 0.0:
+            # Swimming away from it: whatever was met is behind us now.
+            self._swim_contact = 0.0
         self.position = resolved
 
     def _settle_step_debt(self, horiz: np.ndarray, dt: float) -> np.ndarray:
