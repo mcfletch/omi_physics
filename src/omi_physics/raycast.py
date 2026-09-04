@@ -103,13 +103,31 @@ def raycast(world: Any, origin: Vec, direction: Vec,
     limit = float(max_distance)
     for body in _castable(world, ignored, start, heading, limit):
         found = _hit_body(world, body, start, heading, limit)
-        if found is not None and (nearest is None or found.distance < nearest.distance):
+        if found is not None and _supersedes(found, nearest):
             nearest = found
             # Every later body only matters if it is nearer still, so the reach
             # shrinks as the answer improves.  On a level's worth of geometry
             # that is most of what keeps a cast cheap.
             limit = found.distance
     return nearest
+
+
+def _supersedes(found: RayHit, current: RayHit | None) -> bool:
+    """Whether `found` is the better answer of the two.
+
+    Nearer wins. **Equally near, the lower body index wins**, and that rule is
+    here rather than left to the order bodies happen to be tested in: a single
+    cast walks them nearest-box-first while a bundle walks them by index, so
+    "keep the first" would answer two different bodies for the same ray. A
+    tie is not exotic -- two colliders meeting at a face, or a ray starting on
+    a surface, produce one at distance zero -- and
+    :func:`raycast_many` promises what :func:`raycast` would have said.
+    """
+    if current is None:
+        return True
+    if found.distance != current.distance:
+        return found.distance < current.distance
+    return found.body < current.body
 
 
 def raycast_many(world: Any, origins: Any, directions: Any,
@@ -197,7 +215,7 @@ def _hit_bundle(world: Any, body: int, starts: np.ndarray, headings: np.ndarray,
     for index in np.nonzero(live)[0]:
         found = _hit_body(world, body, starts[index], headings[index],
                           float(limits[index]))
-        if found is not None:
+        if found is not None and _supersedes(found, answers[index]):
             answers[index] = found
             limits[index] = found.distance
 
@@ -235,11 +253,13 @@ def _hit_bundle_trimesh(world: Any, body: int, shape: Any, starts: np.ndarray,
         distance, normal, among = found
         if float(np.dot(normal, headings[index])) > 0.0:
             normal = -normal
-        answers[index] = RayHit(
+        hit = RayHit(
             body=int(body), distance=distance,
             point=starts[index] + headings[index] * distance, normal=normal,
             triangle=int(candidates[among]))
-        limits[index] = distance
+        if _supersedes(hit, answers[index]):
+            answers[index] = hit
+            limits[index] = distance
 
 
 def line_of_sight(world: Any, start: Vec, end: Vec,
