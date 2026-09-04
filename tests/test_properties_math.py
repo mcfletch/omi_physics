@@ -225,6 +225,56 @@ class TestCrossProduct:
         assert np.allclose(mathutil.cross3(a, a), 0.0, atol=1e-9)
 
 
+class TestLengthOfOneVector:
+    """``length`` and ``flat_length`` exist to be cheap, so what has to be held
+    is that being cheap did not make them different: they stand in for
+    ``numpy.linalg.norm`` in the controller's innermost loops, and a
+    disagreement there is a body that steps somewhere else."""
+
+    @given(v=vectors())
+    @SETTINGS
+    def test_it_matches_numpy(self, v):
+        assert mathutil.length(v) == float(np.linalg.norm(v))
+
+    @given(v=vectors())
+    @SETTINGS
+    def test_the_flat_one_measures_x_and_z(self, v):
+        assert mathutil.flat_length(v) == float(np.linalg.norm(v[[0, 2]]))
+
+    @given(v=vectors())
+    @SETTINGS
+    def test_the_flat_one_ignores_height(self, v):
+        lifted = np.array([v[0], v[1] + 17.0, v[2]])
+        assert mathutil.flat_length(lifted) == mathutil.flat_length(v)
+
+
+class TestTheIdentityRotation:
+    """``quat_to_matrix`` answers the identity without building it. Most of
+    what it is asked for is a proxy being rebuilt at a new position and an
+    unchanged orientation, so that path is the common one and has to give
+    exactly what the general one would."""
+
+    def test_it_is_the_identity_matrix(self):
+        found = mathutil.quat_to_matrix(np.array([0.0, 0.0, 0.0, 1.0]))
+        assert np.array_equal(found, np.eye(3))
+
+    def test_each_caller_gets_its_own(self):
+        """A shared matrix would let one caller's write reach every other."""
+        first = mathutil.quat_to_matrix(np.array([0.0, 0.0, 0.0, 1.0]))
+        first[0, 0] = 99.0
+        second = mathutil.quat_to_matrix(np.array([0.0, 0.0, 0.0, 1.0]))
+        assert second[0, 0] == 1.0
+
+    @given(q=unit_quaternions())
+    @SETTINGS
+    def test_every_other_rotation_still_goes_the_long_way(self, q):
+        """The shortcut must not answer for a quaternion that is not identity."""
+        found = mathutil.quat_to_matrix(np.asarray(q, dtype='d'))
+        turned = mathutil.quat_rotate(np.asarray(q, dtype='d'),
+                                      np.array([0.0, 1.0, 0.0]))
+        assert np.allclose(found @ np.array([0.0, 1.0, 0.0]), turned, atol=1e-12)
+
+
 class TestTheHelpersBroadcast:
     """The module's contract is that one call handles a whole world's worth of
     bodies, which is what lets the integrator turn every orientation in one op.

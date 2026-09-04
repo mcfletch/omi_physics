@@ -11,6 +11,7 @@ rather than a dynamic rigid body — the standard approach for responsive avatar
 Pure CPU; the GL-facing :class:`PhysicsViewPlatform` wraps this.
 """
 import math
+import operator
 import sys
 import weakref
 from collections.abc import Iterator
@@ -21,12 +22,17 @@ import numpy as np
 
 from . import collide, model
 from .body import CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy
-from .mathutil import Vec
+from .mathutil import Vec, flat_length, length
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld
 
 UP = np.array([0.0, 1.0, 0.0])
+
+#: The depth of a ``(push, depth)`` contact. Named rather than a lambda, so the
+#: sort in :meth:`CharacterController._push_out` calls C rather than Python once
+#: per comparison.
+_depth_of = operator.itemgetter(1)
 IDENT = np.array([0.0, 0.0, 0.0, 1.0])
 
 #: World-space proxies for each world's static colliders, keyed by world and
@@ -109,6 +115,11 @@ class CharacterController:
         self.gravity_mag = gravity
         self.position = np.asarray(position, dtype='d')     # capsule centre
         self.vy = 0.0
+        #: ``maxSlope`` as its cosine, and the limit it was taken from. See
+        #: :meth:`_walkable`, which is asked about every contact of every
+        #: depenetration iteration and so is not the place for an arccos.
+        self._slope_limit: float | None = None
+        self._slope_cosine = 1.0
         #: World velocity the capsule actually moved at over the last
         #: :meth:`update`, in metres a second.  Measured from where it ended up
         #: rather than from what it was asked for, so a body stopped by a wall
@@ -408,7 +419,13 @@ class CharacterController:
         cached = self._near_cache.get(body)
         if cached is not None:
             low, high, verts = cached
-            if np.all(lo >= low) and np.all(hi <= high):
+            # Spelled out over the three axes rather than through two np.all
+            # calls: each dispatches into the reduction machinery, and this
+            # question is asked of every body on every depenetration iteration
+            # -- which is the whole point of the cache being cheap.
+            if (lo[0] >= low[0] and lo[1] >= low[1] and lo[2] >= low[2]
+                    and hi[0] <= high[0] and hi[1] <= high[1]
+                    and hi[2] <= high[2]):
                 return verts
         low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
         verts = mesh.candidate_vertices(low, high)
@@ -455,13 +472,22 @@ class CharacterController:
                     ground_n = push
             if not contacts:
                 break
-            contacts.sort(key=lambda pc: -pc[1])            # deepest first
-            correction = np.zeros(3)
+            contacts.sort(key=_depth_of, reverse=True)       # deepest first
+            # The running correction is carried as three floats rather than as
+            # an array: this is the innermost loop of the whole controller --
+            # every contact of every iteration of every depenetration -- and a
+            # three-element dot and add through numpy costs several times the
+            # arithmetic in it. The order of operations is the same, so the
+            # answer is the same to the bit.
+            cx = cy = cz = 0.0
             for push, depth in contacts:
-                remaining = depth + 1e-4 - float(np.dot(correction, push))
+                px, py, pz = float(push[0]), float(push[1]), float(push[2])
+                remaining = depth + 1e-4 - (cx * px + cy * py + cz * pz)
                 if remaining > 0:
-                    correction = correction + push * remaining
-            pos = pos + correction
+                    cx += px * remaining
+                    cy += py * remaining
+                    cz += pz * remaining
+            pos = pos + np.array([cx, cy, cz])
         return pos, ground_n
 
     # -- movement --------------------------------------------------------
@@ -548,8 +574,7 @@ class CharacterController:
             return [dt]
         vertical = min(abs(self.vy) + self.gravity_mag * dt,
                        self.terminal_velocity()) * dt
-        horizontal = float(np.linalg.norm(
-            self.move_dir * self.speed() + self.push)) * dt
+        horizontal = length(self.move_dir * self.speed() + self.push) * dt
         across, along = self._reach()
         if across <= 0 or along <= 0:
             return [dt]
@@ -587,8 +612,8 @@ class CharacterController:
             # walkable slope the climb is already in ``target`` (the move was
             # turned along the ground) and the seating that follows is real.
             resolved = np.array([resolved[0], target[1], resolved[2]])
-        moved = np.linalg.norm((resolved - self.position)[[0, 2]])
-        want = np.linalg.norm(horiz[[0, 2]]) * dt
+        moved = flat_length(resolved - self.position)
+        want = flat_length(horiz) * dt
         if want > 1e-6 and moved < 0.7 * want:
             stepped = self._try_step_up(horiz, dt)
             if stepped is not None:
@@ -737,7 +762,7 @@ class CharacterController:
         """
         if self._step_debt <= 0.0:
             return horiz
-        due = float(np.linalg.norm(horiz[[0, 2]])) * dt
+        due = flat_length(horiz) * dt
         if due <= 1e-9:
             return horiz
         paid = min(self._step_debt, due)
@@ -746,7 +771,7 @@ class CharacterController:
 
     def _try_step_up(self, horiz: np.ndarray, dt: float) -> np.ndarray | None:
         """Try to climb a small ledge ahead; return the seated position or None if not a step."""
-        speed = np.linalg.norm(horiz[[0, 2]])
+        speed = flat_length(horiz)
         if speed < 1e-6:
             return None
         hdir = horiz / speed
@@ -759,7 +784,7 @@ class CharacterController:
         # -> the jitter).
         forward = max(speed * dt, self.caps.radius + 0.05)
         ahead, _ = self._push_out(lifted + hdir * forward)
-        if np.linalg.norm((ahead - self.position)[[0, 2]]) < 0.5 * forward:
+        if flat_length(ahead - self.position) < 0.5 * forward:
             return None                                     # blocked -> not a step
         dropped, ground_n = self._push_out(ahead - UP * self.caps.stepHeight)
         # Only accept a step onto solid ground that is actually higher than here
@@ -790,7 +815,7 @@ class CharacterController:
         # each traded the lurch for a stall.  An average that is right and an
         # instant that is wrong is still wrong, and this is the wrong one that
         # at least always works.
-        advanced = float(np.linalg.norm((dropped - self.position)[[0, 2]]))
+        advanced = flat_length(dropped - self.position)
         self._step_debt += max(0.0, advanced - speed * dt)
         return dropped
 
@@ -812,7 +837,7 @@ class CharacterController:
         normal = self.ground_normal
         if normal is None or not self._walkable(normal):
             return velocity
-        speed = float(np.linalg.norm(velocity))
+        speed = length(velocity)
         if speed <= 1e-9 or abs(float(normal[1])) <= 1e-6:
             return velocity
         # The *heading* is the player's and is never turned: only the height
@@ -824,10 +849,10 @@ class CharacterController:
         climb = -(float(normal[0]) * float(velocity[0])
                   + float(normal[2]) * float(velocity[2])) / float(normal[1])
         along = np.array([velocity[0], climb, velocity[2]])
-        length = float(np.linalg.norm(along))
-        if length <= 1e-9:
+        reach = length(along)
+        if reach <= 1e-9:
             return velocity
-        return along * (speed / length)
+        return along * (speed / reach)
 
     def _on_walkable_ground(self) -> bool:
         """Whether the capsule is standing on something it could walk along."""
@@ -835,9 +860,20 @@ class CharacterController:
                     and self._walkable(self.ground_normal))
 
     def _walkable(self, normal: np.ndarray) -> bool:
-        """Whether a surface with this normal is shallow enough to stand on."""
-        slope = np.degrees(np.arccos(np.clip(float(np.dot(normal, UP)), -1, 1)))
-        return bool(slope <= self.caps.maxSlope)
+        """Whether a surface with this normal is shallow enough to stand on.
+
+        Asked as a cosine rather than an angle. ``arccos`` decreases over
+        [-1, 1], so a slope within ``maxSlope`` is exactly a normal whose
+        component along up is at or above the cosine of it -- the same question
+        without the two transcendentals, which matters because depenetration
+        asks it of every contact it resolves. The cosine is kept against the
+        limit it was taken from, so a capability changed mid-run is picked up.
+        """
+        limit = self.caps.maxSlope
+        if limit != self._slope_limit:
+            self._slope_limit = float(limit)
+            self._slope_cosine = math.cos(math.radians(self._slope_limit))
+        return float(np.dot(normal, UP)) >= self._slope_cosine
 
     #: How far below itself the capsule looks for floor when nothing touched it
     #: this step.  Enough to bridge the gap a step opens under a walker, small

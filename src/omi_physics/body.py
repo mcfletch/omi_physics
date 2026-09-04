@@ -87,7 +87,11 @@ class CapsuleProxy:
         self.half_height = float(half_height)
         self.radius = float(radius)
         self.R = np.asarray(rotation, dtype='d')
-        axis = self.R @ np.array([0.0, 1.0, 0.0])
+        # The local Y axis turned into the world is R's second column, which is
+        # what R @ (0, 1, 0) computes -- as a view, without the matrix product
+        # or the vector to multiply it by. A capsule proxy is rebuilt several
+        # times a frame for every character in the world.
+        axis = self.R[:, 1]
         self.p0 = self.center - axis * self.half_height
         self.p1 = self.center + axis * self.half_height
 

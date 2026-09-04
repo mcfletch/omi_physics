@@ -8,6 +8,7 @@ Every routine broadcasts over leading axes, so a single call handles one vector 
 a whole ``(N, ...)`` batch.  Callers pass numpy arrays (or array-likes that
 :func:`numpy.asarray` accepts); the return is always a fresh array.
 """
+import math
 from collections.abc import Sequence
 
 import numpy as np
@@ -57,8 +58,42 @@ def quat_conjugate(q: np.ndarray) -> np.ndarray:
     return out
 
 
+def length(v: np.ndarray) -> float:
+    """Length of a single 3-vector.
+
+    ``numpy.linalg.norm`` is general -- an axis, a keepdims, a choice of order,
+    a dispatch through ``__array_function__`` -- and on one 3-vector all of that
+    costs several times the arithmetic. The hot paths here ask for the length of
+    three floats, millions of times.
+    """
+    return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+
+
+def flat_length(v: np.ndarray) -> float:
+    """Length of a 3-vector's horizontal part, across x and z.
+
+    Spelled out rather than ``norm(v[[0, 2]])``: the fancy index builds a
+    two-element array to throw away, and how far something went along the
+    ground is asked several times per movement step.
+    """
+    return math.sqrt(v[0] * v[0] + v[2] * v[2])
+
+
+#: The rotation the identity quaternion names. Copied rather than handed out,
+#: so a caller that writes into the matrix it was given cannot reach every
+#: other caller's.
+_IDENTITY = np.eye(3)
+
+
 def quat_to_matrix(q: np.ndarray) -> np.ndarray:
     """Return (...,3,3) rotation matrices for quaternion(s) ``q``."""
+    # The identity is most of what this is asked for: a character's capsule
+    # proxy is rebuilt several times a frame at a new position and an unchanged
+    # orientation, and normalising a quaternion that is already unit and then
+    # multiplying out nine entries that are all 0 or 1 is the whole cost of it.
+    if q.shape == (4,) and q[3] == 1.0 and not (q[0] or q[1] or q[2]):
+        return (_IDENTITY.copy() if q.dtype == _IDENTITY.dtype
+                else _IDENTITY.astype(q.dtype))
     q = quat_normalize(q)
     x, y, z, w = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
     xx, yy, zz = x * x, y * y, z * z
