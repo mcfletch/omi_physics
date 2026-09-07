@@ -111,3 +111,9 @@ jobs:
           merge-multiple: true
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A second net under the version job: a re-run of an already-published
+          # commit is a no-op rather than a failure. Every other project in the
+          # workspace sets this; without it a re-run of a green release fails on
+          # the upload, which reads as a broken release rather than a repeat.
+          skip-existing: true
