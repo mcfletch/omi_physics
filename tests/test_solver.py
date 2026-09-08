@@ -73,6 +73,45 @@ def test_resting_stack_is_stable():
         assert abs(world.position[b][2]) < 0.5
 
 
+def test_a_crushed_body_does_not_go_through_the_floor():
+    """A tenth of a gramme under 243 kilogrammes stays on top of the ground.
+
+    The stack itself does not survive these ratios and is not asked to:
+    sequential impulses pass a load down one contact at a time, so the light
+    box is squeezed out sideways. What it may not do is be squeezed *through*
+    the floor. It is held in place by two corrections that cancel -- the floor
+    pushing it up and the box above pushing it down, both moving only the light
+    body because only it has any inverse mass to speak of -- and when the one
+    against the floor is the one that loses, the box sinks a little each step.
+    Once it passes the floor's mid-plane the separating axis is nearer the far
+    side, the contact normal points down, and the floor throws it out
+    underneath: it fell to y = -43 before this was fixed.
+
+    Ratios like these are ordinary: a crate of ammunition under a truck, a
+    dropped screw under a door.
+    """
+    world = PhysicsWorld(gravity=model.Gravity(gravity=9.81), sleep_enabled=False)
+    floor = world.add_shape(model.Shape.box((400, 1, 400)))
+    world.add_body(model.Motion(type=model.STATIC),
+                   collider=model.Collider(shape=floor), position=(0, -0.5, 0))
+    cube = world.add_shape(model.Shape.box((1, 1, 1)))
+    stack = [world.add_body(model.Motion(type=model.DYNAMIC, mass=mass),
+                            collider=model.Collider(shape=cube),
+                            position=(0, 0.5 + k * 1.05, 0))
+             for k, mass in enumerate((1e-4, 12.0, 231.0))]
+    lowest = np.inf
+    for _ in range(400):
+        world.step(DT)
+        lowest = min(lowest, world.position[stack][:, 1].min())
+    # The floor's top is y=0 and a box is 1 deep, so a box resting on it sits at
+    # 0.5. Anything at or below -0.5 has its centre at the floor's own centre,
+    # which is the point of no return.
+    assert lowest > -0.5, 'a box was pushed into the floor as far as its middle'
+    resting = world.position[stack]
+    still_over_the_floor = np.all(np.abs(resting[:, [0, 2]]) < 190.0, axis=1)
+    assert np.all(resting[still_over_the_floor][:, 1] > -0.5)
+
+
 @pytest.mark.parametrize('angle_deg,friction,should_slide', [
     (40, 0.5, True),      # tan40=0.84 > 0.5
     (10, 0.5, False),     # tan10=0.18 < 0.5

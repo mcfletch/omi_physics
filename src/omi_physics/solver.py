@@ -217,6 +217,7 @@ class SequentialImpulseSolver:
         """
         if not contacts:
             return
+        contacts = self._static_last(world, contacts)
         self._wake_sleepers(world, contacts)
         if _native is not None and hasattr(_native, 'prepare_and_solve'):
             self._solve_native_full(world, contacts)
@@ -232,6 +233,33 @@ class SequentialImpulseSolver:
             self._solve_positions(world, contacts)
         if self.warm_start:
             self._store_cache(cons)
+
+    @staticmethod
+    def _static_last(world: "PhysicsWorld",
+                     contacts: list["Contact"]) -> list["Contact"]:
+        """``contacts`` reordered so those against a static body come last.
+
+        Both passes here are Gauss-Seidel, and what one corrects last is what
+        ends up satisfied.  Where a body is held between two contacts that ask
+        opposite things, only one of them can be, and it has to be the one
+        against the static body.
+
+        A tenth of a gramme under a stack is the case that shows it.  The floor
+        pushes it up and the box above pushes it down, and both corrections
+        move only the light body, since only it has any inverse mass to speak
+        of; with the floor corrected first, the box above undoes it and the
+        light body sinks a little every step.  A body left overlapping another
+        *dynamic* body is pushed apart over the next few steps and no harm is
+        done -- but a body left inside the level's own geometry is thrown out
+        of the far side of it the moment its centre passes the middle, because
+        the nearest separating axis is then the wrong one.  It fell to
+        y = -43 in ``test_a_crushed_body_does_not_go_through_the_floor``.
+
+        A stable sort, so contacts otherwise keep the order the narrow phase
+        found them in and a step stays reproducible.
+        """
+        return sorted(contacts, key=lambda c: (world.inv_mass[c.a] == 0.0
+                                               or world.inv_mass[c.b] == 0.0))
 
     def _inv_inertia_world_all(self, world: "PhysicsWorld") -> np.ndarray:
         """World inverse-inertia tensor ``R diag(I⁻¹) Rᵀ`` for every body, batched."""

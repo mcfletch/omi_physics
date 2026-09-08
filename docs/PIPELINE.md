@@ -119,6 +119,16 @@ Overlap below `slop` (metres, default `0.005`) is left alone: contact is
 discrete, and a resting stack that is corrected to exactly zero overlap
 separates, falls and lands again every step.
 
+**Contacts against a static body are solved last.** Both passes are
+Gauss-Seidel, so what they correct last is what ends up satisfied, and where a
+body is held between two contacts asking opposite things only one of them can
+be. It has to be the static one: a body left overlapping another *dynamic* body
+is pushed apart over the next few steps, while a body left inside the level's
+own geometry is thrown out of the far side of it as soon as its centre passes
+the middle — past that point the nearest separating axis is the wrong one, and
+the ground ejects it downwards. A tenth of a gramme under 243 kilogrammes is
+enough to reach it.
+
 **Where the mass ratios reach.** Sequential impulses pass a load down a stack
 one contact at a time, so what a stack holds depends on how many iterations the
 load has to travel through. `velocity_iterations` (default `10`) settles a stack
