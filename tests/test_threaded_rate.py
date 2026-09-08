@@ -14,7 +14,7 @@ import time
 import pytest
 
 from omi_physics import model
-from omi_physics.threaded import ThreadedSimulation
+from omi_physics.threaded import ThreadedSimulation, pace
 from omi_physics.world import PhysicsWorld
 
 
@@ -61,6 +61,57 @@ class TestTheRecentRate:
         assert sim.rate() == 0.0
 
 
+class TestPacing:
+    """The rule the loop schedules by, given clock readings by hand.
+
+    Whether a real thread is handed its turn inside 16ms is the operating
+    system's decision and not this library's, so the rule is checked here
+    against times chosen for it rather than against times a machine produced.
+    """
+
+    def test_a_tick_inside_its_budget_waits_out_the_remainder(self):
+        delay, due, dropped = pace(next_t=1.0, now=1.004, dt=0.01)
+        assert delay == pytest.approx(0.006)
+        assert due == pytest.approx(1.01)
+        assert not dropped
+
+    def test_a_tick_that_took_exactly_its_budget_drops(self):
+        """No time left is not time to spare: nothing to wait out, and the
+        next tick starts already at its deadline."""
+        delay, due, dropped = pace(next_t=1.0, now=1.01, dt=0.01)
+        assert delay == 0.0
+        assert due == pytest.approx(1.01)
+        assert dropped
+
+    def test_an_overrun_is_dropped_and_the_deadline_moves_to_now(self):
+        """The debt is forgiven rather than carried: a machine that is behind
+        cannot pay back missed ticks, and trying is the spiral."""
+        delay, due, dropped = pace(next_t=1.0, now=1.5, dt=0.01)
+        assert delay == 0.0
+        assert due == 1.5
+        assert dropped
+
+    def test_a_run_of_healthy_ticks_holds_the_asked_for_cadence(self):
+        """Deadlines advance by exactly dt, so small early or late arrivals
+        do not accumulate into drift."""
+        due = 0.0
+        for index in range(100):
+            # Each tick finishes a jittery but comfortable way into its budget.
+            now = due + 0.01 * (0.3 + 0.4 * ((index * 7) % 5) / 4.0)
+            delay, due, dropped = pace(due, now, 0.01)
+            assert not dropped
+        assert due == pytest.approx(1.0)
+
+    def test_falling_behind_does_not_accumulate_a_debt_of_ticks(self):
+        """After a long stall the next tick is due one dt away, not a hundred
+        ticks in the past."""
+        _, due, dropped = pace(next_t=1.0, now=2.0, dt=0.01)
+        assert dropped
+        delay, due, dropped = pace(due, now=2.001, dt=0.01)
+        assert not dropped
+        assert delay == pytest.approx(0.009)
+
+
 class TestDroppedTicks:
     def test_a_fresh_simulation_has_dropped_nothing(self):
         assert ThreadedSimulation(_world(), sim_hz=100.0).dropped == 0
@@ -86,7 +137,15 @@ class TestDroppedTicks:
         # bar the first overruns.
         assert sim.dropped >= sim.steps - 1
 
-    def test_a_simulation_that_keeps_up_drops_nothing(self):
+    def test_a_running_thread_counts_no_more_drops_than_it_took_ticks(self):
+        """The loop counts a drop only where :func:`pace` reports one.
+
+        How many of an empty world's 60Hz ticks a loaded machine actually
+        hands over on time is the operating system's business -- what is this
+        library's is that the count means something. ``TestPacing`` pins when a
+        drop is counted; this pins that the loop is the thing doing the
+        counting.
+        """
         sim = ThreadedSimulation(_world(), sim_hz=60.0)
         sim.start()
         try:
@@ -96,7 +155,7 @@ class TestDroppedTicks:
         finally:
             sim.stop()
         assert sim.steps >= 5
-        assert sim.dropped == 0
+        assert 0 <= sim.dropped <= sim.steps
 
 
 class TestOnARunningThread:

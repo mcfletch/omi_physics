@@ -43,6 +43,30 @@ from . import mathutil
 Snapshot = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
+def pace(next_t: float, now: float, dt: float) -> tuple[float, float, bool]:
+    """Schedule the tick after the one that just finished.
+
+    next_t -- when the finished tick was due to be over
+    now -- when it was
+    dt -- the interval between ticks
+
+    Returns how long to wait before starting the next one, when that one is due
+    to be over, and whether the tick that just finished overran its budget.
+
+    A tick with time to spare waits out the remainder and leaves the cadence
+    alone: deadlines advance by exactly *dt*, so arriving a little early or a
+    little late does not accumulate into drift. One that overruns waits not at
+    all and moves the deadline to the present, giving up the ticks it missed
+    rather than running them back to back -- a machine already too slow cannot
+    pay that debt back, and the attempt is the spiral.
+    """
+    due = next_t + dt
+    delay = due - now
+    if delay > 0:
+        return delay, due, False
+    return 0.0, now, True
+
+
 class ThreadedSimulation:
     """Steps a :class:`PhysicsWorld` on a background thread, publishing snapshots."""
 
@@ -130,13 +154,11 @@ class ThreadedSimulation:
                 self._publish()
             now = clock()
             self._record_tick(now)
-            next_t += dt
-            delay = next_t - now
-            if delay > 0:
-                self._stop.wait(delay)          # interruptible sleep
-            else:
+            delay, next_t, dropped = pace(next_t, now, dt)
+            if dropped:
                 self._dropped += 1
-                next_t = now                    # fell behind: reset, don't spiral
+            else:
+                self._stop.wait(delay)          # interruptible sleep
 
     def _record_tick(self, now: float) -> None:
         """Note that a tick finished at ``now``, for :meth:`rate`'s window."""
