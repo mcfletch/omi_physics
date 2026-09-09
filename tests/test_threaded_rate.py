@@ -98,7 +98,7 @@ class TestPacing:
         for index in range(100):
             # Each tick finishes a jittery but comfortable way into its budget.
             now = due + 0.01 * (0.3 + 0.4 * ((index * 7) % 5) / 4.0)
-            delay, due, dropped = pace(due, now, 0.01)
+            _delay, due, dropped = pace(due, now, 0.01)
             assert not dropped
         assert due == pytest.approx(1.0)
 

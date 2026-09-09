@@ -231,15 +231,22 @@ class TestLengthOfOneVector:
     ``numpy.linalg.norm`` in the controller's innermost loops, and a
     disagreement there is a body that steps somewhere else."""
 
+    # `approx`, not `==`: the two sum the squares in a different order, so they
+    # can land one ulp apart on the same vector -- `numpy.linalg.norm` found
+    # 460.07564397968054 where this found 460.0756439796806. The tolerance is
+    # far tighter than the disagreement the class is guarding against, so a real
+    # difference in the arithmetic still fails.
     @given(v=vectors())
     @SETTINGS
     def test_it_matches_numpy(self, v):
-        assert mathutil.length(v) == float(np.linalg.norm(v))
+        assert mathutil.length(v) == pytest.approx(float(np.linalg.norm(v)), rel=1e-12)
 
     @given(v=vectors())
     @SETTINGS
     def test_the_flat_one_measures_x_and_z(self, v):
-        assert mathutil.flat_length(v) == float(np.linalg.norm(v[[0, 2]]))
+        assert mathutil.flat_length(v) == pytest.approx(
+            float(np.linalg.norm(v[[0, 2]])), rel=1e-12
+        )
 
     @given(v=vectors())
     @SETTINGS
