@@ -83,3 +83,19 @@ Prebuilt wheels (built in CI with `cibuildwheel`) carry the compiled `.so` for
 each supported Python and platform, plus the `.pyx` sources so a source install
 can still rebuild. End users therefore get native speed with no compiler; source
 installs without a toolchain still work, only slower.
+
+## How much slower
+
+The two paths answer the same thing; what differs is how many characters fit in
+a frame. A hundred characters walking on a triangle mesh cost around 13 ms a
+frame with the compiled collider and around 130 ms without it, so the
+pure-Python path carries perhaps ten of them at 60 Hz where the compiled one
+carries a hundred. The gap is numpy's dispatch rather than its arithmetic: a
+controller makes twelve hundred batch calls a frame at that population, and the
+batch routine pays the dispatch once per call instead of once per triangle,
+which is as far as Python can take it.
+
+`tests/test_collide_batch.py` holds each path to a budget of its own —
+`FRAME_BUDGET` for the compiled collider and `FALLBACK_BUDGET` for the
+pure-Python one — so a regression in either is caught against what that path
+can actually do.

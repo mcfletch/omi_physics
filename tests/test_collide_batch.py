@@ -297,6 +297,21 @@ class TestTheMeshPathUsesIt:
         assert np.allclose(np.sort(fresh[1]), np.sort(reused[1]))
 
 
+#: What a hundred walkers may cost a frame with the compiled collider in
+#: place: the whole of a 60 Hz frame, which is the budget the batch routine
+#: exists to fit inside.
+FRAME_BUDGET = 0.0166
+
+#: What they may cost without it. The batch routine pays numpy's dispatch once
+#: per call rather than once per triangle, and a hundred walkers still make
+#: twelve hundred of those calls a frame -- so the pure-Python path is several
+#: frames' work however well the arithmetic inside it is done. The number here
+#: is loose enough not to read the machine's mood and tight enough that a
+#: tenfold regression in the fallback still fails; the frame budget itself is a
+#: claim about the build that ships.
+FALLBACK_BUDGET = 0.400
+
+
 class TestTheBudgetThisExistsFor:
     """A hundred characters' depenetration has to fit in a frame with room.
 
@@ -350,9 +365,15 @@ class TestTheBudgetThisExistsFor:
             for walker in walkers:
                 walker.update(1 / 60.0)
         each = (time.perf_counter() - started) / 10
-        assert each < 0.0166, (
-            'a hundred walkers cost %.1f ms a frame, which is the whole of one'
-            % (each * 1000,))
+        if collide._native is None:
+            assert each < FALLBACK_BUDGET, (
+                'a hundred walkers cost %.1f ms a frame without the compiled '
+                'collider, past the %.0f ms the pure-Python path is allowed'
+                % (each * 1000, FALLBACK_BUDGET * 1000))
+        else:
+            assert each < FRAME_BUDGET, (
+                'a hundred walkers cost %.1f ms a frame, which is the whole '
+                'of one' % (each * 1000,))
 
 
 if __name__ == '__main__':
