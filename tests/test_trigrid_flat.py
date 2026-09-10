@@ -97,22 +97,38 @@ class TestTheAnswerIsStillRight:
 class TestItIsCheapEnoughToAskOften:
     """The point of the change: the constant, not the complexity."""
 
+    @staticmethod
+    def _cost(built, low, high, calls=2000):
+        """Seconds a query of these bounds takes, warmed first."""
+        import time
+        built.box(low, high)
+        started = time.perf_counter()
+        for _ in range(calls):
+            built.box(low, high)
+        return (time.perf_counter() - started) / calls
+
     @pytest.mark.serial
     def test_a_small_query_does_not_cost_a_large_one(self, grid):
-        """A capsule-sized query is what a character asks, nine times a frame."""
-        import time
-        built, _lows, _highs = grid
-        low = np.array([0.0, 0.0, 0.0])
-        high = np.array([0.8, 1.8, 0.8])
-        built.box(low, high)                       # warm
-        started = time.perf_counter()
-        for _ in range(2000):
-            built.box(low, high)
-        each = (time.perf_counter() - started) / 2000
-        # Generous against the ~100us it used to take; the point is the order
-        # of magnitude, not the number. Twelve of these per character per frame
-        # at a hundred characters has to fit in a frame with room to spare.
-        assert each < 20e-6, '%.1f us per query' % (each * 1e6,)
+        """A capsule-sized query is what a character asks, nine times a frame.
+
+        Against the whole-grid query rather than against a fixed number of
+        microseconds, because a ratio is the claim: what the grid is for is
+        that asking about a small box costs a fraction of asking about
+        everything, and before it a small query looked at every triangle and
+        so cost the same. Stated that way it is also the same claim on every
+        interpreter, where a microsecond figure is a fact about one -- PyPy
+        reaches numpy through cpyext and pays several times CPython's cost per
+        call without anything here being different.
+        """
+        built, lows, highs = grid
+        small = self._cost(built, np.array([0.0, 0.0, 0.0]),
+                           np.array([0.8, 1.8, 0.8]))
+        whole = self._cost(built, lows.min(axis=0), highs.max(axis=0),
+                           calls=200)
+        assert small < whole / 4.0, (
+            'a capsule-sized query costs %.1f us against %.1f us for the '
+            'whole grid, so narrowing is buying little'
+            % (small * 1e6, whole * 1e6))
 
 
 if __name__ == '__main__':
