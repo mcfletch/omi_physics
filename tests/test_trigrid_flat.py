@@ -97,6 +97,7 @@ class TestTheAnswerIsStillRight:
 class TestItIsCheapEnoughToAskOften:
     """The point of the change: the constant, not the complexity."""
 
+    @pytest.mark.serial
     def test_a_small_query_does_not_cost_a_large_one(self, grid):
         """A capsule-sized query is what a character asks, nine times a frame."""
         import time

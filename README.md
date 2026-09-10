@@ -215,8 +215,14 @@ git clone https://github.com/mcfletch/omi_physics
 cd omi_physics
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"          # editable install, builds the accelerators
-pytest                            # run the test suite
+pytest -m "not serial"            # the suite
+pytest -m serial                  # the timing checks, with the machine to itself
 ```
+
+A handful of tests measure against the clock rather than against a value — how
+many characters fit in a frame, what a grid query costs — and the margin they
+assert closes on a machine busy with the rest of the suite. Those carry the
+`serial` marker, and the second pass is short. `tox` runs the two for you.
 
 Handy commands:
 
