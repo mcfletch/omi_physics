@@ -41,7 +41,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # One row per architecture, because cibuildwheel builds natively for
+        # whichever machine it is on. `macos-latest` is Apple silicon and
+        # builds arm64 alone; the Intel Macs need `macos-15-intel`, and a
+        # Python extension module gets no help from Rosetta. `macos-13`, the
+        # Intel label this one replaces, is retired -- a job asking for one
+        # waits out GitHub's queue limit and is cancelled.
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
 
