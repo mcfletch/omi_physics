@@ -20,6 +20,14 @@ A snapshot is the tuple ``(position, axis_angle, awake, dynamic)``:
 * ``awake``      -- ``(n,)`` bool, False for sleeping bodies,
 * ``dynamic``    -- ``(n,)`` bool, True for dynamic bodies.
 
+Contact and trigger events travel with the snapshots. Each publish moves what
+the world's :attr:`~omi_physics.world.PhysicsWorld.contact_log` holds into the
+simulation's own :attr:`~ThreadedSimulation.events` log, and
+:meth:`~ThreadedSimulation.latest_and_events` hands a consumer the newest
+snapshot together with every event up to it, so a handler reads the scene in
+the pose of the step that produced the event or a later one, never an earlier
+one. Contact listeners on the world run on the physics thread.
+
 The asked-for tick rate is a request, not a promise. A tick that overruns its
 budget resets the schedule instead of trying to run the missed ones back to back,
 because catching up on a machine that is already behind is how a simulation
@@ -39,6 +47,7 @@ from typing import Any
 import numpy as np
 
 from . import mathutil
+from .contactevents import ContactLog
 
 Snapshot = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
@@ -88,6 +97,8 @@ class ThreadedSimulation:
         self._steps = 0
         self._dropped = 0
         self._tick_times: list[float] = []
+        #: Events published with the snapshots and not yet taken.
+        self.events = ContactLog()
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -175,9 +186,11 @@ class ThreadedSimulation:
                 mathutil.quat_to_axis_angle(w.orientation[:n]),
                 w.awake[:n].copy(),
                 (w.motion_type[:n] == 2))
+        events = w.contact_log.drain()
         with self._lock:
             self._snap = snap
             self._version += 1
+            self.events.extend(events)
 
     # -- consumer thread -------------------------------------------------
     def latest(self) -> tuple[Snapshot | None, int]:
@@ -188,3 +201,17 @@ class ThreadedSimulation:
         """
         with self._lock:
             return self._snap, self._version
+
+    def latest_and_events(self) -> tuple[Snapshot | None, int, list[Any]]:
+        """The newest snapshot, its version, and every event published up to it.
+
+        Taken together under one lock, so no event belongs to a step the
+        snapshot has not reached. The events are removed from :attr:`events`.
+        """
+        with self._lock:
+            return self._snap, self._version, self.events.drain()
+
+    def drain_events(self) -> list[Any]:
+        """Every event published so far and not yet taken, oldest first."""
+        with self._lock:
+            return self.events.drain()

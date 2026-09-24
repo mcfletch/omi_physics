@@ -12,6 +12,7 @@ import numpy as np
 
 from . import mathutil, model
 from ._accel import accelerators_disabled
+from .contactevents import ContactBatch, relative_motion, world_tangent
 
 #: The compiled accelerator, or None where it was not built or was switched
 #: off. Declared, because what is called on it lives in the extension module
@@ -100,6 +101,19 @@ class SequentialImpulseSolver:
         self.max_correction = max_correction
         # (a,b) -> [(point, nImpulse, t0, t1)] carried to the next step for warm start
         self._cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
+        #: The last solve's contacts as arrays, impulses included, where the
+        #: compiled path built them anyway; None where it did not. The contact
+        #: tracker reads it rather than gathering the same values again.
+        self.last_batch: ContactBatch | None = None
+
+    def forget(self, body: int) -> None:
+        """Drop the warm-start impulses of every pair ``body`` was in.
+
+        Called when the body is removed, so the next body in its slot does not
+        start from impulses that belonged to the last one.
+        """
+        self._cache = {pair: cached for pair, cached in self._cache.items()
+                       if body not in pair}
 
     # -- setup -----------------------------------------------------------
     def _inv_inertia_world(self, world: "PhysicsWorld", i: int) -> np.ndarray:
@@ -149,10 +163,11 @@ class SequentialImpulseSolver:
             # How hard they met, which restitution is a fraction of and
             # impact_on answers from. Taken before anything is solved because
             # the iterations below are precisely the removal of it.
-            c.approach = -float(np.dot(
-                world.linear_velocity[b] + _cross(world.angular_velocity[b], k.rB)
-                - world.linear_velocity[a] - _cross(world.angular_velocity[a], k.rA),
-                k.n))
+            relative = (world.linear_velocity[b] + _cross(world.angular_velocity[b], k.rB)
+                        - world.linear_velocity[a] - _cross(world.angular_velocity[a], k.rA))
+            along = float(np.dot(relative, k.n))
+            c.approach = -along
+            c.slip = float(np.linalg.norm(relative - along * k.n))
             k.vBias = (k.restitution * c.approach
                        if c.approach > self.restitution_threshold else 0.0)
             if self.warm_start:
@@ -215,6 +230,7 @@ class SequentialImpulseSolver:
         is a split impulse rather than a Baumgarte bias, so how far it moves a
         pair apart does not depend on how long the step was.
         """
+        self.last_batch = None
         if not contacts:
             return
         contacts = self._static_last(world, contacts)
@@ -313,19 +329,12 @@ class SequentialImpulseSolver:
                     nImp[i], tImp[i, 0], tImp[i, 1] = seed
         # How hard each pair met, off the arrays just assembled and before the
         # kernel resolves anything: the iterations it runs are the removal of
-        # exactly this velocity, so there is no reading it afterwards. The
-        # normal points from A to B, so the two closing is the negative of B
-        # receding along it.
-        at_a = (world.linear_velocity[a_idx]
-                + np.cross(world.angular_velocity[a_idx],
-                           point - world.position[a_idx]))
-        at_b = (world.linear_velocity[b_idx]
-                + np.cross(world.angular_velocity[b_idx],
-                           point - world.position[b_idx]))
-        for c, closing in zip(contacts,
-                              -np.einsum('ij,ij->i', at_b - at_a, normal),
-                              strict=True):
-            c.approach = float(closing)
+        # exactly this velocity, so there is no reading it afterwards.
+        approach, slip = relative_motion(world, a_idx, b_idx, point, normal)
+        for c, closing, sliding in zip(contacts, approach.tolist(), slip.tolist(),
+                                       strict=True):
+            c.approach = closing
+            c.slip = sliding
         invIw = self._inv_inertia_world_all(world)
         _native.prepare_and_solve(
             a_idx, b_idx, point, normal, depth,
@@ -333,14 +342,18 @@ class SequentialImpulseSolver:
             world.inv_mass, invIw, restitution, friction, nImp, tImp,
             self.restitution_threshold, self.velocity_iterations, warm,
             0.8, self.slop, self.max_correction)
-        if warm:
-            cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
-            for i, c in enumerate(contacts):
-                c.normal_impulse = nImp[i]
-                c.tangent_impulse[0] = tImp[i, 0]; c.tangent_impulse[1] = tImp[i, 1]
+        cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
+        for i, c in enumerate(contacts):
+            c.normal_impulse = float(nImp[i])
+            c.tangent_impulse[0] = tImp[i, 0]; c.tangent_impulse[1] = tImp[i, 1]
+            if warm:
                 cache.setdefault((c.a, c.b), []).append(
                     (c.point.copy(), nImp[i], tImp[i, 0], tImp[i, 1]))
+        if warm:
             self._cache = cache
+        self.last_batch = ContactBatch(
+            a_idx, b_idx, point, normal, depth, approach, slip, nImp,
+            world_tangent(normal, tImp), np.ones(K, dtype=bool))
 
     def _solve_native(self, world: "PhysicsWorld", cons: list[_ContactConstraint],
                       invI: dict[int, np.ndarray]) -> None:

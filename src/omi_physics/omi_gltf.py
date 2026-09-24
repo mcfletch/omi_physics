@@ -248,7 +248,9 @@ def load_document(gltf: dict) -> PhysicsDocument:
             if 'collider' in body:
                 nb.collider = _read_collider(body['collider'])
             if 'trigger' in body:
-                nb.trigger = model.Trigger(shape=body['trigger'].get('shape', -1))
+                nb.trigger = model.Trigger(
+                    shape=body['trigger'].get('shape', -1),
+                    collisionFilter=body['trigger'].get('collisionFilter', -1))
             if 'joint' in body:
                 nb.joint = _read_joint_attach(body['joint'])
         grav = ext.get('OMI_physics_gravity')
@@ -291,6 +293,8 @@ def export_extensions(doc: PhysicsDocument) -> tuple[dict, dict]:
             node_body['collider'] = _write_collider(nb.collider)
         if nb.trigger is not None:
             node_body['trigger'] = {'shape': nb.trigger.shape}
+            if nb.trigger.collisionFilter >= 0:
+                node_body['trigger']['collisionFilter'] = nb.trigger.collisionFilter
         if nb.joint is not None:
             node_body['joint'] = _write_joint_attach(nb.joint)
         if node_body:

@@ -7,6 +7,7 @@ awake bodies — fast on the CPU today and GPU-shaped for later (see
 ``docs/PIPELINE.md``).
 """
 import os
+from collections import deque
 from collections.abc import Callable, Container
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,17 @@ import numpy as np
 
 from . import mathutil, model
 from .backend import NumpyBackend, select_backend
+from .contactevents import (
+    REPORTING_LEVELS,
+    BodyRef,
+    ContactBatch,
+    ContactEvent,
+    ContactLog,
+    ContactTracker,
+    PairPreview,
+    Reporting,
+    TriggerEvent,
+)
 from .mathutil import Vec
 
 if TYPE_CHECKING:
@@ -79,6 +91,21 @@ class PhysicsWorld:
         self.contacts: list[Contact] = []
         self.triggers_overlaps: set[Any] = set()
         self.trigger_listeners: list[Callable[..., None]] = []
+        #: Steps run so far; the ``step`` every event carries.
+        self.step_count = 0
+        self._reporting: Reporting = 'off'
+        #: Whether ``'persist'`` contact events and ``'stay'`` trigger events
+        #: are recorded. Off, a touching pair is still tracked, and only its
+        #: ``'begin'`` and ``'end'`` are reported.
+        self.report_persist = False
+        #: Contact and trigger events of every step, in order, until drained.
+        #: Filled while :attr:`contact_reporting` is not ``'off'``.
+        self.contact_log = ContactLog()
+        self.contact_listeners: list[Callable[[ContactEvent], None]] = []
+        self._tracker = ContactTracker()
+        self._contact_filter: Callable[[PairPreview], Any] | None = None
+        self._undelivered: deque[ContactEvent] = deque()
+        self._delivering = False
         self.joint_constraints: list[Any] = []
         self.joint_iterations = 10
 
@@ -90,7 +117,9 @@ class PhysicsWorld:
                  'angular_damping', 'quadratic_drag', 'sleep_timer',
                  'restitution_pad')
     _SCALAR_I = ('motion_type', 'collider_shape', 'collider_material',
-                 'collider_filter', 'trigger_shape', 'island')
+                 'collider_filter', 'trigger_shape', 'trigger_filter', 'island')
+    #: The remaining per-body columns, each with a type of its own.
+    _SLOT = ('awake', 'generation', 'report')
 
     # Columnar backing arrays, built by ``_alloc``/``_grow`` via ``setattr``.
     _position: np.ndarray
@@ -115,8 +144,11 @@ class PhysicsWorld:
     _collider_material: np.ndarray
     _collider_filter: np.ndarray
     _trigger_shape: np.ndarray
+    _trigger_filter: np.ndarray
     _island: np.ndarray
     _awake: np.ndarray
+    _generation: np.ndarray
+    _report: np.ndarray
 
     def _alloc(self, cap: int) -> None:
         """Allocate the columnar arrays for ``cap`` bodies (all fields zeroed)."""
@@ -129,6 +161,8 @@ class PhysicsWorld:
         for name in self._SCALAR_I:
             setattr(self, '_' + name, np.full(cap, -1, dtype='i4'))
         self._awake = np.ones(cap, dtype=bool)
+        self._generation = np.zeros(cap, dtype=np.int64)
+        self._report = np.zeros(cap, dtype=bool)
         self._orientation[:, 3] = 1.0
         self._prev_orientation[:, 3] = 1.0
 
@@ -136,7 +170,7 @@ class PhysicsWorld:
         """Double the array capacity, preserving existing body state."""
         old = self._cap
         new = max(8, old * 2)
-        for name in self._VEC + self._SCALAR_F + self._SCALAR_I + ('awake',):
+        for name in self._VEC + self._SCALAR_F + self._SCALAR_I + self._SLOT:
             arr = getattr(self, '_' + name)
             grown = np.zeros((new,) + arr.shape[1:], dtype=arr.dtype)
             if name in self._SCALAR_I:
@@ -171,6 +205,7 @@ class PhysicsWorld:
     collider_material = property(lambda s: s._view('collider_material'))
     collider_filter = property(lambda s: s._view('collider_filter'))
     trigger_shape = property(lambda s: s._view('trigger_shape'))
+    trigger_filter = property(lambda s: s._view('trigger_filter'))
     aabb_min = property(lambda s: s._view('aabb_min'))
     aabb_max = property(lambda s: s._view('aabb_max'))
     awake = property(lambda s: s._view('awake'))
@@ -270,7 +305,10 @@ class PhysicsWorld:
         before the solve, since resolving a contact is exactly cancelling the
         velocity that measures it.  A caller sampling once a frame rather than
         once a step sees only the last step of the frame, and an impact resolved
-        in an earlier one has already been answered for.
+        in an earlier one has already been answered for.  Such a caller wants
+        :meth:`add_contact_listener` or :attr:`contact_log`, which record every
+        step: a :class:`~omi_physics.contactevents.ContactEvent`'s ``approach``
+        is this same speed.
 
         ``above`` is the speed below which a contact is not a blow.  **A body
         held against something is closing on it slightly on every step**: over
@@ -309,6 +347,152 @@ class PhysicsWorld:
                 found = (int(other), float(contact.approach))
         return found
 
+    # -- contact events --------------------------------------------------
+    @property
+    def contact_reporting(self) -> Reporting:
+        """Which pairs' contacts are recorded as events: ``'off'``, ``'flagged'`` or ``'all'``.
+
+        ``'off'``, the default, records nothing and runs nothing. ``'flagged'``
+        records the pairs in which at least one body has been flagged with
+        :meth:`report_contacts`. ``'all'`` records every pair, and costs a
+        sort of the step's contacts plus an object per event delivered.
+        Adding a contact listener switches ``'off'`` to ``'all'``.
+        """
+        return self._reporting
+
+    @contact_reporting.setter
+    def contact_reporting(self, level: Reporting) -> None:
+        if level not in REPORTING_LEVELS:
+            raise ValueError('contact_reporting is one of %s, not %r'
+                             % (', '.join(REPORTING_LEVELS), level))
+        if level == 'off':
+            self._tracker.reset()
+        self._reporting = level
+
+    def report_contacts(self, i: int, on: bool = True) -> None:
+        """Flag body ``i`` so its pairs are recorded under ``'flagged'`` reporting."""
+        self._report[i] = on
+
+    def add_contact_listener(self, fn: Callable[[ContactEvent], None]
+                             ) -> Callable[[ContactEvent], None]:
+        """Call ``fn(event)`` with each contact event, inside the step; return ``fn``.
+
+        ``event`` is a :class:`~omi_physics.contactevents.ContactEvent`.
+
+        ``fn`` runs inside :meth:`step`, after the solve, on whichever thread
+        is stepping, so it can act before the next step: remove a projectile
+        that struck something, wake a mechanism. It may read and change the
+        world, including removing bodies; the ``'end'`` events a removal
+        produces are delivered after the current one. It must not touch
+        anything owned by another thread, such as a scenegraph or a GL object.
+        Anything for the main thread belongs in :attr:`contact_log` instead.
+
+        Switches :attr:`contact_reporting` from ``'off'`` to ``'all'``, since a
+        listener on a world that records nothing would never be called.
+        """
+        self.contact_listeners.append(fn)
+        if self._reporting == 'off':
+            self.contact_reporting = 'all'
+        return fn
+
+    def remove_contact_listener(self, fn: Callable[[ContactEvent], None]) -> None:
+        """Stop calling ``fn``; a listener that was never added is ignored."""
+        if fn in self.contact_listeners:
+            self.contact_listeners.remove(fn)
+
+    def set_contact_filter(self, fn: Callable[[PairPreview], Any] | None) -> None:
+        """Ask ``fn(pair)`` whether to solve a reported pair, on the step it would begin.
+
+        ``fn`` receives a :class:`~omi_physics.contactevents.PairPreview` --
+        the pair, how hard it is about to meet and its reduced mass -- and
+        returns a :class:`~omi_physics.contactevents.Verdict`: ``SOLVE`` (or
+        None), ``IGNORE_STEP`` to be asked again on the next step, or
+        ``IGNORE_PAIR`` to let the two pass through each other until they
+        part. A glass pane that breaks under the blow ignores the pair, so the
+        ball carries on with its momentum rather than bouncing off first.
+
+        Asked only about pairs :attr:`contact_reporting` records, and only
+        once per pair: an ignored pair still produces its ``'begin'`` and
+        ``'end'``, with ``solved`` False. It runs inside :meth:`step`, under
+        the same rules as a contact listener. None removes the filter.
+        """
+        self._contact_filter = fn
+
+    def ref(self, i: int) -> BodyRef:
+        """A :class:`~omi_physics.contactevents.BodyRef` to the body now at index ``i``."""
+        return BodyRef(int(i), int(self._generation[i]))
+
+    def alive(self, ref: BodyRef) -> bool:
+        """Whether the body ``ref`` names is still in the world."""
+        i = ref.index
+        return (0 <= i < self._n and int(self._generation[i]) == ref.generation
+                and i not in self._free)
+
+    def handle_of(self, ref: BodyRef) -> Any:
+        """The ``handle`` given to :meth:`add_body` for ``ref``; None once it is removed."""
+        if not self.alive(ref) or ref.index >= len(self.bodies):
+            return None
+        return self.bodies[ref.index]
+
+    def _reports_pair(self, a: int, b: int) -> bool:
+        """Whether :attr:`contact_reporting` records the pair ``(a, b)``."""
+        return self._reporting == 'all' or bool(self._report[a] or self._report[b])
+
+    def _record_contacts(self, solver: Any, contacts: 'list[Contact]',
+                         excluded: 'list[Contact]') -> None:
+        """Run the contact tracker over the step just solved, and deliver its events."""
+        batch = getattr(solver, 'last_batch', None)
+        if batch is None or len(batch.a) != len(contacts):
+            batch = ContactBatch.from_contacts(contacts)
+        if excluded:
+            batch = batch.concatenate(ContactBatch.from_contacts(excluded, solved=False))
+        flags = None
+        if self._reporting == 'flagged':
+            flags = self._report
+            keep = flags[batch.a] | flags[batch.b]
+            if not keep.all():
+                batch = ContactBatch(*(column[keep] for column in batch))
+        self._deliver(self._tracker.update(self, batch, flags))
+
+    def _deliver(self, events: list[ContactEvent]) -> None:
+        """Log ``events`` and call the contact listeners with each, in order.
+
+        A listener that removes a body produces more events while this is
+        running. They are queued behind the ones already being delivered, so
+        every listener sees one event at a time and in step order.
+        """
+        if not events:
+            return
+        self.contact_log.extend(events)
+        if not self.contact_listeners:
+            return
+        self._undelivered.extend(events)
+        if self._delivering:
+            return
+        self._delivering = True
+        try:
+            while self._undelivered:
+                event = self._undelivered.popleft()
+                for fn in list(self.contact_listeners):
+                    fn(event)
+        except BaseException:
+            self._undelivered.clear()
+            raise
+        finally:
+            self._delivering = False
+
+    def _log_triggers(self, fired: list[tuple[str, int, int]]) -> None:
+        """Record this step's trigger events in :attr:`contact_log`."""
+        if self._reporting == 'off' or not fired:
+            return
+        flagged = self._reporting == 'flagged'
+        self.contact_log.extend(
+            TriggerEvent(phase, self.ref(trigger), self.ref(other),
+                         self.step_count, self.time)
+            for phase, trigger, other in fired
+            if (phase != 'stay' or self.report_persist)
+            and (not flagged or self._report[trigger] or self._report[other]))
+
     # -- game-facing impulses -------------------------------------------
     def apply_impulse(self, i: int, impulse: Vec) -> None:
         """Add a linear impulse ``J`` (N·s) to body ``i``: ``v += J / m``.
@@ -337,12 +521,13 @@ class PhysicsWorld:
                  trigger: model.Trigger | None = None,
                  position: Vec = (0, 0, 0),
                  orientation: Vec = (0, 0, 0, 1),
-                 handle: Any = None) -> int:
+                 handle: Any = None, report_contacts: bool = False) -> int:
         """Create a body from its motion/collider/trigger; return its index.
 
         ``handle`` is an opaque per-body value the caller can retrieve later (the
-        scenegraph node the body drives, for instance).  Grows the columnar arrays
-        if needed.
+        scenegraph node the body drives, for instance).  ``report_contacts``
+        flags it for ``'flagged'`` contact reporting (:meth:`report_contacts`).
+        Grows the columnar arrays if needed.
         """
         if motion is None:
             motion = model.Motion()
@@ -368,6 +553,7 @@ class PhysicsWorld:
         self._quadratic_drag[i] = motion.quadraticDrag
         self._awake[i] = True
         self._sleep_timer[i] = 0.0
+        self._report[i] = report_contacts
 
         shape: model.Shape | None = None
         if collider is not None and 0 <= collider.shape < len(self.shapes):
@@ -378,6 +564,7 @@ class PhysicsWorld:
             self._collision = self._collision or _CollisionStages()
         if trigger is not None and 0 <= trigger.shape < len(self.shapes):
             self._trigger_shape[i] = trigger.shape
+            self._trigger_filter[i] = trigger.collisionFilter
             self._collision = self._collision or _CollisionStages()
 
         self._set_mass_properties(i, motion, shape)
@@ -453,11 +640,19 @@ class PhysicsWorld:
         renumber every body above this one and invalidate all of those at once,
         so the slot is emptied in place. A caller that keeps using the index
         after removing it is talking about whatever body was put there next.
+        A :class:`~omi_physics.contactevents.BodyRef` taken with :meth:`ref`
+        is not: removal moves the slot to its next generation.
+
+        Every pair the body was touching ends, with ``reason='removed'``, and
+        every trigger it was inside reports an ``'exit'``, now rather than on
+        the next step.
         """
         if not 0 <= i < self._n:
             raise IndexError("no body %r to remove" % (i,))
         if i in self._free:
             return
+        self._retire(i)
+        self._generation[i] += 1
         self._reset_body(i)
         self._free.append(i)
         if i < len(self.bodies):
@@ -467,6 +662,24 @@ class PhysicsWorld:
         # every mesh it ever held -- and, once the slot is handed out again,
         # an answer about the wrong geometry.
         self._forget_body(i)
+
+    def _retire(self, i: int) -> None:
+        """End body ``i``'s contacts and trigger overlaps, and drop its warm start."""
+        if self._collision is None:
+            return
+        forget = getattr(self._collision.solver, 'forget', None)
+        if forget is not None:
+            forget(i)
+        overlaps = self._collision.triggers.overlaps
+        inside = sorted(pair for pair in overlaps if i in pair)
+        if inside:
+            overlaps.difference_update(inside)
+            exits = [('exit', trigger, other) for trigger, other in inside]
+            self._log_triggers(exits)
+            for event in exits:
+                self.dispatch_trigger(*event)
+        if self._reporting != 'off':
+            self._deliver(self._tracker.retire(self, i))
 
     def _forget_body(self, i: int) -> None:
         """Drop per-body caches other modules keep on the world."""
@@ -480,6 +693,8 @@ class PhysicsWorld:
         self._collider_material[i] = -1
         self._collider_filter[i] = -1
         self._trigger_shape[i] = -1
+        self._trigger_filter[i] = -1
+        self._report[i] = False
         self._motion_type[i] = _TYPE_INT[model.STATIC]
         self._linear_velocity[i] = 0.0
         self._angular_velocity[i] = 0.0
@@ -633,6 +848,7 @@ class PhysicsWorld:
         if self.sleep_enabled:
             self._update_sleep(dt)
         self.time += dt
+        self.step_count += 1
 
     def writeback(self, alpha: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Interpolated poses for rendering: lerp prev→current by ``alpha``."""
@@ -911,12 +1127,25 @@ class _CollisionStages:
                 has_trigger = True
             # A pair at rest (both asleep/static) needs no work; it is revived
             # when a mover touches one of them (solver wakes the sleeper).
+            # Neither does a pair with no dynamic body, which nothing can move.
             elif (world.collider_shape[i] >= 0 and world.collider_shape[j] >= 0
-                    and (world.is_awake_mover(i) or world.is_awake_mover(j))):
+                    and (world.is_awake_mover(i) or world.is_awake_mover(j))
+                    and (world.motion_type[i] == _DYNAMIC
+                         or world.motion_type[j] == _DYNAMIC)):
                 solid.append((i, j))
-        self.contacts = self.narrowphase.generate(world, solid)
-        world.contacts = self.contacts
-        self.solver.solve(world, self.contacts, dt)
+        contacts = self.narrowphase.generate(world, solid)
+        reporting = world.contact_reporting != 'off'
+        excluded: list[Contact] = []
+        if reporting and contacts and world._contact_filter is not None:
+            contacts, excluded = world._tracker.presolve(
+                world, contacts, world._contact_filter, world._reports_pair)
+        self.contacts = contacts
+        world.contacts = contacts
+        self.solver.solve(world, contacts, dt)
+        if reporting:
+            world._record_contacts(self.solver, contacts, excluded)
         if has_trigger or self.triggers.overlaps:
-            for event in self.triggers.update(world, pairs):
+            fired = self.triggers.update(world, pairs)
+            world._log_triggers(fired)
+            for event in fired:
                 world.dispatch_trigger(*event)

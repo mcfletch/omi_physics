@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from . import model
 from .mathutil import Vec
 from .trigrid import TriangleGrid
 
@@ -83,7 +84,8 @@ class RayHit:
 
 def raycast(world: Any, origin: Vec, direction: Vec,
             max_distance: float = DEFAULT_RANGE,
-            skip: Iterable[int] = ()) -> RayHit | None:
+            skip: Iterable[int] = (),
+            filter: model.CollisionFilter | None = None) -> RayHit | None:
     """The nearest thing ``direction`` meets from ``origin``, or None.
 
     ``direction`` need not be normalised — a caller with a velocity should not
@@ -91,6 +93,11 @@ def raycast(world: Any, origin: Vec, direction: Vec,
 
     ``skip`` names bodies the ray passes through: a shooter's own body, and the
     two ends of a line-of-sight query.
+
+    ``filter`` is a :class:`~omi_physics.model.CollisionFilter` for the ray
+    itself: it meets only bodies whose collider filter it collides with, in
+    the same terms as two colliders. A shot that passes through its own team
+    says so here.
     """
     start = np.asarray(origin, dtype='d')
     heading = np.asarray(direction, dtype='d')
@@ -101,7 +108,7 @@ def raycast(world: Any, origin: Vec, direction: Vec,
     ignored = set(skip)
     nearest: RayHit | None = None
     limit = float(max_distance)
-    for body in _castable(world, ignored, start, heading, limit):
+    for body in _castable(world, ignored, start, heading, limit, filter):
         found = _hit_body(world, body, start, heading, limit)
         if found is not None and _supersedes(found, nearest):
             nearest = found
@@ -132,7 +139,9 @@ def _supersedes(found: RayHit, current: RayHit | None) -> bool:
 
 def raycast_many(world: Any, origins: Any, directions: Any,
                  max_distance: float = DEFAULT_RANGE,
-                 skip: Iterable[int] = ()) -> list[RayHit | None]:
+                 skip: Iterable[int] = (),
+                 filter: model.CollisionFilter | None = None
+                 ) -> list[RayHit | None]:
     """Several rays at once, sharing the work they have in common.
 
     A vehicle casts one ray per wheel every step and they all start within a
@@ -148,7 +157,8 @@ def raycast_many(world: Any, origins: Any, directions: Any,
     met nothing.
 
     Nothing here assumes the rays are parallel or that they start together --
-    a bundle spread across a level simply shares less.
+    a bundle spread across a level simply shares less. ``skip`` and ``filter``
+    are as for :func:`raycast`.
     """
     starts = np.asarray(origins, dtype='d').reshape(-1, 3)
     headings = np.asarray(directions, dtype='d').reshape(-1, 3)
@@ -163,13 +173,14 @@ def raycast_many(world: Any, origins: Any, directions: Any,
         return answers
     limits = np.where(live, float(max_distance), 0.0)
     for body in _bundle_castable(world, set(skip), starts[live], headings[live],
-                                 float(max_distance)):
+                                 float(max_distance), filter):
         _hit_bundle(world, body, starts, headings, live, limits, answers)
     return answers
 
 
 def _bundle_castable(world: Any, ignored: set, starts: np.ndarray,
-                     headings: np.ndarray, limit: float) -> list[int]:
+                     headings: np.ndarray, limit: float,
+                     filter: model.CollisionFilter | None = None) -> list[int]:
     """The bodies worth testing against any ray in the bundle.
 
     One box test per body against the box the whole bundle sweeps: a superset
@@ -180,10 +191,7 @@ def _bundle_castable(world: Any, ignored: set, starts: np.ndarray,
     count = int(world.body_count)
     if not count:                                # pragma: no cover - empty world
         return []
-    shapes = np.asarray(world.collider_shape[:count])
-    live = shapes >= 0
-    if ignored:
-        live[np.fromiter(ignored, dtype=int, count=len(ignored))] = False
+    live = _candidates(world, count, ignored, filter)
     if not live.any():
         return []
     ends = starts + headings * limit
@@ -296,8 +304,23 @@ def unsupported_shapes(world: Any) -> set[str]:
     return found
 
 
+def _candidates(world: Any, count: int, ignored: set[int],
+                filter: model.CollisionFilter | None) -> np.ndarray:
+    """Which bodies a ray may meet: a collider, not skipped, and admitted by ``filter``."""
+    live = np.asarray(world.collider_shape[:count]) >= 0
+    if ignored:
+        live[np.fromiter(ignored, dtype=int, count=len(ignored))] = False
+    if filter is not None:
+        filters = np.asarray(world.collider_filter[:count])
+        for index in np.unique(filters[live]).tolist():
+            if not filter.collides_with(world.filter_for(index)):
+                live &= filters != index
+    return live
+
+
 def _castable(world: Any, ignored: set[int], origin: np.ndarray,
-              heading: np.ndarray, limit: float) -> Iterable[int]:
+              heading: np.ndarray, limit: float,
+              filter: model.CollisionFilter | None = None) -> Iterable[int]:
     """The bodies worth testing exactly, nearest first.
 
     A body is worth testing when it has a collider, is not being skipped, and
@@ -318,10 +341,7 @@ def _castable(world: Any, ignored: set[int], origin: np.ndarray,
     count = int(world.body_count)
     if not count:                                # pragma: no cover - empty world
         return ()
-    shapes = np.asarray(world.collider_shape[:count])
-    live = shapes >= 0
-    if ignored:
-        live[np.fromiter(ignored, dtype=int, count=len(ignored))] = False
+    live = _candidates(world, count, ignored, filter)
     if not live.any():
         return ()
     entry = _slab_entry(world, origin, heading, limit, live)
@@ -703,12 +723,13 @@ def _unit(vector: np.ndarray) -> np.ndarray:
 
 def bodies_along(world: Any, origin: Vec, direction: Vec,
                  max_distance: float = DEFAULT_RANGE,
-                 skip: Iterable[int] = ()) -> list[RayHit]:
+                 skip: Iterable[int] = (),
+                 filter: model.CollisionFilter | None = None) -> list[RayHit]:
     """Every body the ray meets, nearest first.
 
     For the cases where the *first* thing hit is not the answer — a shot that
     passes through a trigger volume on its way to a wall, a splash that has to
-    know what it can see.
+    know what it can see. ``skip`` and ``filter`` are as for :func:`raycast`.
     """
     start = np.asarray(origin, dtype='d')
     heading = np.asarray(direction, dtype='d')
@@ -720,6 +741,6 @@ def bodies_along(world: Any, origin: Vec, direction: Vec,
     limit = float(max_distance)
     found = [hit for hit in
              (_hit_body(world, body, start, heading, limit)
-              for body in _castable(world, ignored, start, heading, limit))
+              for body in _castable(world, ignored, start, heading, limit, filter))
              if hit is not None]
     return sorted(found, key=lambda hit: hit.distance)

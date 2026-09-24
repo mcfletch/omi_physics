@@ -133,6 +133,67 @@ the solver resolves against the difference between two bodies' velocities, so a
 moving platform written down as still throws off whatever lands on it and reads
 as having been hit at the full speed of anything that merely caught it up.
 
+### Being told when things touch
+
+`impact_on` answers about one step. A game that advances the world once a frame
+with `advance(real_dt)` runs several steps per frame, and a bounce that begins
+and ends inside a frame is gone by the time the frame asks. The world can
+instead record contact **events** on every step: one per touching pair, not one
+per manifold point, with a phase of `'begin'`, `'persist'` or `'end'`.
+
+```python
+from omi_physics.contactevents import Verdict
+
+def on_contact(event):                  # called inside step(), after the solve
+    if event.phase == 'begin' and event.approach > 1.0:
+        thud(event.point, event.approach)
+
+world.add_contact_listener(on_contact)  # switches contact_reporting to 'all'
+
+# or record them and read them once a frame, on whichever thread draws
+world.contact_reporting = 'flagged'
+world.report_contacts(crate)            # only pairs involving flagged bodies
+world.advance(frame_time)
+for event in world.contact_log.drain():
+    ...
+```
+
+A `ContactEvent` carries the pair as `a` and `b` (`a.index < b.index`), a
+`point` and a `normal` from `a` to `b`, `approach` (the closing speed
+`impact_on` compares, in m/s), `impulse` (the sum of the normal impulses, in
+N·s, which is what a breaking strength compares against), `friction_impulse`,
+`slip` (sliding speed, m/s), `depth`, the number of `points`, and the `step`
+and `time` it happened at. An `'end'` carries a `reason`: `'separated'`, or
+`'removed'` when one body was taken out with `remove_body`.
+
+- `contact_reporting` is `'off'` (the default, and no cost), `'flagged'` or
+  `'all'`. Reporting every pair of a resting pile of 300 boxes adds about 2%
+  to its step.
+- `report_persist` adds a `'persist'` event for every touching pair on every
+  step, and a `'stay'` for every trigger overlap. Off, a pair is still tracked
+  and only its `'begin'` and `'end'` are reported.
+- Two bodies that fall asleep against each other stay touching: a crate that
+  settles on the floor gets a `'begin'` and no `'end'` until something moves
+  it off.
+- Trigger overlaps go into the same log as `TriggerEvent(phase, trigger, other,
+  step, time)`, in step order with the contacts. A trigger's
+  `collisionFilter` says which bodies it reacts to.
+- Bodies are named by `BodyRef(index, generation)`. `world.ref(i)` makes one,
+  `world.alive(ref)` says whether that body is still in the world, and
+  `world.handle_of(ref)` returns the `handle` it was added with. A removed
+  body's slot is reused, and a reference to the old body never matches the new
+  one.
+- The log is bounded (`ContactLog(maxlen=65536)`) and counts what it discarded
+  in `dropped`. Under `ThreadedSimulation`, `latest_and_events()` returns the
+  newest snapshot with every event up to it.
+
+`set_contact_filter(fn)` decides about a pair **before** it is solved, on the
+step it would begin. `fn` receives a `PairPreview` (the pair, `approach`, the
+reduced `mass` and the `impulse` the blow carries) and returns
+`Verdict.SOLVE`, `Verdict.IGNORE_STEP` or `Verdict.IGNORE_PAIR`. A pane of
+glass that breaks under the blow answers `IGNORE_PAIR`, and the ball carries on
+through with its momentum; the pair's events arrive with `solved=False`.
+
 ### Driving a car
 
 `RaycastVehicle` is the model every driving game uses: a rigid body with no

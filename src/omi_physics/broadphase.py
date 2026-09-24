@@ -244,8 +244,10 @@ class BroadPhase:
     def pairs(self, world: "PhysicsWorld") -> list[tuple[int, int]]:
         """Candidate colliding body pairs ``(i, j)``, real-box- and filter-checked.
 
-        Skips pairs of two non-dynamic bodies and pairs whose collision filters
-        do not interact; equals the brute-force set.
+        Skips pairs of two non-dynamic bodies, except a kinematic body against
+        a trigger, so a lift or an avatar's proxy enters a trigger volume; and
+        skips pairs whose collision filters do not interact. Equals the
+        brute-force set.
 
         Vectorized sweep-and-prune: sort AABBs by min-x, then pair each body with
         the run of later bodies whose min-x lies below its max-x (one
@@ -277,11 +279,11 @@ class BroadPhase:
         kj = ki + 1 + within
         a = order[ki]
         b = order[kj]
-        # x already overlaps by construction; finish y/z and require a dynamic body.
+        # x already overlaps by construction; finish y/z and require a body
+        # that moves on one side of it.
         keep = ((hi[a, 1] >= lo[b, 1]) & (hi[b, 1] >= lo[a, 1]) &
                 (hi[a, 2] >= lo[b, 2]) & (hi[b, 2] >= lo[a, 2]))
-        mt = world.motion_type[:n]
-        keep &= (mt[a] == 2) | (mt[b] == 2)
+        keep &= _moves_against(world, a, b)
         a, b = a[keep], b[keep]
         lo_idx = np.minimum(a, b).tolist()
         hi_idx = np.maximum(a, b).tolist()
@@ -293,6 +295,14 @@ class BroadPhase:
             return list(zip(lo_idx, hi_idx, strict=True))
         return [(p, q) for p, q in zip(lo_idx, hi_idx, strict=True)
                 if _filters_interact(world, p, q)]
+
+
+def _moves_against(world: "PhysicsWorld", a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Which pairs have something to report: a dynamic body, or a kinematic one at a trigger."""
+    mt = world.motion_type
+    trigger = world.trigger_shape >= 0
+    return ((mt[a] == 2) | (mt[b] == 2)
+            | ((mt[a] == 1) & trigger[b]) | ((mt[b] == 1) & trigger[a]))
 
 
 def _filters_interact(world: "PhysicsWorld", a: int, b: int) -> bool:
@@ -308,7 +318,7 @@ def brute_force_pairs(world: "PhysicsWorld") -> list[tuple[int, int]]:
     n = world.body_count
     for i in range(n):
         for j in range(i + 1, n):
-            if world.motion_type[i] != 2 and world.motion_type[j] != 2:
+            if not _moves_against(world, np.array([i]), np.array([j]))[0]:
                 continue
             if _real_overlap(world, i, j) and _filters_interact(world, i, j):
                 out.append((i, j))

@@ -58,6 +58,8 @@ class Contact:
     resolves anything, which is the only moment it can be read: resolving a
     contact is precisely cancelling the velocity that measures it.  See
     :meth:`~omi_physics.world.PhysicsWorld.impact_on`.
+
+    ``slip`` is the sliding speed across the contact, taken at the same moment.
     """
     a: int
     b: int
@@ -69,6 +71,8 @@ class Contact:
     tangent_impulse: np.ndarray = field(default_factory=lambda: np.zeros(2))
     #: Closing speed along ``normal`` before the solve, in metres per second.
     approach: float = 0.0
+    #: Tangential relative speed before the solve, in metres per second.
+    slip: float = 0.0
 
 
 def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> list[Contact]:

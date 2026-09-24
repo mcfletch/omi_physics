@@ -5,6 +5,10 @@ current overlap set against the previous one and emits ``enter`` / ``stay`` /
 ``exit`` events, which the world dispatches to listeners (a natural fit for
 ``TouchSensor``-style routing).  Pickups, pressure plates, and gravity-zone
 bounds all use triggers.
+
+A trigger's ``collisionFilter`` says which bodies it reacts to, in the same
+terms as a collider's: a pickup volume that admits only the player's system
+reports nothing about a crate pushed through it.
 """
 from typing import TYPE_CHECKING
 
@@ -35,6 +39,8 @@ class TriggerSystem:
             if pair is None:
                 continue
             trg, tshape, other, oshape = pair
+            if not self._admits(world, trg, other):
+                continue
             if self._overlapping(world, trg, tshape, other, oshape):
                 new.add((trg, other))
         events: list[tuple[str, int, int]] = []
@@ -65,6 +71,14 @@ class TriggerSystem:
         if oshape < 0:
             return None
         return trg, tshape, other, oshape
+
+    @staticmethod
+    def _admits(world: "PhysicsWorld", trg: int, other: int) -> bool:
+        """Whether the trigger's collision filter and the other body's agree."""
+        mine = world.filter_for(world.trigger_filter[trg])
+        theirs = (world.collider_filter[other] if world.collider_shape[other] >= 0
+                  else world.trigger_filter[other])
+        return mine.collides_with(world.filter_for(theirs))
 
     def _overlapping(self, world: "PhysicsWorld", trg: int, tshape: int,
                      other: int, oshape: int) -> bool:

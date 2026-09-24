@@ -36,8 +36,15 @@ sequenceDiagram
         BP->>NP: candidate pairs
         NP->>NP: generate contacts (SAT / GJK)
         NP->>SV: contact manifolds
+        opt a contact filter is set
+            NP->>NP: ask it about each reported pair that is about to begin
+        end
         SV->>SV: warm-start + velocity iterations
         SV->>SV: position (penetration) correction
+        opt contact_reporting is not 'off'
+            SV->>W: contact tracker → begin / persist / end events
+        end
+        W->>W: trigger enter / stay / exit events
     end
     opt joints present
         W->>JO: solve_joints(dt)
@@ -58,7 +65,10 @@ sequenceDiagram
 | **refit AABBs** | `position`, `orientation`, shape half-extents | `aabb_min`, `aabb_max` |
 | **broadphase** | `aabb_min/max`, collision filters | candidate `(i, j)` pairs |
 | **narrowphase** | candidate pairs, `position`, `orientation`, shapes | `Contact` manifolds (normal, points, depth) |
-| **solver** | contacts, velocities, inverse mass/inertia, materials | `linear/angular_velocity`, positional correction, `Contact.approach` |
+| **contact filter** | reported pairs on their first step, pre-solve velocities | which pairs the solver sees |
+| **solver** | contacts, velocities, inverse mass/inertia, materials | `linear/angular_velocity`, positional correction, `Contact.approach`, `slip`, impulses |
+| **contact tracker** | the solver's contact arrays, last step's touching pairs, `awake`, AABBs | `ContactEvent`s to listeners and `contact_log` |
+| **triggers** | trigger pairs, trigger and collider filters | `TriggerEvent`s to listeners and `contact_log` |
 | **joints** | joint definitions, body poses/velocities | velocities, poses |
 | **integrate positions** | velocities | `position`, `orientation` |
 | **sleeping** | velocities over time | `awake`, `sleep_timer` |
@@ -144,6 +154,26 @@ it, and `PhysicsWorld.impact_on` answers from it. It has to be taken here and
 nowhere later: the velocity iterations exist to remove exactly that velocity, so
 a game reading the same quantity off the bodies after the step gets a number
 that says a square-on impact never happened.
+
+## The contact tracker
+
+With `contact_reporting` above `'off'`, the step ends its collision stage by
+diffing this step's touching pairs against the last step's. The compiled solver
+hands the tracker the contact arrays it built for the kernel, impulses
+included; the pure-Python path gathers them from the `Contact` objects. Points
+are grouped by pair with one sort (`np.add.reduceat` and `np.maximum.reduceat`
+over the sorted keys), and a Python object is built only for an event that is
+delivered: a `'begin'`, an `'end'`, and a `'persist'` when `report_persist` asks
+for them.
+
+A pair missing from this step's contacts has either separated or was not
+tested. The narrow phase skips pairs whose bodies are both at rest, so a pair
+missing with both bodies asleep or static, and their boxes still overlapping, is
+carried forward as touching. `remove_body` ends every pair its body was in at
+once, with `reason='removed'`, and moves the slot to its next generation.
+
+Listeners run after the tracker, inside the step. Events a listener causes by
+removing a body are queued behind the event being delivered.
 
 ## Determinism
 
