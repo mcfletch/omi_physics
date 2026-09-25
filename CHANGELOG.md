@@ -40,6 +40,8 @@ compatibility promise.
   removal made under `with_world()` logged without waiting for a tick.
 - `ThreadedSimulation.with_world()` is re-entrant, so code holding it may call
   something that takes it again.
+- `kinematic.KinematicMover`: a kinematic body sent to a target position at
+  a set speed, placed exactly on it when it arrives.
 - `gravity.Region` is a protocol: any object with `contains(position)` is a
   region.
 

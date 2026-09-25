@@ -1,4 +1,8 @@
-"""Drive a kinematic body along an authored pose over time.
+"""Drive a kinematic body along an authored pose over time, or to a place.
+
+:class:`KinematicMover` is the simpler of the two: it sends a body to a target
+position at a set speed and stops it there, which is a door, a lift or a
+returning platform. The rest of this describes :class:`KinematicAnimator`.
 
 A kinematic body ignores gravity and contact response; the integrator advances it
 purely from its ``linear_velocity`` / ``angular_velocity`` (see
@@ -80,3 +84,48 @@ class KinematicAnimator:
             return np.zeros(3)
         angle = 2.0 * np.arctan2(sin_half, delta[3])
         return (axis / sin_half) * (angle / dt)
+
+
+class KinematicMover:
+    """Move one kinematic body to :attr:`target` at :attr:`speed`, and stop on it.
+
+    What a door, a lift or a returning platform does: the game says where the
+    body should be and how fast it goes there, in metres per second, and
+    calls :meth:`update` once a frame before advancing the world. The body
+    travels at that speed as a real velocity, so the solver carries what
+    rides on it. On the frame it would reach the target it is placed there
+    exactly and its velocity is set to zero.
+
+    ``target`` starts where the body is, so a new mover leaves it standing.
+    """
+
+    def __init__(self, world: "PhysicsWorld", index: int, speed: float,
+                 target: Vec | None = None) -> None:
+        if not speed > 0.0:
+            raise ValueError('a mover needs a speed above nought, not %r' % (speed,))
+        self.world = world
+        self.index = index
+        self.speed = float(speed)
+        #: Where the body is going, in world coordinates.
+        self.target = np.array(world.position[index] if target is None else target,
+                               dtype='d')
+
+    @property
+    def arrived(self) -> bool:
+        """Whether the body is standing on :attr:`target`."""
+        return bool(np.array_equal(self.world.position[self.index], self.target)
+                    and not self.world.linear_velocity[self.index].any())
+
+    def update(self, dt: float) -> None:
+        """Set this frame's velocity toward :attr:`target`, or place the body on it."""
+        world, i = self.world, self.index
+        target = np.asarray(self.target, dtype='d')
+        gap = target - world.position[i]
+        distance = float(np.linalg.norm(gap))
+        if distance <= self.speed * max(dt, 0.0):
+            if distance > 0.0:
+                world.place_body(i, position=target)
+            world.linear_velocity[i] = 0.0
+            return
+        world.linear_velocity[i] = gap * (self.speed / distance)
+        world.wake(i)

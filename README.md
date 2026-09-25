@@ -250,6 +250,26 @@ hit = raycast(world, origin, direction, filter=team_shot)
   collider's filter it collides with, in the same terms as two colliders.
   `raycast_many` and `bodies_along` take both as `raycast` does.
 
+### Doors, lifts and platforms
+
+A kinematic body moves at the velocity it is given and is pushed by nothing.
+`KinematicMover` sends one to a place: set its `target`, call `update(dt)`
+once a frame before advancing the world, and the body travels there at
+`speed` metres per second and is placed exactly on the target when it
+arrives. What stands on it is carried, because its motion is a velocity.
+`KinematicAnimator` follows a pose function of time instead, for a lift that
+never stops or an arm that sweeps.
+
+```python
+from omi_physics.kinematic import KinematicMover
+
+door = KinematicMover(world, door_index, speed=1.5)
+door.target = (7.0, 3.4, -1.0)          # open
+...
+door.update(frame_time)
+world.advance(frame_time)
+```
+
 ### Driving a car
 
 `RaycastVehicle` is the model every driving game uses: a rigid body with no
@@ -403,6 +423,7 @@ src/omi_physics/        the engine (importable as omi_physics)
   solver.py             island-parallel sequential-impulse contact solver
   joints.py             point / distance / hinge constraints and motors
   character.py          kinematic character controller
+  kinematic.py          kinematic bodies driven along a pose, or to a target
   vehicle.py            raycast vehicle: suspension, drive, steering
   cookery.py / hull.py  shape cooking (convex hulls, trimeshes)
   omi_gltf.py           read/write OMI physics from glTF documents
