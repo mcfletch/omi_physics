@@ -249,13 +249,15 @@ def _hit_bundle_trimesh(world: Any, body: int, shape: Any, starts: np.ndarray,
     high = np.maximum(starts[rays].max(axis=0), ends.max(axis=0))
     if np.any(low > placed.high) or np.any(high < placed.low):
         return
-    candidates = placed.grid.box(low, high)
+    # The rays keep the nearest of what they meet, so a triangle named twice
+    # by two cells is tested twice rather than merged away.
+    candidates = placed.grid.box(low, high, dedup=False)
     if not len(candidates):
         return
     triangles = placed.triangles[candidates]
-    for index in rays:
-        found = _hit_triangles(starts[index], headings[index], triangles,
-                               float(limits[index]))
+    found_all = _hit_triangles_many(starts[rays], headings[rays], triangles,
+                                    limits[rays])
+    for index, found in zip(rays, found_all, strict=True):
         if found is None:
             continue
         distance, normal, among = found
@@ -684,6 +686,44 @@ def _hit_triangles(origin: np.ndarray, heading: np.ndarray,
     return (float(distance[nearest]),
             _unit(cross(edge1[nearest], edge2[nearest])),
             int(nearest))
+
+
+def _hit_triangles_many(origins: np.ndarray, headings: np.ndarray,
+                        triangles: np.ndarray, limits: np.ndarray
+                        ) -> list[tuple[float, np.ndarray, int] | None]:
+    """:func:`_hit_triangles` for several rays against one candidate set.
+
+    Every ray against every triangle in one pass, ``(R, T)`` wide: a bundle's
+    rays share their candidates, and a pass per ray pays numpy's fixed cost
+    per operation once for each of them.
+    """
+    a = triangles[:, 0]
+    edge1 = triangles[:, 1] - a
+    edge2 = triangles[:, 2] - a
+    heading = headings[:, None, :]                              # (R, 1, 3)
+    across = cross(heading, edge2[None, :, :])                  # (R, T, 3)
+    determinant = (edge1[None] * across).sum(axis=2)            # (R, T)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        inverse = 1.0 / determinant
+        to_a = origins[:, None, :] - a[None]                    # (R, T, 3)
+        u = (to_a * across).sum(axis=2) * inverse
+        edge = cross(to_a, edge1[None])
+        v = (edge * heading).sum(axis=2) * inverse
+        distance = (edge2[None] * edge).sum(axis=2) * inverse
+    met = ((np.abs(determinant) >= _TINY)        # not parallel to the plane
+           & np.isfinite(distance)
+           & (u >= 0.0) & (u <= 1.0)
+           & (v >= 0.0) & (u + v <= 1.0)
+           & (distance >= 0.0) & (distance <= limits[:, None]))
+    nearest = np.where(met, distance, np.inf).argmin(axis=1)
+    found: list[tuple[float, np.ndarray, int] | None] = []
+    for ray, among in enumerate(nearest.tolist()):
+        if not met[ray, among]:
+            found.append(None)
+            continue
+        found.append((float(distance[ray, among]),
+                      _unit(cross(edge1[among], edge2[among])), int(among)))
+    return found
 
 
 def _hit_triangle(origin: np.ndarray, heading: np.ndarray,

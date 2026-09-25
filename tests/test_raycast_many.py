@@ -143,15 +143,16 @@ class TestItAnswersWhatTheRaysWouldHave:
 
 class TestItDoesLessWorkThanCastingEachOne:
     def _counted(self, monkeypatch):
+        """How many candidate triangles each pass over the bundle was given."""
         from omi_physics import raycast as module
         walks = []
-        real = module._hit_triangles
+        real = module._hit_triangles_many
 
-        def counting(origin, heading, triangles, limit):
+        def counting(origins, headings, triangles, limits):
             walks.append(len(triangles))
-            return real(origin, heading, triangles, limit)
+            return real(origins, headings, triangles, limits)
 
-        monkeypatch.setattr(module, '_hit_triangles', counting)
+        monkeypatch.setattr(module, '_hit_triangles_many', counting)
         return walks
 
     def test_the_mesh_is_walked_once_for_the_bundle(self, monkeypatch) -> None:
@@ -168,12 +169,21 @@ class TestItDoesLessWorkThanCastingEachOne:
         raycast_many(world, _wheels(), DOWN, max_distance=20.0)
         assert not walked, "the grid was walked per ray"
 
-    def test_each_ray_is_tested_against_one_candidate_set(self, monkeypatch) -> None:
-        walks = self._counted(monkeypatch)
+    def test_the_rays_are_tested_against_the_candidates_together(self, monkeypatch) -> None:
+        """One pass over every ray and every candidate triangle, rather than a
+        pass per ray: four wheels are one numpy expression, not four."""
+        from omi_physics import raycast as module
+        passes = []
+        real = module._hit_triangles_many
+
+        def counting(origins, headings, triangles, limits):
+            passes.append((len(origins), len(triangles)))
+            return real(origins, headings, triangles, limits)
+
+        monkeypatch.setattr(module, '_hit_triangles_many', counting)
         world = _mesh_world()
         raycast_many(world, _wheels(), DOWN, max_distance=20.0)
-        assert len(walks) == 4
-        assert len(set(walks)) == 1, "the rays were given different candidates"
+        assert [rays for rays, _triangles in passes] == [4]
 
     def test_the_shared_set_is_smaller_than_the_whole_mesh(self, monkeypatch) -> None:
         walks = self._counted(monkeypatch)

@@ -113,8 +113,13 @@ class TriangleGrid:
 
     # -- asking -------------------------------------------------------------
 
-    def box(self, low: np.ndarray, high: np.ndarray) -> np.ndarray:
-        """Triangles whose bounds may overlap ``[low, high]``."""
+    def box(self, low: np.ndarray, high: np.ndarray, dedup: bool = True) -> np.ndarray:
+        """Triangles whose bounds may overlap ``[low, high]``.
+
+        ``dedup`` as for :meth:`_gathered`: a caller keeping only the nearest
+        of what it meets -- a bundle of rays -- can take a triangle named
+        twice.
+        """
         if self._cells is None:
             return self._exact(low, high)
         if np.any(low > self._high) or np.any(high < self._low):
@@ -125,7 +130,7 @@ class TriangleGrid:
                  for j in range(first[1], last[1] + 1)
                  for k in range(first[2], last[2] + 1)
                  if (key := (i, j, k)) in self._cells]
-        return self._gathered(found, low, high, tighten=False)
+        return self._gathered(found, low, high, tighten=False, dedup=dedup)
 
     def _corner(self, point: np.ndarray) -> tuple[int, int, int]:
         """:meth:`_cell_of` for a single point, in plain Python arithmetic.
