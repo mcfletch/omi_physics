@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from omi_physics import model
+from omi_physics import mathutil, model
 from omi_physics.joints import AngularMotor, DistanceConstraint, PointConstraint
 from omi_physics.world import PhysicsWorld
 
@@ -46,7 +46,6 @@ def test_point_constraint_pins_extended_body_at_offset():
 
 
 def _rotate(world, i, local):
-    from omi_physics import mathutil
     R = mathutil.quat_to_matrix(world.orientation[i])
     return R @ np.asarray(local, dtype='d')
 

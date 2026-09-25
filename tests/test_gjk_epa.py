@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from omi_physics import gjk, mathutil, model
+from omi_physics import collide, gjk, mathutil, model
 from omi_physics.body import ConvexProxy, SphereProxy, make_proxy
 
 I3 = np.eye(3)
@@ -77,7 +77,6 @@ def test_a_capsule_just_into_a_long_flat_box_is_found_wherever_it_stands(x):
     and answer a sideways normal at no depth: a capsule 2 cm into the floor
     was reported as not touching it.
     """
-    from omi_physics import collide
     ident = np.array([0.0, 0.0, 0.0, 1.0])
     floor = make_proxy(model.Shape.box((60, 1, 60)), np.array([0.0, -0.5, 0.0]), ident)
     capsule = make_proxy(model.Shape.capsule(height=1.2, radius=0.32),

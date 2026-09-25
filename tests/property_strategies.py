@@ -22,6 +22,7 @@ from hypothesis import strategies as st
 
 from omi_physics import mathutil, model
 from omi_physics.body import BoxProxy, CapsuleProxy, ConvexProxy, SphereProxy
+from omi_physics.world import PhysicsWorld
 
 #: Generating a case is cheap and checking one is not, so the example counts are
 #: modest and the deadline is off: these are a net for the cases nobody wrote
@@ -252,7 +253,6 @@ def build_world(recipe: dict):
     often as not -- which is the state a level designer's first draft arrives
     in, and the one a solver has to recover from rather than diverge on.
     """
-    from omi_physics.world import PhysicsWorld
 
     world = PhysicsWorld(
         gravity=model.Gravity(gravity=recipe['gravity'], direction=(0, -1, 0)),

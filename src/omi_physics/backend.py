@@ -57,10 +57,10 @@ class NumpyBackend:
 
 
 def __getattr__(name: str) -> Any:
-    # GLComputeBackend lives in ``glcompute`` (it imports OpenGL); expose it here
-    # lazily so ``import omi_physics`` stays GL-free.
+    # GLComputeBackend subclasses NumpyBackend, so ``glcompute`` imports this
+    # module and is imported from here only once this module has loaded.
     if name == 'GLComputeBackend':
-        from .glcompute import GLComputeBackend
+        from .glcompute import GLComputeBackend  # noqa: PLC0415 glcompute imports backend
         return GLComputeBackend
     raise AttributeError(name)
 
@@ -75,8 +75,12 @@ def _has_gl_compute() -> bool:
     being selected where it would crash, so ``auto`` falls back to numpy instead.
     """
     try:
-        from OpenGL import error
-        from OpenGL.GL import GL_VERSION, glDispatchCompute, glGetString
+        from OpenGL import error  # noqa: PLC0415 PyOpenGL is an optional dependency
+        from OpenGL.GL import (  # noqa: PLC0415 PyOpenGL is an optional dependency
+            GL_VERSION,
+            glDispatchCompute,
+            glGetString,
+        )
     except ImportError:
         return False
     try:
@@ -112,12 +116,11 @@ def select_backend(prefer: str = 'auto') -> Any:
     """
     if prefer in ('numpy', 'cpu'):
         return NumpyBackend()
+    from .glcompute import GLComputeBackend  # noqa: PLC0415 glcompute imports backend
     if prefer in ('glcompute', 'gpu'):
-        from .glcompute import GLComputeBackend
         return GLComputeBackend()
     # auto: prefer GPU, fall back to numpy when compute is missing or fails.
     if _has_gl_compute():
-        from .glcompute import GLComputeBackend
         try:
             return GLComputeBackend()
         except Exception:

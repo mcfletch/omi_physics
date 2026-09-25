@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from . import backend
 from .backend import NumpyBackend
 
 if TYPE_CHECKING:
@@ -203,10 +204,9 @@ class GLComputeBackend(NumpyBackend):
     name = 'glcompute'
 
     def __init__(self) -> None:
-        from . import backend
         if not backend._has_gl_compute():
             raise RuntimeError('GL 4.3 compute shaders unavailable; use NumpyBackend')
-        from OpenGL import GL
+        from OpenGL import GL  # noqa: PLC0415 PyOpenGL is an optional dependency
         self._gl = GL
         try:
             self._prog_forces = self._compile(_FORCES_SRC)

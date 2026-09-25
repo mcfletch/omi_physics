@@ -22,6 +22,7 @@ import numpy as np
 
 from . import collide, model
 from .body import CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy
+from .contactevents import ContactEvent
 from .mathutil import Vec, flat_length, length
 
 if TYPE_CHECKING:
@@ -609,7 +610,6 @@ class CharacterController:
     def _event(self, j: int, phase: str, normal: np.ndarray, point: np.ndarray,
                reason: str | None = None) -> Any:
         """A contact event between static body ``j`` and :attr:`body`; None if unreported."""
-        from .contactevents import ContactEvent
         world, mine = self.world, cast(int, self.body)
         if not world._reports_pair(j, mine):
             return None

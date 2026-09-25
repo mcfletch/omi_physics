@@ -14,13 +14,16 @@ routine over randomised inputs, which is a regression guard rather than the
 definition of right.
 """
 
+import time
 from platform import python_implementation
 
 import numpy as np
 import pytest
 
-from omi_physics import collide
-from omi_physics.body import CapsuleProxy, TriangleProxy
+from omi_physics import collide, model
+from omi_physics.body import CapsuleProxy, TriangleMeshProxy, TriangleProxy
+from omi_physics.character import CharacterCapabilities, CharacterController
+from omi_physics.world import PhysicsWorld
 
 
 def _capsule(centre=(0.0, 1.0, 0.0), half=0.5, radius=0.4, rotation=None):
@@ -218,7 +221,6 @@ class TestTheMeshPathUsesIt:
 
     @staticmethod
     def _mesh(cells=40, extent=8.0):
-        from omi_physics.body import TriangleMeshProxy
         xs = np.linspace(-extent, extent, cells)
         points = [(x, 0.05 * np.sin(i * 0.7) * np.cos(j * 0.7), z)
                   for i, x in enumerate(xs) for j, z in enumerate(xs)]
@@ -335,8 +337,6 @@ class TestTheBudgetThisExistsFor:
 
     @staticmethod
     def _world_with_floor(cells=60, extent=30.0):
-        from omi_physics import model
-        from omi_physics.world import PhysicsWorld
         xs = np.linspace(-extent, extent, cells)
         points = np.array([(x, 0.05 * np.sin(i * 0.7) * np.cos(j * 0.7), z)
                            for i, x in enumerate(xs)
@@ -357,9 +357,7 @@ class TestTheBudgetThisExistsFor:
 
     @pytest.mark.serial
     def test_a_hundred_characters_walking_fit_in_a_frame(self):
-        import time
 
-        from omi_physics.character import CharacterCapabilities, CharacterController
         world = self._world_with_floor()
         rng = np.random.default_rng(4)
         walkers = []

@@ -128,6 +128,7 @@ select = [
     "S102", "S307",  # no exec or eval of strings
     "S202", "S301", "S310",  # no unchecked tar extraction, pickle loads or URL opens
     "S110", "BLE001", "TRY400",  # a caught error is narrowed, or logged with its traceback
+    "PLC0415",  # imports are at the top, save an optional dependency or a named cycle
 ]
 ignore = [
     # Paired assignments on one line: the solver and collision hot paths

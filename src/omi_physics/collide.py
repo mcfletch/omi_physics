@@ -288,7 +288,7 @@ def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     if rkey in _DISPATCH:
         flipped = _DISPATCH[rkey](b, a, PB, PA)
         return [_flip(c) for c in flipped]
-    from .gjk import collide_convex
+    from .gjk import collide_convex  # noqa: PLC0415 gjk imports collide.Contact
     # The trimesh case returned above, so both proxies answer support() here.
     return collide_convex(a, b, cast(SupportProxy, PA), cast(SupportProxy, PB))
 
@@ -300,7 +300,7 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     faster and more robust than GJK/EPA, whose polytope expansion stalls on the
     big flat wall/floor triangles of an arbitrary mesh.
     """
-    from .gjk import collide_convex
+    from .gjk import collide_convex  # noqa: PLC0415 gjk imports collide.Contact
     if PA.kind == 'trimesh':
         mesh, other, mesh_is_a = cast(TriangleMeshProxy, PA), cast(SupportProxy, PB), True
     else:

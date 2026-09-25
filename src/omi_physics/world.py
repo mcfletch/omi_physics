@@ -17,6 +17,8 @@ import numpy as np
 
 from . import mathutil, model
 from .backend import NumpyBackend, select_backend
+from .body import world_aabb
+from .broadphase import BroadPhase
 from .contactevents import (
     REPORTING_LEVELS,
     BodyRef,
@@ -29,7 +31,11 @@ from .contactevents import (
     TriggerEvent,
     measure,
 )
+from .gravity import apply_volumes
 from .mathutil import Vec
+from .narrowphase import NarrowPhase
+from .solver import SequentialImpulseSolver
+from .triggers import TriggerSystem
 
 if TYPE_CHECKING:
     from .collide import Contact
@@ -670,7 +676,6 @@ class PhysicsWorld:
         boxes that are all zero until the first step -- makes a query before
         that step quietly answer nothing.
         """
-        from .body import world_aabb
         shape_index = int(self._collider_shape[i])
         if shape_index < 0:
             shape_index = int(self._trigger_shape[i])
@@ -908,7 +913,6 @@ class PhysicsWorld:
         g = base * self.gravity.gravity
         out = np.tile(g, (self._n, 1))
         if self.gravity_volumes:
-            from .gravity import apply_volumes
             apply_volumes(self.gravity_volumes, self.position, out)
         return out
 
@@ -1039,7 +1043,6 @@ class PhysicsWorld:
         them moved is one array comparison, and the ones that did not are
         written out of the remembered bounds in one go.
         """
-        from .body import world_aabb
         position, orientation = self._position, self._orientation
         if len(self._refit_pose) < len(position):
             self._grow_refit_bounds()
@@ -1218,10 +1221,6 @@ class _CollisionStages:
 
     def __init__(self, solver: Any = None, velocity_iterations: int = 10) -> None:
         """Build the broad/narrow phases, the contact solver, and the trigger system."""
-        from .broadphase import BroadPhase
-        from .narrowphase import NarrowPhase
-        from .solver import SequentialImpulseSolver
-        from .triggers import TriggerSystem
         self.broadphase = BroadPhase()
         self.narrowphase = NarrowPhase()
         self.solver = solver or SequentialImpulseSolver(

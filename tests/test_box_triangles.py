@@ -14,8 +14,11 @@ import math
 import numpy as np
 import pytest
 
-from omi_physics.body import BoxProxy
+from omi_physics import model
+from omi_physics.body import BoxProxy, TriangleProxy
 from omi_physics.collide import box_triangle_batch
+from omi_physics.gjk import collide_convex
+from omi_physics.world import PhysicsWorld
 
 IDENTITY = np.identity(3)
 
@@ -112,8 +115,6 @@ class TestItAgreesWithTheGeneralTest:
 
     @pytest.mark.parametrize('height', [0.4, 0.7, 0.95, 1.05, 1.4])
     def test_touching_or_not_matches_gjk(self, height) -> None:
-        from omi_physics.body import TriangleProxy
-        from omi_physics.gjk import collide_convex
         box = _box(centre=(0.3, height, -0.2))
         floor = _floor()
         analytic = box_triangle_batch(box, floor)[0].any()
@@ -123,8 +124,6 @@ class TestItAgreesWithTheGeneralTest:
 
     def test_a_resting_box_settles_at_the_same_height(self) -> None:
         """Through the world, which is what actually matters."""
-        from omi_physics import model
-        from omi_physics.world import PhysicsWorld
 
         world = PhysicsWorld()
         floor = _floor(extent=20.0)

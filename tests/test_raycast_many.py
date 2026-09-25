@@ -11,8 +11,10 @@ have answered on their own, and that it does less work to do it.
 import numpy as np
 import pytest
 
-from omi_physics import model
-from omi_physics.raycast import raycast, raycast_many
+from omi_physics import model, trigrid, vehicle
+from omi_physics import raycast as raycast_module
+from omi_physics.raycast import bodies_along, raycast, raycast_many
+from omi_physics.vehicle import RaycastVehicle, VehicleTuning, car_wheels
 from omi_physics.world import PhysicsWorld
 
 
@@ -144,19 +146,17 @@ class TestItAnswersWhatTheRaysWouldHave:
 class TestItDoesLessWorkThanCastingEachOne:
     def _counted(self, monkeypatch):
         """How many candidate triangles each pass over the bundle was given."""
-        from omi_physics import raycast as module
         walks = []
-        real = module._hit_triangles_many
+        real = raycast_module._hit_triangles_many
 
         def counting(origins, headings, triangles, limits):
             walks.append(len(triangles))
             return real(origins, headings, triangles, limits)
 
-        monkeypatch.setattr(module, '_hit_triangles_many', counting)
+        monkeypatch.setattr(raycast_module, '_hit_triangles_many', counting)
         return walks
 
     def test_the_mesh_is_walked_once_for_the_bundle(self, monkeypatch) -> None:
-        from omi_physics import trigrid
         walked = []
         real = trigrid.TriangleGrid.ray
 
@@ -172,15 +172,14 @@ class TestItDoesLessWorkThanCastingEachOne:
     def test_the_rays_are_tested_against_the_candidates_together(self, monkeypatch) -> None:
         """One pass over every ray and every candidate triangle, rather than a
         pass per ray: four wheels are one numpy expression, not four."""
-        from omi_physics import raycast as module
         passes = []
-        real = module._hit_triangles_many
+        real = raycast_module._hit_triangles_many
 
         def counting(origins, headings, triangles, limits):
             passes.append((len(origins), len(triangles)))
             return real(origins, headings, triangles, limits)
 
-        monkeypatch.setattr(module, '_hit_triangles_many', counting)
+        monkeypatch.setattr(raycast_module, '_hit_triangles_many', counting)
         world = _mesh_world()
         raycast_many(world, _wheels(), DOWN, max_distance=20.0)
         assert [rays for rays, _triangles in passes] == [4]
@@ -194,16 +193,14 @@ class TestItDoesLessWorkThanCastingEachOne:
 
 class TestAVehicleUsesIt:
     def test_a_car_casts_its_wheels_together(self, monkeypatch) -> None:
-        from omi_physics import vehicle as module
-        from omi_physics.vehicle import RaycastVehicle, VehicleTuning, car_wheels
         bundles = []
-        real = module.raycast_many
+        real = vehicle.raycast_many
 
         def counting(world, origins, directions, **named):
             bundles.append(len(origins))
             return real(world, origins, directions, **named)
 
-        monkeypatch.setattr(module, 'raycast_many', counting)
+        monkeypatch.setattr(vehicle, 'raycast_many', counting)
         world = _mesh_world()
         body = world.add_body(model.Motion(type=model.DYNAMIC, mass=1200.0),
                               position=(0.0, 6.0, 0.0))
@@ -212,7 +209,6 @@ class TestAVehicleUsesIt:
         assert bundles == [4]
 
     def test_it_still_holds_itself_up(self) -> None:
-        from omi_physics.vehicle import RaycastVehicle, VehicleTuning, car_wheels
         world = _mesh_world()
         body = world.add_body(model.Motion(type=model.DYNAMIC, mass=1200.0),
                               position=(0.0, 6.0, 0.0))
@@ -225,9 +221,6 @@ class TestAVehicleUsesIt:
         assert float(world.position[body][1]) == pytest.approx(ground + 0.64,
                                                                abs=0.35)
 
-
-if __name__ == '__main__':
-    raise SystemExit(pytest.main([__file__, '-v']))
 
 
 class TestEverythingAlongTheRay:
@@ -245,20 +238,17 @@ class TestEverythingAlongTheRay:
         return world
 
     def test_it_finds_every_one(self) -> None:
-        from omi_physics.raycast import bodies_along
         found = bodies_along(self._stack(), (0.0, 20.0, 0.0), (0, -1, 0),
                              max_distance=40.0)
         assert len(found) == 3
 
     def test_nearest_first(self) -> None:
-        from omi_physics.raycast import bodies_along
         found = bodies_along(self._stack(), (0.0, 20.0, 0.0), (0, -1, 0),
                              max_distance=40.0)
         assert [hit.distance for hit in found] == sorted(
             hit.distance for hit in found)
 
     def test_the_first_is_the_one_a_single_cast_gives(self) -> None:
-        from omi_physics.raycast import bodies_along
         world = self._stack()
         found = bodies_along(world, (0.0, 20.0, 0.0), (0, -1, 0),
                              max_distance=40.0)
@@ -266,14 +256,12 @@ class TestEverythingAlongTheRay:
         assert found[0].body == alone.body
 
     def test_a_skipped_body_is_not_among_them(self) -> None:
-        from omi_physics.raycast import bodies_along
         world = self._stack()
         found = bodies_along(world, (0.0, 20.0, 0.0), (0, -1, 0),
                              max_distance=40.0, skip=(1,))
         assert all(hit.body != 1 for hit in found)
 
     def test_a_ray_that_meets_nothing_finds_nothing(self) -> None:
-        from omi_physics.raycast import bodies_along
         assert bodies_along(self._stack(), (500.0, 20.0, 0.0), (0, -1, 0),
                             max_distance=40.0) == []
 
@@ -336,3 +324,7 @@ class TestASlotThatIsReused:
         found = raycast_many(world, [(103.0, 10.0, 0.0), (107.0, 10.0, 0.0)],
                              [(0, -1, 0)] * 2, max_distance=40.0)
         assert all(hit is not None for hit in found)
+
+
+if __name__ == '__main__':
+    raise SystemExit(pytest.main([__file__, '-v']))

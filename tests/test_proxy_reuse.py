@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from omi_physics import body, model
+from omi_physics import world as world_module
 from omi_physics.world import PhysicsWorld
 
 STEP = 1.0 / 120.0
@@ -191,15 +192,14 @@ class TestRefittingCostsWhatMoved:
 
     def _counted(self, monkeypatch):
         """Count the measuring, which is what a terrain tile's AABB costs."""
-        from omi_physics import body
         measured = []
-        real = body.world_aabb
+        real = world_module.world_aabb
 
         def counting(*args, **named):
             measured.append(1)
             return real(*args, **named)
 
-        monkeypatch.setattr(body, 'world_aabb', counting)
+        monkeypatch.setattr(world_module, 'world_aabb', counting)
         return measured
 
     def test_a_still_landscape_is_measured_once(self, monkeypatch) -> None:

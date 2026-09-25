@@ -9,12 +9,15 @@ Every test runs on both solver paths: the compiled kernel, which hands the
 tracker its contact arrays, and the pure-Python solver, which does not.
 """
 import logging
+import sys
+import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from omi_physics import contactevents, model, omi_gltf, solver
+from omi_physics.collide import Contact
 from omi_physics.contactevents import (
     BodyRef,
     ContactBatch,
@@ -305,7 +308,6 @@ class TestSwitching:
 
 class TestBatches:
     def test_joining_two_batches_keeps_both(self) -> None:
-        from omi_physics.collide import Contact
         contact = Contact(0, 1, np.zeros(3), np.array([0.0, 1.0, 0.0]), 0.01)
         solved = ContactBatch.from_contacts([contact])
         unsolved = ContactBatch.from_contacts([contact], solved=False)
@@ -715,8 +717,6 @@ class TestListenersWithoutTheLog:
 
 class TestTheLogUnderThreads:
     def test_every_event_is_drained_held_or_counted_as_dropped(self) -> None:
-        import sys
-        import threading
         log = ContactLog(maxlen=64)
         total = 20000
         drained = []

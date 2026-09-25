@@ -32,7 +32,7 @@ def accelerator_extensions():
         elif os.path.exists(csrc):
             exts.append(Extension(name, [csrc], extra_compile_args=["-O3"]))
     try:
-        from Cython.Build import cythonize
+        from Cython.Build import cythonize  # noqa: PLC0415 Cython is optional; .c sources suffice
         return cythonize(exts, language_level=3, quiet=True)
     except ImportError:
         return [e for e in exts if e.sources[0].endswith(".c")]

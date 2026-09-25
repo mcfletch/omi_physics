@@ -13,6 +13,8 @@ machinery. The contract is unchanged and is what the answer is checked against
 -- a superset of the truly overlapping triangles, never missing one.
 """
 
+import time
+
 import numpy as np
 import pytest
 
@@ -100,7 +102,6 @@ class TestItIsCheapEnoughToAskOften:
     @staticmethod
     def _cost(built, low, high, calls=2000):
         """Seconds a query of these bounds takes, warmed first."""
-        import time
         built.box(low, high)
         started = time.perf_counter()
         for _ in range(calls):
