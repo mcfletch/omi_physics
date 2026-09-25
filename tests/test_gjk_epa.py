@@ -86,3 +86,20 @@ def test_a_capsule_just_into_a_long_flat_box_is_found_wherever_it_stands(x):
     assert len(contacts) == 1
     assert contacts[0].depth == pytest.approx(0.0199, abs=1e-6)
     assert np.allclose(contacts[0].normal, (0, -1, 0), atol=1e-6)
+
+
+def test_an_origin_on_the_edge_of_a_thin_tetrahedron_is_inside_it():
+    """A small sphere almost wholly inside a large one, nearly along an axis.
+
+    The first two support points put the origin on the edge between them to
+    within rounding, so each tetrahedron built around that edge has the origin
+    on two of its faces. Read as outside, the search turns round the edge
+    until it runs out of iterations.
+    """
+    small = SphereProxy(np.array([0.0, 5.960464477539063e-08, 1.6210007107555384]), 0.01)
+    large = SphereProxy(np.array([0.01, 0.0, -5.960464477539063e-08]),
+                        1.6210007107555384)
+    hit, _simplex = gjk.gjk_intersect(small, large)
+    assert hit
+    (contact,) = gjk.collide_convex(0, 1, small, large)
+    assert contact.depth == pytest.approx(0.00997, abs=1e-4)

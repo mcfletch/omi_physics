@@ -104,13 +104,27 @@ def _tetra(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     abc = cross(ab, ac)
     acd = cross(ac, ad)
     adb = cross(ad, ab)
-    if np.dot(abc, ao) > 0:
+    if _beyond(abc, ao):
         return _triangle([c, b, a])
-    if np.dot(acd, ao) > 0:
+    if _beyond(acd, ao):
         return _triangle([d, c, a])
-    if np.dot(adb, ao) > 0:
+    if _beyond(adb, ao):
         return _triangle([b, d, a])
     return True, simplex, np.zeros(3)
+
+
+#: How far past a face plane, in metres, the origin has to be to be outside it.
+#: An origin on a face or an edge of the tetrahedron is on the Minkowski
+#: difference, so the shapes touch; rounding puts it either side of the plane,
+#: and read as outside it sends the search round that edge without end.
+PLANE_TOLERANCE = 1e-12
+
+
+def _beyond(normal: np.ndarray, ao: np.ndarray) -> bool:
+    """Whether the origin is past the face with ``normal`` by more than rounding."""
+    along = float(np.dot(normal, ao))
+    return along > 0.0 and along * along > (PLANE_TOLERANCE * PLANE_TOLERANCE
+                                            * float(np.dot(normal, normal)))
 
 
 def _any_perp(v: np.ndarray) -> np.ndarray:
