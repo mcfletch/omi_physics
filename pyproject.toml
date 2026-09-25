@@ -90,6 +90,12 @@ markers = [
     "serial: needs a quiet machine (no concurrent CPU load); wall-clock budget checks whose margin shrinks under load. Run them alone with '-m serial' after a '-m \"not serial\"' bulk pass.",
 ]
 
+[tool.openglcontext-checks]
+# The OGC rules (openglcontext-checks) this project is clean of, held by
+# the workspace preflight. The others join as the project reaches zero of
+# each; the counts are in openglcontext/plans/DEFECT-PREVENTION.md.
+select = ["OGC141", "OGC161", "OGC221", "OGC223"]
+
 [tool.ruff]
 # Every setting ruff needs is here, so `ruff check` and `ruff format` in the
 # checkout are the same run tox and CI make -- no flags to remember and no way
