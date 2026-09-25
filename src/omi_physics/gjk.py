@@ -13,6 +13,7 @@ import numpy as np
 
 from . import mathutil
 from .collide import Contact
+from .mathutil import cross
 
 if TYPE_CHECKING:
     from .body import SupportProxy
@@ -73,7 +74,7 @@ def _line(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     ab = b.v - a.v
     ao = -a.v
     if np.dot(ab, ao) > 0:
-        d = np.cross(np.cross(ab, ao), ab)
+        d = cross(cross(ab, ao), ab)
         if np.dot(d, d) < EPS:
             d = _any_perp(ab)
         return False, [b, a], d
@@ -84,12 +85,12 @@ def _triangle(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     """Handle a 3-vertex simplex (triangle); return the reduced simplex and search direction."""
     c, b, a = simplex
     ab, ac, ao = b.v - a.v, c.v - a.v, -a.v
-    abc = np.cross(ab, ac)
-    if np.dot(np.cross(abc, ac), ao) > 0:
+    abc = cross(ab, ac)
+    if np.dot(cross(abc, ac), ao) > 0:
         if np.dot(ac, ao) > 0:
-            return False, [c, a], np.cross(np.cross(ac, ao), ac)
+            return False, [c, a], cross(cross(ac, ao), ac)
         return _line([b, a])
-    if np.dot(np.cross(ab, abc), ao) > 0:
+    if np.dot(cross(ab, abc), ao) > 0:
         return _line([b, a])
     if np.dot(abc, ao) > 0:
         return False, [c, b, a], abc
@@ -100,9 +101,9 @@ def _tetra(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
     """Handle a 4-vertex simplex (tetrahedron); True if it encloses the origin."""
     d, c, b, a = simplex
     ab, ac, ad, ao = b.v - a.v, c.v - a.v, d.v - a.v, -a.v
-    abc = np.cross(ab, ac)
-    acd = np.cross(ac, ad)
-    adb = np.cross(ad, ab)
+    abc = cross(ab, ac)
+    acd = cross(ac, ad)
+    adb = cross(ad, ab)
     if np.dot(abc, ao) > 0:
         return _triangle([c, b, a])
     if np.dot(acd, ao) > 0:
@@ -115,7 +116,7 @@ def _tetra(simplex: list[_Vertex]) -> tuple[bool, list[_Vertex], np.ndarray]:
 def _any_perp(v: np.ndarray) -> np.ndarray:
     """Any vector perpendicular to ``v`` (for degenerate edge cases)."""
     a = np.array([1.0, 0, 0]) if abs(v[0]) < 0.9 else np.array([0, 1.0, 0])
-    return np.cross(v, a)
+    return cross(v, a)
 
 
 def epa(A: 'SupportProxy', B: 'SupportProxy', simplex: list[_Vertex],
@@ -179,7 +180,7 @@ def _expand_to_tetra(A: 'SupportProxy', B: 'SupportProxy',
 def _orient(tetra: list[_Vertex]) -> None:
     """Order ``tetra`` so the faces :func:`epa` starts from are wound outward."""
     v0, v1, v2, v3 = tetra
-    if np.dot(np.cross(v1.v - v0.v, v2.v - v0.v), v3.v - v0.v) > 0:
+    if np.dot(cross(v1.v - v0.v, v2.v - v0.v), v3.v - v0.v) > 0:
         tetra[1], tetra[2] = tetra[2], tetra[1]
 
 
@@ -194,7 +195,7 @@ def _closest_face(verts: list[_Vertex], faces: list[tuple[int, int, int]]
     best_f: tuple[int, int, int] | None = None
     for f in faces:
         a, b, c = verts[f[0]].v, verts[f[1]].v, verts[f[2]].v
-        n = np.cross(b - a, c - a)
+        n = cross(b - a, c - a)
         ln = np.linalg.norm(n)
         if ln < EPS:
             continue
@@ -217,7 +218,7 @@ def _rebuild(verts: list[_Vertex], faces: list[tuple[int, int, int]],
     kept: list[tuple[int, int, int]] = []
     for f in faces:
         a = verts[f[0]].v
-        n = np.cross(verts[f[1]].v - a, verts[f[2]].v - a)
+        n = cross(verts[f[1]].v - a, verts[f[2]].v - a)
         if np.dot(n, w - a) > 0:               # face sees the new point
             for e in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
                 key = (e[1], e[0])

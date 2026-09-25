@@ -10,6 +10,8 @@ round-trips as OMI ``convex`` shapes.
 import numpy as np
 from numpy.typing import ArrayLike
 
+from .mathutil import cross
+
 EPS = 1e-9
 
 
@@ -40,17 +42,17 @@ def _initial_tetra(pts: np.ndarray) -> list[tuple[int, int, int]] | None:
     if np.linalg.norm(pts[i1] - pts[i0]) < EPS:
         return None
     line = pts[i1] - pts[i0]
-    areas = np.linalg.norm(np.cross(pts - pts[i0], line), axis=1)
+    areas = np.linalg.norm(cross(pts - pts[i0], line), axis=1)
     i2 = int(np.argmax(areas))
     if areas[i2] < EPS:
         return None
-    normal = np.cross(pts[i1] - pts[i0], pts[i2] - pts[i0])
+    normal = cross(pts[i1] - pts[i0], pts[i2] - pts[i0])
     dists = np.abs((pts - pts[i0]) @ normal)
     i3 = int(np.argmax(dists))
     if dists[i3] < EPS:
         return None
     verts = [i0, i1, i2, i3]
-    if np.dot(np.cross(pts[i1] - pts[i0], pts[i2] - pts[i0]), pts[i3] - pts[i0]) > 0:
+    if np.dot(cross(pts[i1] - pts[i0], pts[i2] - pts[i0]), pts[i3] - pts[i0]) > 0:
         verts[1], verts[2] = verts[2], verts[1]
     a, b, c, d = verts
     return [(a, b, c), (a, c, d), (a, d, b), (b, d, c)]
@@ -80,7 +82,7 @@ def _face_plane(pts: np.ndarray,
                 f: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray]:
     """Return a face's ``(unit_normal, reference_point)``."""
     a, b, c = pts[f[0]], pts[f[1]], pts[f[2]]
-    n = np.cross(b - a, c - a)
+    n = cross(b - a, c - a)
     ln = np.linalg.norm(n)
     if ln > EPS:
         n = n / ln
@@ -110,7 +112,7 @@ def hull_volume(vertices: np.ndarray, faces: np.ndarray) -> float:
     vol = 0.0
     for f in faces:
         a, b, c = vertices[f[0]] - origin, vertices[f[1]] - origin, vertices[f[2]] - origin
-        vol += abs(np.dot(a, np.cross(b, c))) / 6.0
+        vol += abs(np.dot(a, cross(b, c))) / 6.0
     return vol
 
 

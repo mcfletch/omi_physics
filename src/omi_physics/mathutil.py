@@ -20,6 +20,31 @@ import numpy as np
 Vec = Sequence[float] | np.ndarray
 
 
+def cross(a: Vec, b: Vec) -> np.ndarray:
+    """The cross product of 3-vectors, as :func:`numpy.cross` gives it.
+
+    ``a`` and ``b`` are 3-vectors or stacks of them, broadcast as numpy
+    does. Two single vectors are multiplied as floats, and stacks one
+    component at a time: :func:`numpy.cross` spends most of a call on 3-vectors
+    working out its axes.
+    """
+    a = np.asarray(a)
+    b = np.asarray(b)
+    if a.ndim == 1 and b.ndim == 1:
+        a0, a1, a2 = a.tolist()
+        b0, b1, b2 = b.tolist()
+        return np.array((a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0),
+                        dtype=np.result_type(a, b))
+    out = np.empty(np.broadcast_shapes(a.shape, b.shape),
+                   dtype=np.result_type(a, b))
+    a0, a1, a2 = a[..., 0], a[..., 1], a[..., 2]
+    b0, b1, b2 = b[..., 0], b[..., 1], b[..., 2]
+    out[..., 0] = a1 * b2 - a2 * b1
+    out[..., 1] = a2 * b0 - a0 * b2
+    out[..., 2] = a0 * b1 - a1 * b0
+    return out
+
+
 def normalize(v: Vec, axis: int = -1, eps: float = 1e-12) -> np.ndarray:
     """Unit-length ``v`` along ``axis``; a shorter-than-``eps`` vector is left near zero."""
     n = np.linalg.norm(v, axis=axis, keepdims=True)
@@ -47,8 +72,8 @@ def quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Rotate vector(s) ``v`` by quaternion(s) ``q`` (both broadcastable)."""
     qv = q[..., :3]
     qw = q[..., 3:4]
-    t = 2.0 * np.cross(qv, v)
-    return v + qw * t + np.cross(qv, t)
+    t = 2.0 * cross(qv, v)
+    return v + qw * t + cross(qv, t)
 
 
 def quat_conjugate(q: np.ndarray) -> np.ndarray:

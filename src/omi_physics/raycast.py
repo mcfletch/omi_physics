@@ -34,7 +34,7 @@ from typing import Any
 import numpy as np
 
 from . import model
-from .mathutil import Vec
+from .mathutil import Vec, cross
 from .trigrid import TriangleGrid
 
 log = logging.getLogger(__name__)
@@ -661,13 +661,13 @@ def _hit_triangles(origin: np.ndarray, heading: np.ndarray,
     a = triangles[:, 0]
     edge1 = triangles[:, 1] - a
     edge2 = triangles[:, 2] - a
-    across = np.cross(heading, edge2)
+    across = cross(heading, edge2)
     determinant = np.einsum('ij,ij->i', edge1, across)
     with np.errstate(divide='ignore', invalid='ignore'):
         inverse = 1.0 / determinant
         to_a = origin - a
         u = np.einsum('ij,ij->i', to_a, across) * inverse
-        edge = np.cross(to_a, edge1)
+        edge = cross(to_a, edge1)
         v = (edge @ heading) * inverse
         distance = np.einsum('ij,ij->i', edge2, edge) * inverse
     met = ((np.abs(determinant) >= _TINY)        # not parallel to the plane
@@ -682,7 +682,7 @@ def _hit_triangles(origin: np.ndarray, heading: np.ndarray,
     found = np.flatnonzero(met)
     nearest = found[int(np.argmin(distance[found]))]
     return (float(distance[nearest]),
-            _unit(np.cross(edge1[nearest], edge2[nearest])),
+            _unit(cross(edge1[nearest], edge2[nearest])),
             int(nearest))
 
 
@@ -697,7 +697,7 @@ def _hit_triangle(origin: np.ndarray, heading: np.ndarray,
     a, b, c = triangle
     edge1 = b - a
     edge2 = c - a
-    across = np.cross(heading, edge2)
+    across = cross(heading, edge2)
     determinant = float(np.dot(edge1, across))
     if abs(determinant) < _TINY:                # parallel to the plane
         return None
@@ -706,14 +706,14 @@ def _hit_triangle(origin: np.ndarray, heading: np.ndarray,
     u = float(np.dot(to_a, across)) * inverse
     if u < 0.0 or u > 1.0:
         return None
-    edge = np.cross(to_a, edge1)
+    edge = cross(to_a, edge1)
     v = float(np.dot(heading, edge)) * inverse
     if v < 0.0 or u + v > 1.0:
         return None
     distance = float(np.dot(edge2, edge)) * inverse
     if distance < 0.0 or distance > limit:
         return None
-    return (distance, _unit(np.cross(edge1, edge2)))
+    return (distance, _unit(cross(edge1, edge2)))
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:

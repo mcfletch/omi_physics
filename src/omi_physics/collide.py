@@ -31,6 +31,7 @@ from .body import (
     TriangleMeshProxy,
     TriangleProxy,
 )
+from .mathutil import cross
 
 if accelerators_disabled():
     _native = None
@@ -375,7 +376,7 @@ def capsule_triangle(cap: CapsuleProxy,
     nothing there.
     """
     v0, v1, v2 = tri.verts
-    face = np.cross(v1 - v0, v2 - v0)
+    face = cross(v1 - v0, v2 - v0)
     face_len = float(np.linalg.norm(face))
     if face_len <= EPS:
         return None                             # no area, no surface -- see above
@@ -516,13 +517,13 @@ def box_triangle_batch(box: BoxProxy, verts: np.ndarray
                       local[:, 0] - local[:, 2]], axis=1)      # (N, 3, 3)
 
     axes = [np.tile(axis, (count, 1)) for axis in np.identity(3)]
-    face = np.cross(edges[:, 0], edges[:, 1])                  # the triangle's
+    face = cross(edges[:, 0], edges[:, 1])                  # the triangle's
     axes.append(face)
     for edge in range(3):
         for axis in range(3):
             unit = np.zeros(3)
             unit[axis] = 1.0
-            axes.append(np.cross(edges[:, edge], unit))
+            axes.append(cross(edges[:, edge], unit))
 
     overlap = np.full(count, np.inf)
     direction = np.zeros((count, 3), dtype='d')
@@ -669,7 +670,7 @@ def _capsule_triangles_numpy(cap: CapsuleProxy, v0: np.ndarray, v1: np.ndarray,
     caps = (np.asarray(cap.p0, dtype='d'), np.asarray(cap.p1, dtype='d'))
     centre = (caps[0] + caps[1]) * 0.5
 
-    face = np.cross(v1 - v0, v2 - v0)
+    face = cross(v1 - v0, v2 - v0)
     face_len = np.linalg.norm(face, axis=1)
     has_face = face_len > EPS
     # Divide only where there is a face. A triangle without one is not a

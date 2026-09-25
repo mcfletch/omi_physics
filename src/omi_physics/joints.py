@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from . import mathutil
-from .mathutil import Vec
+from .mathutil import Vec, cross
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld
@@ -48,14 +48,14 @@ class _JointBase:
         """Velocity of the point at body-relative offset ``r`` on body ``i``."""
         if i < 0:
             return np.zeros(3)
-        return world.linear_velocity[i] + np.cross(world.angular_velocity[i], r)
+        return world.linear_velocity[i] + cross(world.angular_velocity[i], r)
 
     def _apply(self, world: "PhysicsWorld", i: int, r: np.ndarray, P: np.ndarray) -> None:
         """Apply impulse ``P`` at offset ``r`` to body ``i`` (no-op for the world)."""
         if i < 0:
             return
         world.linear_velocity[i] += world.inv_mass[i] * P
-        world.angular_velocity[i] += self._invI[i] @ np.cross(r, P)
+        world.angular_velocity[i] += self._invI[i] @ cross(r, P)
 
 
 class PointConstraint(_JointBase):
@@ -150,8 +150,8 @@ class DistanceConstraint(_JointBase):
             self.length = float(dist)
         self.rA = self.pa - self._pos(world, self.a)
         self.rB = self.pb - self._pos(world, self.b)
-        raxn = np.cross(self.rA, self.n)
-        rbxn = np.cross(self.rB, self.n)
+        raxn = cross(self.rA, self.n)
+        rbxn = cross(self.rB, self.n)
         k = self._inv_mass(world, self.a) + self._inv_mass(world, self.b)
         k += raxn @ self._invI[self.a] @ raxn
         k += rbxn @ self._invI[self.b] @ rbxn

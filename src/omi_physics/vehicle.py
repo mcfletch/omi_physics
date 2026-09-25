@@ -37,7 +37,7 @@ from typing import Any
 import numpy as np
 
 from . import mathutil
-from .mathutil import Vec
+from .mathutil import Vec, cross
 from .raycast import raycast_many
 
 __all__ = [
@@ -580,7 +580,7 @@ class RaycastVehicle:
         """
         spec = wheel.spec
         heading = _project(self._heading(wheel, rotation), wheel.normal)
-        sideways = np.cross(wheel.normal, heading)
+        sideways = cross(wheel.normal, heading)
         contact_velocity = self._point_velocity(wheel.contact)
         along = float(np.dot(contact_velocity, heading))
         across = float(np.dot(contact_velocity, sideways))
@@ -682,7 +682,7 @@ class RaycastVehicle:
             linear = np.asarray(self.world.linear_velocity[self.body], dtype='d')
             angular = np.asarray(self.world.angular_velocity[self.body],
                                  dtype='d')
-        return linear + np.cross(angular, point - centre)
+        return linear + cross(angular, point - centre)
 
     def _impulse(self, point: np.ndarray, impulse: np.ndarray) -> None:
         """Push on the body at a world point, and spin it as that push does.
@@ -710,7 +710,7 @@ class RaycastVehicle:
                impulse: np.ndarray) -> None:
         self.world.apply_impulse(self.body, impulse)
         self.world.apply_angular_impulse(self.body,
-                                         np.cross(point - centre, impulse))
+                                         cross(point - centre, impulse))
 
 
 def _clamp(value: float, low: float, high: float) -> float:

@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 
+from .mathutil import cross
+
 if TYPE_CHECKING:
     from .collide import Contact
     from .world import PhysicsWorld
@@ -276,9 +278,9 @@ def tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     near_x = np.abs(normal[:, 0]) >= 0.9
     seed[~near_x, 0] = 1.0
     seed[near_x, 1] = 1.0
-    t1 = np.cross(seed, normal)
+    t1 = cross(seed, normal)
     t1 /= np.linalg.norm(t1, axis=1, keepdims=True)
-    return t1, np.cross(normal, t1)
+    return t1, cross(normal, t1)
 
 
 def world_tangent(normal: np.ndarray, tangent_impulse: np.ndarray) -> np.ndarray:
@@ -297,9 +299,9 @@ def relative_motion(world: 'PhysicsWorld', a: np.ndarray, b: np.ndarray,
     of B receding along it.
     """
     at_a = (world.linear_velocity[a]
-            + np.cross(world.angular_velocity[a], point - world.position[a]))
+            + cross(world.angular_velocity[a], point - world.position[a]))
     at_b = (world.linear_velocity[b]
-            + np.cross(world.angular_velocity[b], point - world.position[b]))
+            + cross(world.angular_velocity[b], point - world.position[b]))
     relative = at_b - at_a
     along = np.einsum('ij,ij->i', relative, normal)
     across = relative - along[:, None] * normal
