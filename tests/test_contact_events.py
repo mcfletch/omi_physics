@@ -265,7 +265,7 @@ class TestSwitching:
         world.remove_body(ball)
         assert heard == []
 
-    def test_a_listener_that_raises_stops_the_step_and_nothing_is_left_queued(
+    def test_a_listener_that_raises_leaves_nothing_queued(
             self, solver_path) -> None:
         world, material, _floor = world_with_floor()
         drop(world, material, model.Shape.sphere(0.2), height=0.3)
@@ -565,6 +565,195 @@ class TestPreSolve:
         for _ in range(30):
             world.step(STEP)
         assert asked == []
+
+
+class TestAFilterVerdictLastsAsLongAsThePair:
+    def test_a_pair_that_stops_being_reported_is_asked_about_again(
+            self, solver_path) -> None:
+        verdicts = iter([Verdict.IGNORE_PAIR, Verdict.SOLVE])
+        scene = TestPreSolve().pane_world(lambda pair: next(verdicts))
+        world = scene.world
+        world.contact_reporting = 'flagged'
+        for _ in range(10):
+            world.step(STEP)
+        assert len(scene.asked) == 1
+        # Unflagged, the pair is no longer tracked, so nothing can say when
+        # the two part; flagged again, it is a new meeting.
+        world.report_contacts(scene.pane, False)
+        world.step(STEP)
+        world.report_contacts(scene.pane, True)
+        world.step(STEP)
+        assert len(scene.asked) == 2
+
+
+class TestAListenerThatRaises:
+    def test_the_step_finishes_before_the_error_is_raised(self, solver_path) -> None:
+        world, material, _floor = world_with_floor()
+        drop(world, material, model.Shape.sphere(0.2), height=0.2)
+        heard = []
+
+        def broken(event):
+            raise RuntimeError('listener failed')
+
+        world.add_contact_listener(broken)
+        world.add_contact_listener(heard.append)
+        with pytest.raises(RuntimeError, match='listener failed'):
+            world.step(STEP)
+        assert world.step_count == 1
+        assert world.time == pytest.approx(STEP)
+        assert [e.phase for e in heard] == ['begin']
+        world.remove_contact_listener(broken)
+        world.step(STEP)
+        assert world.step_count == 2
+
+    def test_a_removal_finishes_before_the_error_is_raised(self) -> None:
+        world, material, _floor = world_with_floor()
+        box = drop(world, material, model.Shape.box((1, 1, 1)), height=0.51)
+        world.contact_reporting = 'all'
+        for _ in range(10):
+            world.step(STEP)
+
+        def broken(event):
+            raise RuntimeError('listener failed')
+
+        world.add_contact_listener(broken)
+        ref = world.ref(box)
+        with pytest.raises(RuntimeError, match='listener failed'):
+            world.remove_body(box)
+        assert not world.alive(ref)
+        assert world.live_body_count == 1
+
+
+class TestEventArrays:
+    def test_each_event_owns_its_point_and_normal(self, solver_path) -> None:
+        world, material, _floor = world_with_floor()
+        drop(world, material, model.Shape.sphere(0.2), height=0.2, x=-2.0)
+        drop(world, material, model.Shape.sphere(0.2), height=0.2, x=2.0)
+        world.contact_reporting = 'all'
+        world.step(STEP)
+        first, second = begins(world.contact_log.drain())
+        assert not np.shares_memory(first.point, second.point)
+        assert not np.shares_memory(first.normal, second.normal)
+        assert first.point.base is None and first.normal.base is None
+
+
+class TestAStaleBatch:
+    def test_a_batch_from_another_step_is_not_read(self, solver_path) -> None:
+        world, material, _floor = world_with_floor()
+        drop(world, material, model.Shape.sphere(0.2), height=0.2)
+        world.contact_reporting = 'all'
+        world.report_persist = True
+        world.step(STEP)
+        real = world._collision.solver
+
+        class Stale:
+            """A solver whose batch is left over from the step before."""
+            def __init__(self):
+                self.last_batch = None
+
+            def forget(self, body):
+                real.forget(body)
+
+            def solve(self, world, contacts, dt):
+                previous = real.last_batch
+                real.solve(world, contacts, dt)
+                self.last_batch = previous
+
+        world._collision.solver = Stale()
+        world.contact_log.drain()
+        world.linear_velocity[1] = (0, -3.0, 0)
+        world.step(STEP)
+        (event,) = world.contact_log.drain()
+        # The stale batch holds the first step's impulses, not this one's.
+        assert event.impulse == pytest.approx(
+            sum(c.normal_impulse for c in world.contacts))
+
+
+class TestListenersWithoutTheLog:
+    def test_a_world_that_keeps_no_log_still_calls_its_listeners(
+            self, solver_path) -> None:
+        world, material, _floor = world_with_floor()
+        drop(world, material, model.Shape.sphere(0.2), height=0.2)
+        world.log_events = False
+        world.report_persist = True
+        heard = []
+        world.add_contact_listener(heard.append)
+        for _ in range(30):
+            world.step(STEP)
+        assert len(heard) == 30
+        assert len(world.contact_log) == 0
+
+    def test_nor_its_trigger_events(self) -> None:
+        world, _pad = trigger_world()
+        world.log_events = False
+        world.contact_reporting = 'all'
+        ball_in(world)
+        world.step(STEP)
+        assert len(world.contact_log) == 0
+
+
+class TestTheLogUnderThreads:
+    def test_every_event_is_drained_held_or_counted_as_dropped(self) -> None:
+        import sys
+        import threading
+        log = ContactLog(maxlen=64)
+        total = 20000
+        drained = []
+        done = threading.Event()
+
+        def drain():
+            while not done.is_set():
+                drained.extend(log.drain())
+
+        # Switch threads as often as the interpreter allows, so a drain lands
+        # inside an extend if anything lets it.
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        reader = threading.Thread(target=drain)
+        try:
+            reader.start()
+            for start in range(0, total, 10):
+                log.extend(range(start, start + 10))
+        finally:
+            done.set()
+            reader.join()
+            sys.setswitchinterval(interval)
+        assert len(drained) + len(log) + log.dropped == total
+
+
+class TestThreadedRemoval:
+    def test_a_removal_is_published_without_waiting_for_a_step(self) -> None:
+        world, material, _floor = world_with_floor()
+        box = drop(world, material, model.Shape.box((1, 1, 1)), height=0.51)
+        world.contact_reporting = 'all'
+        sim = ThreadedSimulation(world, sim_hz=120.0)
+        with sim.with_world():
+            for _ in range(10):
+                world.step(STEP)
+                sim._publish()
+            sim.drain_events()
+            world.remove_body(box)
+            sim.flush_events()
+        _snap, version, events = sim.latest_and_events()
+        assert version == 10
+        assert [(e.phase, e.reason) for e in events] == [('end', 'removed')]
+        assert len(world.contact_log) == 0
+
+
+class TestLiveness:
+    def test_alive_answers_for_every_slot_state(self) -> None:
+        world, material, _floor = world_with_floor()
+        ball = drop(world, material, model.Shape.sphere(0.2))
+        ref = world.ref(ball)
+        assert world.alive(ref)
+        assert not world.alive(BodyRef(99, 0))
+        world.remove_body(ball)
+        assert not world.alive(ref)
+        # A reference with the slot's new generation names nobody until a
+        # body is put there.
+        assert not world.alive(world.ref(ball))
+        again = drop(world, material, model.Shape.sphere(0.2))
+        assert again == ball and world.alive(world.ref(again))
 
 
 def test_the_module_says_what_it_exports() -> None:

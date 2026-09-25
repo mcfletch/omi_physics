@@ -29,6 +29,7 @@ The tracker works over arrays: the compiled solver hands it the contact arrays
 it has already built, the grouping by pair is a sort, and Python objects are
 built only for the events a consumer is going to receive.
 """
+import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -177,11 +178,13 @@ class ContactLog:
 
     Bounded: a consumer that stops draining loses the oldest events rather than
     growing without limit, and :attr:`dropped` counts how many it lost.
-    Appending and draining may happen on different threads.
+    Appending and draining may happen on different threads; each takes the
+    log's lock, so :attr:`dropped` counts exactly the events discarded.
     """
 
     def __init__(self, maxlen: int = 65536) -> None:
         self._events: deque[Any] = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
         self.maxlen = maxlen
         #: Events discarded because the log was full.
         self.dropped = 0
@@ -192,24 +195,23 @@ class ContactLog:
     def extend(self, events: Iterable[Any]) -> None:
         """Append ``events``, discarding the oldest past :attr:`maxlen`."""
         events = list(events)
-        overflow = len(self._events) + len(events) - self.maxlen
-        if overflow > 0:
-            self.dropped += overflow
-        self._events.extend(events)
+        with self._lock:
+            overflow = len(self._events) + len(events) - self.maxlen
+            if overflow > 0:
+                self.dropped += overflow
+            self._events.extend(events)
 
     def drain(self) -> list[Any]:
         """Every event held, oldest first, leaving the log empty."""
-        out = []
-        pop = self._events.popleft
-        while True:
-            try:
-                out.append(pop())
-            except IndexError:
-                return out
+        with self._lock:
+            out = list(self._events)
+            self._events.clear()
+        return out
 
     def clear(self) -> None:
         """Discard every event held."""
-        self._events.clear()
+        with self._lock:
+            self._events.clear()
 
 
 class ContactBatch(NamedTuple):
@@ -422,7 +424,8 @@ class ContactTracker:
         ``batch`` holds only the pairs the world reports. ``flags`` is the
         per-body flag array under ``'flagged'`` reporting: a pair that stopped
         being reported because neither body is flagged any longer is dropped
-        without an ``'end'``, since nothing says the two parted.
+        without an ``'end'``, since nothing says the two parted, and a contact
+        filter's verdict on it is dropped with it.
         """
         step, time = world.step_count, world.time
         now = _group(batch) if len(batch.a) else None
@@ -435,7 +438,11 @@ class ContactTracker:
         ended = np.setdiff1d(missing, carried, assume_unique=True)
         if flags is not None and len(ended):
             a_idx, b_idx = split_keys(was[ended])
-            ended = ended[flags[a_idx] | flags[b_idx]]
+            still_flagged = flags[a_idx] | flags[b_idx]
+            # An untracked pair's filter verdict goes with it: flagged again,
+            # the two meet afresh and the filter is asked afresh.
+            self.ignored.difference_update(was[ended[~still_flagged]].tolist())
+            ended = ended[still_flagged]
 
         events: list[ContactEvent] = []
         if now is not None:
@@ -448,7 +455,8 @@ class ContactTracker:
                 events.append(ContactEvent(
                     'begin' if fresh[row] else 'persist',
                     BodyRef(a, int(generation[a])), BodyRef(b, int(generation[b])),
-                    now.point[row], now.normal[row], float(now.approach[row]),
+                    now.point[row].copy(), now.normal[row].copy(),
+                    float(now.approach[row]),
                     float(now.impulse[row]), float(now.friction[row]),
                     float(now.slip[row]), float(now.depth[row]),
                     int(now.points[row]), step, time,
@@ -489,7 +497,8 @@ class ContactTracker:
             self.ignored.discard(key)
             events.append(ContactEvent(
                 'end', BodyRef(a, int(generation[a])), BodyRef(b, int(generation[b])),
-                self._point[row], self._normal[row], 0.0, 0.0, 0.0, 0.0, 0.0, 0,
+                self._point[row].copy(), self._normal[row].copy(),
+                0.0, 0.0, 0.0, 0.0, 0.0, 0,
                 step, time, reason=reason, solved=solved))
         return events
 

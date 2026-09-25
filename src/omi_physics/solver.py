@@ -105,6 +105,9 @@ class SequentialImpulseSolver:
         #: compiled path built them anyway; None where it did not. The contact
         #: tracker reads it rather than gathering the same values again.
         self.last_batch: ContactBatch | None = None
+        #: The world's :attr:`~omi_physics.world.PhysicsWorld.step_count` on
+        #: the step :attr:`last_batch` was built for.
+        self.last_batch_step: int | None = None
 
     def forget(self, body: int) -> None:
         """Drop the warm-start impulses of every pair ``body`` was in.
@@ -354,6 +357,7 @@ class SequentialImpulseSolver:
         self.last_batch = ContactBatch(
             a_idx, b_idx, point, normal, depth, approach, slip, nImp,
             world_tangent(normal, tImp), np.ones(K, dtype=bool))
+        self.last_batch_step = world.step_count
 
     def _solve_native(self, world: "PhysicsWorld", cons: list[_ContactConstraint],
                       invI: dict[int, np.ndarray]) -> None:

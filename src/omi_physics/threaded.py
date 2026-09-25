@@ -22,7 +22,9 @@ A snapshot is the tuple ``(position, axis_angle, awake, dynamic)``:
 
 Contact and trigger events travel with the snapshots. Each publish moves what
 the world's :attr:`~omi_physics.world.PhysicsWorld.contact_log` holds into the
-simulation's own :attr:`~ThreadedSimulation.events` log, and
+simulation's own :attr:`~ThreadedSimulation.events` log
+(:meth:`~ThreadedSimulation.flush_events` does the same between ticks, for a
+removal made under :meth:`~ThreadedSimulation.with_world`), and
 :meth:`~ThreadedSimulation.latest_and_events` hands a consumer the newest
 snapshot together with every event up to it, so a handler reads the scene in
 the pose of the step that produced the event or a later one, never an earlier
@@ -190,6 +192,20 @@ class ThreadedSimulation:
         with self._lock:
             self._snap = snap
             self._version += 1
+            self.events.extend(events)
+
+    def flush_events(self) -> None:
+        """Publish what the world has logged since the last tick, without a step.
+
+        For a change made between ticks under :meth:`with_world`: removing a
+        body logs its ``'end'`` and ``'exit'`` events at once, and this hands
+        them to the consumer on its next read rather than with the next tick.
+        They follow every event already published, so they still arrive in
+        the order they happened. Call it holding :meth:`with_world`, or with
+        the loop stopped.
+        """
+        events = self.world.contact_log.drain()
+        with self._lock:
             self.events.extend(events)
 
     # -- consumer thread -------------------------------------------------

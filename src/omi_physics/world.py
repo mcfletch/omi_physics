@@ -6,9 +6,11 @@ contiguous numpy, so integration and AABB refit are single array ops over all
 awake bodies — fast on the CPU today and GPU-shaped for later (see
 ``docs/PIPELINE.md``).
 """
+import logging
 import os
 from collections import deque
-from collections.abc import Callable, Container
+from collections.abc import Callable, Container, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -31,6 +33,8 @@ from .mathutil import Vec
 
 if TYPE_CHECKING:
     from .collide import Contact
+
+log = logging.getLogger(__name__)
 
 _TYPE_INT = {model.STATIC: 0, model.KINEMATIC: 1, model.DYNAMIC: 2}
 _STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
@@ -100,13 +104,21 @@ class PhysicsWorld:
         #: ``'begin'`` and ``'end'`` are reported.
         self.report_persist = False
         #: Contact and trigger events of every step, in order, until drained.
-        #: Filled while :attr:`contact_reporting` is not ``'off'``.
+        #: Filled while :attr:`contact_reporting` is not ``'off'`` and
+        #: :attr:`log_events` is on.
         self.contact_log = ContactLog()
+        #: Whether events are kept in :attr:`contact_log`. A world whose events
+        #: go only to its listeners turns it off, and the log stays empty.
+        self.log_events = True
         self.contact_listeners: list[Callable[[ContactEvent], None]] = []
         self._tracker = ContactTracker()
         self._contact_filter: Callable[[PairPreview], Any] | None = None
         self._undelivered: deque[ContactEvent] = deque()
         self._delivering = False
+        #: The first exception a listener raised during the current step or
+        #: removal, raised once that has finished.
+        self._listener_error: Exception | None = None
+        self._listener_depth = 0
         self.joint_constraints: list[Any] = []
         self.joint_iterations = 10
 
@@ -120,7 +132,7 @@ class PhysicsWorld:
     _SCALAR_I = ('motion_type', 'collider_shape', 'collider_material',
                  'collider_filter', 'trigger_shape', 'trigger_filter', 'island')
     #: The remaining per-body columns, each with a type of its own.
-    _SLOT = ('awake', 'generation', 'report', 'sensor')
+    _SLOT = ('awake', 'generation', 'report', 'sensor', 'vacant')
 
     # Columnar backing arrays, built by ``_alloc``/``_grow`` via ``setattr``.
     _position: np.ndarray
@@ -151,6 +163,7 @@ class PhysicsWorld:
     _generation: np.ndarray
     _report: np.ndarray
     _sensor: np.ndarray
+    _vacant: np.ndarray
 
     def _alloc(self, cap: int) -> None:
         """Allocate the columnar arrays for ``cap`` bodies (all fields zeroed)."""
@@ -166,6 +179,8 @@ class PhysicsWorld:
         self._generation = np.zeros(cap, dtype=np.int64)
         self._report = np.zeros(cap, dtype=bool)
         self._sensor = np.zeros(cap, dtype=bool)
+        #: True for a slot whose body has been removed and not yet replaced.
+        self._vacant = np.zeros(cap, dtype=bool)
         self._orientation[:, 3] = 1.0
         self._prev_orientation[:, 3] = 1.0
 
@@ -441,7 +456,7 @@ class PhysicsWorld:
         """Whether the body ``ref`` names is still in the world."""
         i = ref.index
         return (0 <= i < self._n and int(self._generation[i]) == ref.generation
-                and i not in self._free)
+                and not self._vacant[i])
 
     def handle_of(self, ref: BodyRef) -> Any:
         """The ``handle`` given to :meth:`add_body` for ``ref``; None once it is removed."""
@@ -457,7 +472,7 @@ class PhysicsWorld:
                          excluded: 'list[Contact]') -> None:
         """Run the contact tracker over the step just solved, and deliver its events."""
         batch = getattr(solver, 'last_batch', None)
-        if batch is None or len(batch.a) != len(contacts):
+        if batch is None or getattr(solver, 'last_batch_step', None) != self.step_count:
             batch = ContactBatch.from_contacts(contacts)
         if excluded:
             batch = batch.concatenate(ContactBatch.from_contacts(excluded, solved=False))
@@ -475,8 +490,11 @@ class PhysicsWorld:
         For a body something other than the solver collides: a character
         controller reports its capsule meeting the static world through this,
         so its touches reach the same listeners and log as every other.
+        A listener that raises is raised from here once every listener has
+        been called.
         """
-        self._deliver(events)
+        with self._listener_errors_raised_after():
+            self._deliver(events)
 
     def _deliver(self, events: list[ContactEvent]) -> None:
         """Log ``events`` and call the contact listeners with each, in order.
@@ -487,7 +505,8 @@ class PhysicsWorld:
         """
         if not events:
             return
-        self.contact_log.extend(events)
+        if self.log_events:
+            self.contact_log.extend(events)
         if not self.contact_listeners:
             return
         self._undelivered.extend(events)
@@ -497,17 +516,57 @@ class PhysicsWorld:
         try:
             while self._undelivered:
                 event = self._undelivered.popleft()
-                for fn in list(self.contact_listeners):
-                    fn(event)
+                self._call_listeners(self.contact_listeners, event)
         except BaseException:
             self._undelivered.clear()
             raise
         finally:
             self._delivering = False
 
+    def _call_listeners(self, listeners: list[Callable[..., None]],
+                        *args: Any) -> None:
+        """Call each of ``listeners`` with ``args``, holding back what they raise.
+
+        The first exception is kept for :meth:`_listener_errors_raised_after`
+        to raise; any after it in the same step are logged.
+        """
+        for fn in list(listeners):
+            try:
+                fn(*args)
+            except Exception as exc:
+                if self._listener_error is None:
+                    self._listener_error = exc
+                else:
+                    log.error('Listener %r also raised', fn, exc_info=exc)
+
+    @contextmanager
+    def _listener_errors_raised_after(self) -> Iterator[None]:
+        """Run the block to the end, then raise the first error a listener raised.
+
+        A listener runs part-way through a step or a removal. Raising from it
+        there would leave the world half-way through the change, so the error
+        waits until the outermost such block has finished. An exception the
+        block raises itself propagates at once, and a held listener error is
+        then logged.
+        """
+        self._listener_depth += 1
+        try:
+            yield
+        except BaseException:
+            if self._listener_depth == 1 and self._listener_error is not None:
+                log.error('Listener raised during a failed step',
+                          exc_info=self._listener_error)
+                self._listener_error = None
+            raise
+        finally:
+            self._listener_depth -= 1
+        if self._listener_depth == 0 and self._listener_error is not None:
+            failure, self._listener_error = self._listener_error, None
+            raise failure
+
     def _log_triggers(self, fired: list[tuple[str, int, int]]) -> None:
         """Record this step's trigger events in :attr:`contact_log`."""
-        if self._reporting == 'off' or not fired:
+        if self._reporting == 'off' or not fired or not self.log_events:
             return
         flagged = self._reporting == 'flagged'
         self.contact_log.extend(
@@ -560,6 +619,7 @@ class PhysicsWorld:
         if self._free:
             i = self._free.pop()
             self._reset_body(i)
+            self._vacant[i] = False
         else:
             if self._n >= self._cap:
                 self._grow()
@@ -672,23 +732,26 @@ class PhysicsWorld:
 
         Every pair the body was touching ends, with ``reason='removed'``, and
         every trigger it was inside reports an ``'exit'``, now rather than on
-        the next step.
+        the next step. A listener that raises on one of those is raised from
+        here once the body is out of the world, as :meth:`step` does.
         """
         if not 0 <= i < self._n:
             raise IndexError("no body %r to remove" % (i,))
-        if i in self._free:
+        if self._vacant[i]:
             return
-        self._retire(i)
-        self._generation[i] += 1
-        self._reset_body(i)
-        self._free.append(i)
-        if i < len(self.bodies):
-            self.bodies[i] = None
-        # Anything cached against this slot is about a body that is gone. Left
-        # behind it is both a leak -- a world that streams for an hour keeps
-        # every mesh it ever held -- and, once the slot is handed out again,
-        # an answer about the wrong geometry.
-        self._forget_body(i)
+        with self._listener_errors_raised_after():
+            self._retire(i)
+            self._generation[i] += 1
+            self._reset_body(i)
+            self._vacant[i] = True
+            self._free.append(i)
+            if i < len(self.bodies):
+                self.bodies[i] = None
+            # Anything cached against this slot is about a body that is gone.
+            # Left behind it is both a leak -- a world that streams for an hour
+            # keeps every mesh it ever held -- and, once the slot is handed out
+            # again, an answer about the wrong geometry.
+            self._forget_body(i)
 
     def _retire(self, i: int) -> None:
         """End body ``i``'s contacts and trigger overlaps, and drop its warm start."""
@@ -856,7 +919,17 @@ class PhysicsWorld:
         return self._accumulator / self.fixed_dt
 
     def step(self, dt: float) -> None:
-        """Advance the whole world by one fixed step ``dt``: forces, collision, joints, sleep."""
+        """Advance the whole world by one fixed step ``dt``: forces, collision, joints, sleep.
+
+        Contact and trigger listeners run inside the step. One that raises does
+        not stop it: every other listener is still called, the step runs to
+        the end, and the first exception is raised from here once it has.
+        """
+        with self._listener_errors_raised_after():
+            self._step(dt)
+
+    def _step(self, dt: float) -> None:
+        """The body of :meth:`step`."""
         if self._backend_mode == 'auto':
             self._select_auto_backend()
         self._prev_position[:self._n] = self.position
@@ -1073,9 +1146,14 @@ class PhysicsWorld:
 
     def dispatch_trigger(self, event_type: str, trigger_index: int,
                          other_index: int) -> None:
-        """Notify every registered trigger listener of one overlap event."""
-        for fn in self.trigger_listeners:
-            fn(event_type, trigger_index, other_index)
+        """Notify every registered trigger listener of one overlap event.
+
+        Every listener is called; the first exception one raises is raised
+        after the last, or after the step when this runs inside one.
+        """
+        with self._listener_errors_raised_after():
+            self._call_listeners(self.trigger_listeners, event_type,
+                                 trigger_index, other_index)
 
     def add_joint_constraint(self, constraint: Any) -> Any:
         """Register a joint constraint, waking the bodies it touches; return it."""
