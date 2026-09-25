@@ -184,8 +184,15 @@ and `time` it happened at. An `'end'` carries a `reason`: `'separated'`, or
   body's slot is reused, and a reference to the old body never matches the new
   one.
 - The log is bounded (`ContactLog(maxlen=65536)`) and counts what it discarded
-  in `dropped`. Under `ThreadedSimulation`, `latest_and_events()` returns the
-  newest snapshot with every event up to it.
+  in `dropped`. A world whose events go only to its listeners sets
+  `world.log_events = False`, and the log stays empty. Under
+  `ThreadedSimulation`, `latest_and_events()` returns the newest snapshot with
+  every event up to it, and `flush_events()`, called under `with_world()`,
+  publishes the events a removal logged without waiting for the next tick.
+- A listener runs inside the step. One that raises does not stop it: the other
+  listeners are still called, the step (or `remove_body`) finishes, and the
+  first exception is raised from `step()` once it has.
+- `ContactEvent.point` and `normal` are arrays each event owns.
 
 A walking character has a body in the world when it is built with
 `CharacterController(world, ..., body=True)`. The body is a *sensor*
@@ -204,6 +211,42 @@ reduced `mass` and the `impulse` the blow carries) and returns
 `Verdict.SOLVE`, `Verdict.IGNORE_STEP` or `Verdict.IGNORE_PAIR`. A pane of
 glass that breaks under the blow answers `IGNORE_PAIR`, and the ball carries on
 through with its momentum; the pair's events arrive with `solved=False`.
+Under `'flagged'` reporting, a pair whose bodies are both unflagged is no
+longer tracked, and its verdict is dropped with it: flagged again, the filter
+is asked about it afresh.
+
+### What a line meets
+
+`omi_physics.raycast` answers what a ray, a line of sight or a bundle of rays
+meets among the world's colliders. Sensors are passed through.
+
+```python
+from omi_physics import model
+from omi_physics.raycast import bodies_along, line_of_sight, raycast, raycast_many
+
+hit = raycast(world, origin, direction, max_distance=100.0, skip=(shooter,))
+if hit is not None:
+    spark(hit.point, hit.normal)        # the normal faces back along the ray
+
+team_shot = model.CollisionFilter(collisionSystems=('shot',),
+                                  notCollideWithSystems=('red',))
+hit = raycast(world, origin, direction, filter=team_shot)
+```
+
+- `raycast` returns the nearest `RayHit` (`body`, `distance`, `point`,
+  `normal`, and on a trimesh the `triangle` index), or None. The direction
+  need not be normalised.
+- `bodies_along` returns every hit, nearest first; `line_of_sight(world, a, b)`
+  says whether nothing lies between two points.
+- `raycast_many(world, origins, directions)` casts a bundle together and
+  returns what each ray would have answered on its own. The rays of a bundle
+  are tested against the triangles near the box the whole bundle sweeps, in
+  one pass of `rays × triangles`, so its temporary arrays grow with both: a
+  bundle spread across a level over a dense mesh is better cast as several.
+- `skip` names bodies the ray passes through. `filter` is a
+  `model.CollisionFilter` for the ray itself: it meets only bodies whose
+  collider's filter it collides with, in the same terms as two colliders.
+  `raycast_many` and `bodies_along` take both as `raycast` does.
 
 ### Driving a car
 

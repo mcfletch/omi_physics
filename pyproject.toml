@@ -67,6 +67,7 @@ dev = [
 Homepage = "https://github.com/mcfletch/omi_physics"
 Repository = "https://github.com/mcfletch/omi_physics"
 Documentation = "https://github.com/mcfletch/omi_physics/tree/main/docs"
+Changelog = "https://github.com/mcfletch/omi_physics/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

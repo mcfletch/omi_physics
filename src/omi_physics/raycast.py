@@ -157,8 +157,12 @@ def raycast_many(world: Any, origins: Any, directions: Any,
     met nothing.
 
     Nothing here assumes the rays are parallel or that they start together --
-    a bundle spread across a level simply shares less. ``skip`` and ``filter``
-    are as for :func:`raycast`.
+    a bundle spread across a level simply shares less. Every ray is tested
+    against every candidate triangle of a mesh in one pass, holding a few
+    ``(rays, triangles, 3)`` arrays of doubles: 4 rays against 2,000 triangles
+    is about 200 KB each, and a bundle spread across a level over a dense mesh
+    gathers many more triangles, so it is better cast as several. ``skip`` and
+    ``filter`` are as for :func:`raycast`.
     """
     starts = np.asarray(origins, dtype='d').reshape(-1, 3)
     headings = np.asarray(directions, dtype='d').reshape(-1, 3)
@@ -695,7 +699,9 @@ def _hit_triangles_many(origins: np.ndarray, headings: np.ndarray,
 
     Every ray against every triangle in one pass, ``(R, T)`` wide: a bundle's
     rays share their candidates, and a pass per ray pays numpy's fixed cost
-    per operation once for each of them.
+    per operation once for each of them. The temporaries are ``(R, T, 3)``
+    doubles, 24 bytes per ray per candidate triangle each, so memory grows
+    with the product of the two.
     """
     a = triangles[:, 0]
     edge1 = triangles[:, 1] - a
