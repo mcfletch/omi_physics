@@ -94,7 +94,12 @@ markers = [
 # The OGC rules (openglcontext-checks) this project is clean of, held by
 # the workspace preflight. The others join as the project reaches zero of
 # each; the counts are in openglcontext/plans/DEFECT-PREVENTION.md.
-select = ["OGC131", "OGC141", "OGC161", "OGC221", "OGC223"]
+select = ["OGC101", "OGC102", "OGC111", "OGC121", "OGC131", "OGC141", "OGC161", "OGC221", "OGC223"]
+
+[tool.openglcontext-checks.scopes]
+# What reads a document's OMI_physics values, which OGC101, OGC102 and
+# OGC111 hold to checked values, sizes and paths.
+loader = ["src/omi_physics/omi_gltf.py"]
 
 [tool.ruff]
 # Every setting ruff needs is here, so `ruff check` and `ruff format` in the
