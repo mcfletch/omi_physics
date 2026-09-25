@@ -32,7 +32,7 @@ built only for the events a consumer is going to receive.
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -127,6 +127,10 @@ class TriggerEvent:
     other: BodyRef
     step: int
     time: float
+    #: Where ``other`` was when the overlap was tested, in world coordinates:
+    #: its position at the start of the step, or where it was taken out of the
+    #: world, for an ``'exit'`` on removal.
+    point: np.ndarray = field(default_factory=lambda: np.zeros(3), compare=False)
 
     kind = 'trigger'
 

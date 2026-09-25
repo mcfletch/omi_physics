@@ -756,6 +756,35 @@ class TestLiveness:
         assert again == ball and world.alive(world.ref(again))
 
 
+class TestWhereATriggerWasEntered:
+    def test_a_trigger_event_carries_where_the_body_was(self) -> None:
+        world, _pad = trigger_world()
+        ball = ball_in(world, position=(-3.0, 0, 0))
+        world.linear_velocity[ball] = (30.0, 0, 0)
+        world.contact_reporting = 'all'
+        entered = None
+        for _ in range(20):
+            before = world.position[ball].copy()
+            world.step(STEP)
+            for event in world.contact_log.drain():
+                if event.phase == 'enter':
+                    entered = (event, before)
+        event, there = entered
+        assert np.allclose(event.point, there)
+        assert event.point[0] < world.position[ball][0]
+
+
+class TestTheWorldLock:
+    def test_it_can_be_taken_again_by_the_thread_holding_it(self) -> None:
+        world, _material, _floor = world_with_floor()
+        sim = ThreadedSimulation(world)
+        with sim.with_world():
+            again = sim.with_world().acquire(timeout=0.5)
+            if again:
+                sim.with_world().release()
+        assert again
+
+
 def test_the_module_says_what_it_exports() -> None:
     assert set(contactevents.__all__) >= {
         'BodyRef', 'ContactEvent', 'TriggerEvent', 'ContactLog', 'ContactTracker',

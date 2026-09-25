@@ -571,7 +571,7 @@ class PhysicsWorld:
         flagged = self._reporting == 'flagged'
         self.contact_log.extend(
             TriggerEvent(phase, self.ref(trigger), self.ref(other),
-                         self.step_count, self.time)
+                         self.step_count, self.time, self._position[other].copy())
             for phase, trigger, other in fired
             if (phase != 'stay' or self.report_persist)
             and (not flagged or self._report[trigger] or self._report[other]))

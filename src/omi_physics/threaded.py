@@ -91,7 +91,7 @@ class ThreadedSimulation:
         self._sim_dt = 1.0 / sim_hz
         self.sim_hz = sim_hz
         self._lock = threading.Lock()
-        self._world_lock = threading.Lock()
+        self._world_lock = threading.RLock()
         self._snap: Snapshot | None = None
         self._version = 0                        # bumped each publish
         self._thread: threading.Thread | None = None
@@ -119,8 +119,12 @@ class ThreadedSimulation:
             self._thread.join(timeout=2.0)
             self._thread = None
 
-    def with_world(self) -> threading.Lock:
-        """Context manager giving exclusive access to the world (pauses stepping)."""
+    def with_world(self) -> 'threading.RLock':
+        """Context manager giving exclusive access to the world (pauses stepping).
+
+        Re-entrant: code already holding it may call something that takes it
+        again.
+        """
         return self._world_lock
 
     @property

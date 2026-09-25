@@ -25,7 +25,8 @@ compatibility promise.
 - `PhysicsWorld.set_contact_filter`: a `PairPreview` of a reported pair before
   its first solve, answered with a `Verdict` of `SOLVE`, `IGNORE_STEP` or
   `IGNORE_PAIR`.
-- Trigger events (`TriggerEvent`) join the contact log in step order. A
+- Trigger events (`TriggerEvent`, with the entering body's `point`) join the
+  contact log in step order. A
   trigger's `collisionFilter` is read from glTF, written back and honoured, and
   a kinematic body enters triggers.
 - Sensor bodies (`add_body(..., sensor=True)`, `PhysicsWorld.is_sensor`): they
@@ -38,6 +39,8 @@ compatibility promise.
 - `ThreadedSimulation.latest_and_events()` returns the newest snapshot with
   every event published up to it, and `flush_events()` publishes what a
   removal made under `with_world()` logged without waiting for a tick.
+- `ThreadedSimulation.with_world()` is re-entrant, so code holding it may call
+  something that takes it again.
 - `gravity.Region` is a protocol: any object with `contains(position)` is a
   region.
 

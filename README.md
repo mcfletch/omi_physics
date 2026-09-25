@@ -176,7 +176,8 @@ and `time` it happened at. An `'end'` carries a `reason`: `'separated'`, or
   settles on the floor gets a `'begin'` and no `'end'` until something moves
   it off.
 - Trigger overlaps go into the same log as `TriggerEvent(phase, trigger, other,
-  step, time)`, in step order with the contacts. A trigger's
+  step, time, point)`, in step order with the contacts; `point` is where
+  `other` was when the overlap was tested. A trigger's
   `collisionFilter` says which bodies it reacts to.
 - Bodies are named by `BodyRef(index, generation)`. `world.ref(i)` makes one,
   `world.alive(ref)` says whether that body is still in the world, and
@@ -189,6 +190,7 @@ and `time` it happened at. An `'end'` carries a `reason`: `'separated'`, or
   `ThreadedSimulation`, `latest_and_events()` returns the newest snapshot with
   every event up to it, and `flush_events()`, called under `with_world()`,
   publishes the events a removal logged without waiting for the next tick.
+  `with_world()` is re-entrant.
 - A listener runs inside the step. One that raises does not stop it: the other
   listeners are still called, the step (or `remove_body`) finishes, and the
   first exception is raised from `step()` once it has.
