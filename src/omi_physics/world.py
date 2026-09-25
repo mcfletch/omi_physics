@@ -25,6 +25,7 @@ from .contactevents import (
     PairPreview,
     Reporting,
     TriggerEvent,
+    measure,
 )
 from .mathutil import Vec
 
@@ -119,7 +120,7 @@ class PhysicsWorld:
     _SCALAR_I = ('motion_type', 'collider_shape', 'collider_material',
                  'collider_filter', 'trigger_shape', 'trigger_filter', 'island')
     #: The remaining per-body columns, each with a type of its own.
-    _SLOT = ('awake', 'generation', 'report')
+    _SLOT = ('awake', 'generation', 'report', 'sensor')
 
     # Columnar backing arrays, built by ``_alloc``/``_grow`` via ``setattr``.
     _position: np.ndarray
@@ -149,6 +150,7 @@ class PhysicsWorld:
     _awake: np.ndarray
     _generation: np.ndarray
     _report: np.ndarray
+    _sensor: np.ndarray
 
     def _alloc(self, cap: int) -> None:
         """Allocate the columnar arrays for ``cap`` bodies (all fields zeroed)."""
@@ -163,6 +165,7 @@ class PhysicsWorld:
         self._awake = np.ones(cap, dtype=bool)
         self._generation = np.zeros(cap, dtype=np.int64)
         self._report = np.zeros(cap, dtype=bool)
+        self._sensor = np.zeros(cap, dtype=bool)
         self._orientation[:, 3] = 1.0
         self._prev_orientation[:, 3] = 1.0
 
@@ -369,6 +372,18 @@ class PhysicsWorld:
             self._tracker.reset()
         self._reporting = level
 
+    def is_sensor(self, i: int) -> bool:
+        """Whether body ``i``'s collider only senses.
+
+        A sensor enters trigger volumes, and its touches with dynamic bodies
+        are reported as contact events with ``solved`` False, but nothing is
+        ever solved against it: it pushes nothing and nothing pushes it. Rays
+        pass through it. A walking character's body is one
+        (:class:`~omi_physics.character.CharacterController`), since the
+        controller moves it and collides it itself.
+        """
+        return bool(self._sensor[i])
+
     def report_contacts(self, i: int, on: bool = True) -> None:
         """Flag body ``i`` so its pairs are recorded under ``'flagged'`` reporting."""
         self._report[i] = on
@@ -521,12 +536,14 @@ class PhysicsWorld:
                  trigger: model.Trigger | None = None,
                  position: Vec = (0, 0, 0),
                  orientation: Vec = (0, 0, 0, 1),
-                 handle: Any = None, report_contacts: bool = False) -> int:
+                 handle: Any = None, report_contacts: bool = False,
+                 sensor: bool = False) -> int:
         """Create a body from its motion/collider/trigger; return its index.
 
         ``handle`` is an opaque per-body value the caller can retrieve later (the
         scenegraph node the body drives, for instance).  ``report_contacts``
         flags it for ``'flagged'`` contact reporting (:meth:`report_contacts`).
+        ``sensor`` makes its collider a sensor (:meth:`is_sensor`).
         Grows the columnar arrays if needed.
         """
         if motion is None:
@@ -554,6 +571,7 @@ class PhysicsWorld:
         self._awake[i] = True
         self._sleep_timer[i] = 0.0
         self._report[i] = report_contacts
+        self._sensor[i] = sensor
 
         shape: model.Shape | None = None
         if collider is not None and 0 <= collider.shape < len(self.shapes):
@@ -695,6 +713,7 @@ class PhysicsWorld:
         self._trigger_shape[i] = -1
         self._trigger_filter[i] = -1
         self._report[i] = False
+        self._sensor[i] = False
         self._motion_type[i] = _TYPE_INT[model.STATIC]
         self._linear_velocity[i] = 0.0
         self._angular_velocity[i] = 0.0
@@ -1121,10 +1140,18 @@ class _CollisionStages:
         """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
         pairs = self.broadphase.pairs(world)
         solid: list[tuple[int, int]] = []
+        sensed: list[tuple[int, int]] = []
+        reporting = world.contact_reporting != 'off'
+        sensors = world._sensor
         has_trigger = False
         for i, j in pairs:
             if world.trigger_shape[i] >= 0 or world.trigger_shape[j] >= 0:
                 has_trigger = True
+            elif sensors[i] or sensors[j]:
+                # Touches a sensor has are only ever reported, never solved.
+                if (reporting and world.collider_shape[i] >= 0
+                        and world.collider_shape[j] >= 0):
+                    sensed.append((i, j))
             # A pair at rest (both asleep/static) needs no work; it is revived
             # when a mover touches one of them (solver wakes the sleeper).
             # Neither does a pair with no dynamic body, which nothing can move.
@@ -1134,11 +1161,15 @@ class _CollisionStages:
                          or world.motion_type[j] == _DYNAMIC)):
                 solid.append((i, j))
         contacts = self.narrowphase.generate(world, solid)
-        reporting = world.contact_reporting != 'off'
         excluded: list[Contact] = []
         if reporting and contacts and world._contact_filter is not None:
             contacts, excluded = world._tracker.presolve(
                 world, contacts, world._contact_filter, world._reports_pair)
+        if sensed:
+            touched = self.narrowphase.generate(world, sensed)
+            if touched:
+                measure(world, touched)
+                excluded += touched
         self.contacts = contacts
         world.contacts = contacts
         self.solver.solve(world, contacts, dt)

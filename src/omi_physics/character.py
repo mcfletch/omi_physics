@@ -108,8 +108,14 @@ class CharacterController:
 
     def __init__(self, world: "PhysicsWorld",
                  capabilities: CharacterCapabilities | None = None,
-                 position: Vec = (0, 0, 0), gravity: float = 9.81) -> None:
-        """Place a capsule of ``capabilities`` at ``position`` (its centre) in ``world``."""
+                 position: Vec = (0, 0, 0), gravity: float = 9.81,
+                 body: bool = False) -> None:
+        """Place a capsule of ``capabilities`` at ``position`` (its centre) in ``world``.
+
+        ``body`` gives the character a body in the world as well: a kinematic
+        sensor capsule, standing height, that follows it on every
+        :meth:`update` and :meth:`safe_bind` (:attr:`body`).
+        """
         self.world = world
         self.caps = capabilities or CharacterCapabilities()
         self.gravity_mag = gravity
@@ -168,6 +174,17 @@ class CharacterController:
         # `_near_triangles`.
         self._near_cache: dict[int, tuple[np.ndarray, np.ndarray,
                                           np.ndarray]] = {}
+        #: The character's body in the world, or None. A sensor
+        #: (:meth:`~omi_physics.world.PhysicsWorld.is_sensor`): it enters
+        #: trigger volumes and its touches with moving bodies are reported,
+        #: and nothing is solved against it, so the character still collides
+        #: only with what the controller collides it with.
+        self.body: int | None = None
+        if body:
+            shape = world.add_shape(self._shape(self.caps.standHeight))
+            self.body = world.add_body(model.Motion(type=model.KINEMATIC),
+                                       collider=model.Collider(shape=shape),
+                                       position=tuple(self.position), sensor=True)
 
     # -- geometry --------------------------------------------------------
     @property
@@ -364,10 +381,10 @@ class CharacterController:
 
     # -- world queries ---------------------------------------------------
     def _static_bodies(self) -> Iterator[int]:
-        """Yield the index of each non-kinematic body that has a collider."""
+        """Yield the index of each non-dynamic body with a collider that is not a sensor."""
         w = self.world
         for j in range(w.body_count):
-            if w.collider_shape[j] >= 0 and w.motion_type[j] != 2:
+            if w.collider_shape[j] >= 0 and w.motion_type[j] != 2 and not w.is_sensor(j):
                 yield j
 
     def _static_proxy(self, j: int) -> Proxy:
@@ -519,6 +536,20 @@ class CharacterController:
             if not self.flying:
                 self._tick_jump_windows(piece, was_grounded)
         self.velocity = (self.position - start) / dt if dt > 0 else np.zeros(3)
+        self._carry_body()
+
+    def _carry_body(self) -> None:
+        """Put :attr:`body` where the capsule is, moving at the capsule's velocity."""
+        if self.body is None:
+            return
+        self.world.place_body(self.body, position=self.position)
+        self.world.linear_velocity[self.body] = self.velocity
+
+    def remove(self) -> None:
+        """Take :attr:`body` out of the world; the controller keeps working without it."""
+        if self.body is not None:
+            self.world.remove_body(self.body)
+            self.body = None
 
     def _reach(self) -> tuple[float, float]:
         """How far the capsule may travel before a surface stops overlapping it.
@@ -934,6 +965,12 @@ class CharacterController:
         the floor below (or pop up if bound beneath it).  If no free space is
         found, keep the pose but flag ``stuck`` (and enter fly).
         """
+        bound = self._bind(position, search)
+        self._carry_body()
+        return bound
+
+    def _bind(self, position: Vec, search: float) -> bool:
+        """:meth:`safe_bind` without carrying the body along."""
         self.position = np.asarray(position, dtype='d').copy()
         self.stuck = False
         self.flying = False                         # a fresh bind starts on foot

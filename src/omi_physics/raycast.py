@@ -306,8 +306,11 @@ def unsupported_shapes(world: Any) -> set[str]:
 
 def _candidates(world: Any, count: int, ignored: set[int],
                 filter: model.CollisionFilter | None) -> np.ndarray:
-    """Which bodies a ray may meet: a collider, not skipped, and admitted by ``filter``."""
+    """Which bodies a ray may meet: a collider, no sensor, not skipped, admitted by ``filter``."""
     live = np.asarray(world.collider_shape[:count]) >= 0
+    sensors = getattr(world, '_sensor', None)
+    if sensors is not None:
+        live &= ~sensors[:count]
     if ignored:
         live[np.fromiter(ignored, dtype=int, count=len(ignored))] = False
     if filter is not None:

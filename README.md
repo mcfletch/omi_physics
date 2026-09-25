@@ -187,6 +187,15 @@ and `time` it happened at. An `'end'` carries a `reason`: `'separated'`, or
   in `dropped`. Under `ThreadedSimulation`, `latest_and_events()` returns the
   newest snapshot with every event up to it.
 
+A walking character has a body in the world when it is built with
+`CharacterController(world, ..., body=True)`. The body is a *sensor*
+(`add_body(..., sensor=True)`, `world.is_sensor(i)`): a kinematic capsule that
+follows the character, enters trigger volumes, and has its touches with moving
+bodies reported as contact events with `solved=False`. Nothing is solved
+against a sensor, so it pushes no crate and no crate pushes it, and rays pass
+through it. The controller still collides the character with the static world
+itself.
+
 `set_contact_filter(fn)` decides about a pair **before** it is solved, on the
 step it would begin. `fn` receives a `PairPreview` (the pair, `approach`, the
 reduced `mass` and the `impulse` the blow carries) and returns

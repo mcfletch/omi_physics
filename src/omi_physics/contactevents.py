@@ -306,6 +306,23 @@ def relative_motion(world: 'PhysicsWorld', a: np.ndarray, b: np.ndarray,
     return -along, np.linalg.norm(across, axis=1)
 
 
+def measure(world: 'PhysicsWorld', contacts: Sequence['Contact']) -> None:
+    """Record approach and slip on contacts the solver will not see.
+
+    The solver records both on what it solves; a contact left out of the
+    solve -- a pair a contact filter ignored, or a sensor's touch -- is
+    measured here instead, at the same moment of the step.
+    """
+    a = np.fromiter((c.a for c in contacts), dtype=np.intp, count=len(contacts))
+    b = np.fromiter((c.b for c in contacts), dtype=np.intp, count=len(contacts))
+    point = np.array([c.point for c in contacts], dtype='d')
+    normal = np.array([c.normal for c in contacts], dtype='d')
+    approach, slip = relative_motion(world, a, b, point, normal)
+    for c, closing, sliding in zip(contacts, approach.tolist(), slip.tolist(),
+                                   strict=True):
+        c.approach, c.slip = closing, sliding
+
+
 def pair_keys(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """One int64 per ``(a, b)`` pair, sortable and comparable in bulk."""
     return (np.asarray(a, dtype=np.int64) << 32) | np.asarray(b, dtype=np.int64)
@@ -525,20 +542,8 @@ class ContactTracker:
             elif verdict is not Verdict.IGNORE_STEP:
                 solve += points
         if excluded:
-            self._measure(world, excluded)
+            measure(world, excluded)
         return solve, excluded
-
-    @staticmethod
-    def _measure(world: 'PhysicsWorld', contacts: list['Contact']) -> None:
-        """Record approach and slip on contacts the solver will not see."""
-        a = np.fromiter((c.a for c in contacts), dtype=np.intp, count=len(contacts))
-        b = np.fromiter((c.b for c in contacts), dtype=np.intp, count=len(contacts))
-        point = np.array([c.point for c in contacts], dtype='d')
-        normal = np.array([c.normal for c in contacts], dtype='d')
-        approach, slip = relative_motion(world, a, b, point, normal)
-        for c, closing, sliding in zip(contacts, approach.tolist(), slip.tolist(),
-                                       strict=True):
-            c.approach, c.slip = closing, sliding
 
     @staticmethod
     def _preview(world: 'PhysicsWorld', a: int, b: int,
