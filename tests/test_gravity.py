@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from omi_physics import model
-from omi_physics.gravity import GravityVolume, SphereRegion
+from omi_physics.gravity import GravityVolume, Region, SphereRegion
 from omi_physics.world import PhysicsWorld
 
 DT = 1.0 / 120.0
@@ -60,3 +60,21 @@ def test_region_bounds_limit_effect():
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))
+
+
+def test_a_region_is_anything_that_answers_contains():
+    """A game's own shape -- a zone, a trigger -- is a region as it stands."""
+    class Slab:
+        def contains(self, pos: np.ndarray) -> bool:
+            return bool(pos[1] < 5.0)
+
+    region: Region = Slab()
+    world = PhysicsWorld(gravity=model.Gravity(gravity=0.0))
+    world.add_gravity_volume(GravityVolume(
+        model.Gravity(type=model.DIRECTIONAL, gravity=9.81, direction=(0, -1, 0)),
+        region))
+    inside = world.add_body(model.Motion(type=model.DYNAMIC), position=(0, 0, 0))
+    above = world.add_body(model.Motion(type=model.DYNAMIC), position=(0, 50, 0))
+    world.step(DT)
+    assert world.linear_velocity[inside][1] < 0
+    assert world.linear_velocity[above][1] == 0

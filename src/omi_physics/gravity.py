@@ -6,6 +6,8 @@ ascending ``priority`` (highest wins), honouring ``replace`` (override) and
 ``stop`` (halt accumulation).
 """
 
+from typing import Protocol
+
 import numpy as np
 
 from . import mathutil, model
@@ -48,7 +50,14 @@ class InfiniteRegion:
         return True
 
 
-Region = SphereRegion | BoxRegion | InfiniteRegion
+class Region(Protocol):
+    """Where a field applies: any object answering whether a world point is inside.
+
+    :class:`SphereRegion`, :class:`BoxRegion` and :class:`InfiniteRegion` are
+    the ones this module has; a game's own shapes need only ``contains``.
+    """
+
+    def contains(self, pos: np.ndarray, /) -> bool: ...
 
 
 class GravityVolume:
