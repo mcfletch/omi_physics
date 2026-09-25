@@ -8,6 +8,7 @@ a future ``GLComputeBackend`` drops in behind the same surface.
 The backend operates on the :class:`~omi_physics.world.PhysicsWorld`'s
 structure-of-arrays state; it never touches scenegraph objects.
 """
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -16,6 +17,8 @@ from . import mathutil
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld
+
+log = logging.getLogger(__name__)
 
 
 class NumpyBackend:
@@ -72,24 +75,24 @@ def _has_gl_compute() -> bool:
     being selected where it would crash, so ``auto`` falls back to numpy instead.
     """
     try:
-        from OpenGL.GL import GL_VERSION, glGetString
+        from OpenGL import error
+        from OpenGL.GL import GL_VERSION, glDispatchCompute, glGetString
+    except ImportError:
+        return False
+    try:
         version = glGetString(GL_VERSION)
-    except Exception:
+    except error.Error:                                 # no context, or no GL
         return False
     if not version:
         return False
     try:
         text = version.decode() if isinstance(version, bytes) else str(version)
         major, minor = (int(x) for x in text.split()[0].split('.')[:2])
-    except Exception:
+    except (ValueError, IndexError):
         return False
     if (major, minor) < (4, 3):
         return False
-    try:
-        from OpenGL.GL import glDispatchCompute
-        return bool(glDispatchCompute)
-    except Exception:
-        return False
+    return bool(glDispatchCompute)
 
 
 def select_backend(prefer: str = 'auto') -> Any:
@@ -101,7 +104,9 @@ def select_backend(prefer: str = 'auto') -> Any:
     ``prefer`` is ``numpy``/``cpu``, ``glcompute``/``gpu``, or ``auto``.  ``auto``
     uses the GPU compute backend when GL 4.3 compute is present and falls back to
     numpy otherwise — the default is the accelerated path, degrading gracefully
-    where the hardware/driver can't run it.  An explicit ``gpu`` request raises if
+    where the hardware/driver can't run it.  Where compute is present but the
+    backend fails to build (a shader the driver rejects, say), the failure is
+    logged as a warning with its traceback and numpy is used.  An explicit ``gpu`` request raises if
     compute is genuinely unavailable so the caller learns, rather than silently
     getting the CPU path it asked against.
     """
@@ -112,9 +117,10 @@ def select_backend(prefer: str = 'auto') -> Any:
         return GLComputeBackend()
     # auto: prefer GPU, fall back to numpy when compute is missing or fails.
     if _has_gl_compute():
+        from .glcompute import GLComputeBackend
         try:
-            from .glcompute import GLComputeBackend
             return GLComputeBackend()
         except Exception:
-            pass
+            log.warning('GL compute backend could not be built; using numpy',
+                        exc_info=True)
     return NumpyBackend()

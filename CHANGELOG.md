@@ -56,6 +56,11 @@ compatibility promise.
   triangles in one pass.
 - A pair asleep against a static body stays touching rather than ending, and a
   pair with no dynamic body is not solved.
+- Where GL 4.3 compute is present but the GPU backend fails to build,
+  `select_backend('auto')` and a world crossing its `gpu_threshold` log a
+  warning with the traceback on the `omi_physics.backend` logger, then use
+  numpy. The compute probe answers "no compute" for a missing PyOpenGL, a GL
+  error or an unreadable version string; any other exception propagates.
 
 ### Fixed
 

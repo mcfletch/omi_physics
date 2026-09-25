@@ -537,7 +537,7 @@ class PhysicsWorld:
                 if self._listener_error is None:
                     self._listener_error = exc
                 else:
-                    log.error('Listener %r also raised', fn, exc_info=exc)
+                    log.exception('Listener %r also raised', fn)
 
     @contextmanager
     def _listener_errors_raised_after(self) -> Iterator[None]:
@@ -554,8 +554,9 @@ class PhysicsWorld:
             yield
         except BaseException:
             if self._listener_depth == 1 and self._listener_error is not None:
-                log.error('Listener raised during a failed step',
-                          exc_info=self._listener_error)
+                log.error(  # noqa: TRY400 logs the held listener error, not the one handled here
+                    'Listener raised during a failed step',
+                    exc_info=self._listener_error)
                 self._listener_error = None
             raise
         finally:
@@ -872,12 +873,17 @@ class PhysicsWorld:
             self.backend = self._cpu_backend
 
     def _ensure_gpu_backend(self) -> Any:
-        """Build and cache the GPU backend, or ``None`` if it can't be created."""
+        """Build and cache the GPU backend, or ``None`` if it can't be created.
+
+        ``select_backend('auto')`` answers numpy where there is no GL compute,
+        and logs why where the GPU backend failed to build.
+        """
         if self._gpu_backend is None and not self._gpu_failed:
-            try:
-                self._gpu_backend = select_backend('gpu')
-            except Exception:
-                self._gpu_failed = True                 # no context/compute
+            gpu = select_backend('auto')
+            if type(gpu) is NumpyBackend:               # GLComputeBackend subclasses it
+                self._gpu_failed = True
+            else:
+                self._gpu_backend = gpu
         return self._gpu_backend
 
     # -- masks & gravity -------------------------------------------------

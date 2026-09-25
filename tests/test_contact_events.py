@@ -8,6 +8,7 @@ than once per manifold point.
 Every test runs on both solver paths: the compiled kernel, which hands the
 tracker its contact arrays, and the pure-Python solver, which does not.
 """
+import logging
 from types import SimpleNamespace
 
 import numpy as np
@@ -280,6 +281,26 @@ class TestSwitching:
                 world.step(STEP)
         world.remove_contact_listener(broken)
         assert not world._undelivered
+
+    def test_a_second_listener_error_is_logged_with_its_traceback(
+            self, caplog) -> None:
+        world, material, _floor = world_with_floor()
+        drop(world, material, model.Shape.sphere(0.2), height=0.3)
+
+        def first(event):
+            raise RuntimeError('first')
+
+        def second(event):
+            raise KeyError('second')
+
+        world.add_contact_listener(first)
+        world.add_contact_listener(second)
+        with caplog.at_level(logging.ERROR, logger='omi_physics'), \
+                pytest.raises(RuntimeError, match='first'):
+            for _ in range(60):
+                world.step(STEP)
+        [record] = caplog.records
+        assert record.exc_info[0] is KeyError
 
 
 class TestBatches:

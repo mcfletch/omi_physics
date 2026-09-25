@@ -44,7 +44,7 @@ class optional_build_ext(_build_ext):
     def run(self):
         try:
             _build_ext.run(self)
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001 the accelerators are optional; no build error fails the install
             sys.stderr.write(
                 "WARNING: omi_physics accelerators not built (%s); "
                 "using pure-Python fallback\n" % (err,)
@@ -53,7 +53,7 @@ class optional_build_ext(_build_ext):
     def build_extension(self, ext):
         try:
             _build_ext.build_extension(self, ext)
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001 each accelerator is optional; the rest still build
             sys.stderr.write("WARNING: skipping %s (%s)\n" % (ext.name, err))
 
 
