@@ -385,7 +385,7 @@ class TestTheBudgetThisExistsFor:
         """The budget for this build, and what makes it that one."""
         if python_implementation() == 'PyPy':
             return CPYEXT_BUDGET, 'reaching numpy across cpyext'
-        if collide._native is None:
+        if collide._native is None:  # noqa: SLF001 whether the compiled collider loaded
             return FALLBACK_BUDGET, 'without the compiled collider'
         return FRAME_BUDGET, 'which is the whole of a 60 Hz frame'
 

@@ -65,7 +65,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-def _has_gl_compute() -> bool:
+def has_gl_compute() -> bool:
     """True if the current GL context can actually dispatch compute shaders.
 
     A 4.3 version string is necessary but not sufficient: some contexts (a
@@ -120,7 +120,7 @@ def select_backend(prefer: str = 'auto') -> Any:
     if prefer in ('glcompute', 'gpu'):
         return GLComputeBackend()
     # auto: prefer GPU, fall back to numpy when compute is missing or fails.
-    if _has_gl_compute():
+    if has_gl_compute():
         try:
             return GLComputeBackend()
         except Exception:

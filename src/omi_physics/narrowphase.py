@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .collide import Contact
     from .world import PhysicsWorld
 
-_SPHERE = 1   # world._refit_kind codes
+_SPHERE = 1   # PhysicsWorld._refit_shapes kind codes
 _BOX = 2
 
 
@@ -91,10 +91,7 @@ class NarrowPhase:
 
         # Accelerated path: box↔box straight to native, everything else via proxies.
         n = world.body_count
-        if getattr(world, '_refit_cache_n', -1) != n:
-            world._build_refit_cache()
-        kind = world._refit_kind
-        half = world._refit_half
+        kind, half = world._refit_shapes()  # noqa: SLF001 the world's refit cache is the dispatch table
         pos = world.position
         rot = quat_to_matrix(world.orientation[:n])       # (n, 3, 3), batched
         box_box = _native.box_box

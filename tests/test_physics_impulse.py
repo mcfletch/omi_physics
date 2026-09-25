@@ -46,7 +46,7 @@ def test_apply_impulse_accumulates():
 def test_apply_impulse_wakes_a_sleeping_body():
     world = PhysicsWorld(sleep_enabled=True)
     i = _dynamic_sphere(world, mass=1.0)
-    world._awake[i] = False
+    world.awake[i] = False
     world.apply_impulse(i, (0.0, 0.0, 5.0))
     assert world.awake[i]
 
@@ -74,7 +74,7 @@ def test_apply_angular_impulse_spins_about_inertia():
 def test_apply_angular_impulse_wakes_body():
     world = PhysicsWorld(sleep_enabled=True)
     i = _dynamic_sphere(world, mass=1.0)
-    world._awake[i] = False
+    world.awake[i] = False
     world.apply_angular_impulse(i, (0.0, 1.0, 0.0))
     assert world.awake[i]
 

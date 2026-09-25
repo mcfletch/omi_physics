@@ -600,7 +600,7 @@ def _placed(world: Any, body: int, shape: Any, centre: np.ndarray,
     cache = getattr(world, '_raycast_meshes', None)
     if cache is None:
         cache = {}
-        world._raycast_meshes = cache
+        world._raycast_meshes = cache  # noqa: SLF001 kept on the world; PhysicsWorld._forget_body drops entries
     found = cache.get(body)
     if found is None or not found.matches(shape, centre, rotation):
         found = _Placed(shape, centre, rotation)

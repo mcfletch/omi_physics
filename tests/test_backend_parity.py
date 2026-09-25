@@ -25,7 +25,7 @@ def falling_scene(backend_obj):
 
 
 def test_auto_falls_back_to_numpy_without_gl_compute(monkeypatch):
-    monkeypatch.setattr(backend, '_has_gl_compute', lambda: False)
+    monkeypatch.setattr(backend, 'has_gl_compute', lambda: False)
     assert isinstance(backend.select_backend('auto'), backend.NumpyBackend)
 
 
@@ -34,7 +34,7 @@ def test_explicit_numpy_never_touches_gl():
 
 
 def test_explicit_gpu_request_raises_when_unavailable(monkeypatch):
-    monkeypatch.setattr(backend, '_has_gl_compute', lambda: False)
+    monkeypatch.setattr(backend, 'has_gl_compute', lambda: False)
     with pytest.raises(RuntimeError):
         backend.select_backend('gpu')
 
@@ -42,19 +42,19 @@ def test_explicit_gpu_request_raises_when_unavailable(monkeypatch):
 def test_auto_stays_on_numpy_when_gpu_cannot_build(monkeypatch):
     """Crossing the threshold with no GL context must not wedge: the GPU build
     fails once and the world keeps stepping on numpy."""
-    monkeypatch.setattr(backend, '_has_gl_compute', lambda: False)
+    monkeypatch.setattr(backend, 'has_gl_compute', lambda: False)
     world = PhysicsWorld(gravity=model.Gravity(gravity=9.81), gpu_threshold=2)
     for _ in range(5):
         world.add_body(model.Motion(type=model.DYNAMIC), position=(0, 10, 0))
     world.step(1 / 60)
     assert isinstance(world.backend, backend.NumpyBackend)
-    assert world._gpu_failed is True
+    assert world._gpu_failed is True  # noqa: SLF001 the build is not retried each step
 
 
 def test_explicit_backend_object_is_never_switched():
     obj = backend.NumpyBackend()
     world = PhysicsWorld(backend=obj, gpu_threshold=1)
-    assert world._backend_mode == 'fixed'
+    assert world._backend_mode == 'fixed'  # noqa: SLF001 a backend object pins the mode
     for _ in range(3):
         world.add_body(model.Motion(type=model.DYNAMIC))
     world.step(1 / 60)
@@ -67,7 +67,7 @@ class _BackendThatCannotBuild:
 
 
 def test_auto_logs_why_the_gpu_backend_could_not_be_built(monkeypatch, caplog):
-    monkeypatch.setattr(backend, '_has_gl_compute', lambda: True)
+    monkeypatch.setattr(backend, 'has_gl_compute', lambda: True)
     monkeypatch.setattr(glcompute, 'GLComputeBackend', _BackendThatCannotBuild)
     with caplog.at_level(logging.WARNING, logger='omi_physics.backend'):
         chosen = backend.select_backend('auto')
@@ -77,7 +77,7 @@ def test_auto_logs_why_the_gpu_backend_could_not_be_built(monkeypatch, caplog):
 
 
 def test_a_world_logs_why_its_gpu_backend_could_not_be_built(monkeypatch, caplog):
-    monkeypatch.setattr(backend, '_has_gl_compute', lambda: True)
+    monkeypatch.setattr(backend, 'has_gl_compute', lambda: True)
     monkeypatch.setattr(glcompute, 'GLComputeBackend', _BackendThatCannotBuild)
     world = PhysicsWorld(gravity=model.Gravity(gravity=9.81), gpu_threshold=2)
     for _ in range(5):
@@ -86,13 +86,13 @@ def test_a_world_logs_why_its_gpu_backend_could_not_be_built(monkeypatch, caplog
         world.step(1 / 60)
         world.step(1 / 60)
     assert isinstance(world.backend, backend.NumpyBackend)
-    assert world._gpu_failed is True
+    assert world._gpu_failed is True  # noqa: SLF001 the build is not retried each step
     [record] = caplog.records
     assert record.exc_info[0] is RuntimeError
 
 
 class TestTheComputeProbe:
-    """``_has_gl_compute`` answers False for what a missing or old GL reports."""
+    """``has_gl_compute`` answers False for what a missing or old GL reports."""
 
     @pytest.fixture
     def gl(self, monkeypatch):
@@ -109,26 +109,26 @@ class TestTheComputeProbe:
 
     def test_a_current_version_with_compute(self, monkeypatch, gl):
         self.reporting(monkeypatch, gl, b'4.6.0 NVIDIA 550.0')
-        assert backend._has_gl_compute() is True
+        assert backend.has_gl_compute() is True
 
     def test_an_old_version(self, monkeypatch, gl):
         self.reporting(monkeypatch, gl, b'3.3 Mesa 24.0')
-        assert backend._has_gl_compute() is False
+        assert backend.has_gl_compute() is False
 
     @pytest.mark.parametrize('text', [b'', b'garbage', b'four.six', b'4'])
     def test_a_version_string_that_does_not_parse(self, monkeypatch, gl, text):
         self.reporting(monkeypatch, gl, text)
-        assert backend._has_gl_compute() is False
+        assert backend.has_gl_compute() is False
 
     def test_no_context(self, monkeypatch, gl):
         error = pytest.importorskip('OpenGL.error')
         self.reporting(monkeypatch, gl, error.NullFunctionError('glGetString'))
-        assert backend._has_gl_compute() is False
+        assert backend.has_gl_compute() is False
 
     def test_a_defect_in_the_caller_is_not_mistaken_for_no_gl(self, monkeypatch, gl):
         self.reporting(monkeypatch, gl, TypeError('wrong argument count'))
         with pytest.raises(TypeError):
-            backend._has_gl_compute()
+            backend.has_gl_compute()
 
 
 def test_two_numpy_runs_match_within_tolerance():

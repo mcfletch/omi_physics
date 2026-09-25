@@ -46,6 +46,13 @@ _TYPE_INT = {model.STATIC: 0, model.KINEMATIC: 1, model.DYNAMIC: 2}
 _STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
 
 
+
+def _column(name: str) -> property:
+    """A read-only property answering column ``name`` over the live bodies."""
+    def rows(self: 'PhysicsWorld') -> np.ndarray:
+        return self._view(name)
+    return property(rows)
+
 class PhysicsWorld:
     """A rigid-body world.  Add shapes/materials/filters, then bodies, then step."""
 
@@ -211,30 +218,30 @@ class PhysicsWorld:
         """A view of column ``name`` over the live bodies only (the first ``_n`` rows)."""
         return getattr(self, '_' + name)[:self._n]
 
-    position = property(lambda s: s._view('position'))
-    prev_position = property(lambda s: s._view('prev_position'))
-    orientation = property(lambda s: s._view('orientation'))
-    prev_orientation = property(lambda s: s._view('prev_orientation'))
-    linear_velocity = property(lambda s: s._view('linear_velocity'))
-    angular_velocity = property(lambda s: s._view('angular_velocity'))
-    inv_mass = property(lambda s: s._view('inv_mass'))
-    mass = property(lambda s: s._view('mass'))
-    inv_inertia = property(lambda s: s._view('inv_inertia'))
-    gravity_factor = property(lambda s: s._view('gravity_factor'))
-    linear_damping = property(lambda s: s._view('linear_damping'))
-    angular_damping = property(lambda s: s._view('angular_damping'))
-    quadratic_drag = property(lambda s: s._view('quadratic_drag'))
-    motion_type = property(lambda s: s._view('motion_type'))
-    collider_shape = property(lambda s: s._view('collider_shape'))
-    collider_material = property(lambda s: s._view('collider_material'))
-    collider_filter = property(lambda s: s._view('collider_filter'))
-    trigger_shape = property(lambda s: s._view('trigger_shape'))
-    trigger_filter = property(lambda s: s._view('trigger_filter'))
-    aabb_min = property(lambda s: s._view('aabb_min'))
-    aabb_max = property(lambda s: s._view('aabb_max'))
-    awake = property(lambda s: s._view('awake'))
-    island = property(lambda s: s._view('island'))
-    sleep_timer = property(lambda s: s._view('sleep_timer'))
+    position = _column('position')
+    prev_position = _column('prev_position')
+    orientation = _column('orientation')
+    prev_orientation = _column('prev_orientation')
+    linear_velocity = _column('linear_velocity')
+    angular_velocity = _column('angular_velocity')
+    inv_mass = _column('inv_mass')
+    mass = _column('mass')
+    inv_inertia = _column('inv_inertia')
+    gravity_factor = _column('gravity_factor')
+    linear_damping = _column('linear_damping')
+    angular_damping = _column('angular_damping')
+    quadratic_drag = _column('quadratic_drag')
+    motion_type = _column('motion_type')
+    collider_shape = _column('collider_shape')
+    collider_material = _column('collider_material')
+    collider_filter = _column('collider_filter')
+    trigger_shape = _column('trigger_shape')
+    trigger_filter = _column('trigger_filter')
+    aabb_min = _column('aabb_min')
+    aabb_max = _column('aabb_max')
+    awake = _column('awake')
+    island = _column('island')
+    sleep_timer = _column('sleep_timer')
 
     @property
     def body_count(self) -> int:
@@ -470,7 +477,7 @@ class PhysicsWorld:
             return None
         return self.bodies[ref.index]
 
-    def _reports_pair(self, a: int, b: int) -> bool:
+    def reports_pair(self, a: int, b: int) -> bool:
         """Whether :attr:`contact_reporting` records the pair ``(a, b)``."""
         return self._reporting == 'all' or bool(self._report[a] or self._report[b])
 
@@ -949,7 +956,7 @@ class PhysicsWorld:
 
         if self._collision is not None:
             self.backend.refit_aabbs(self)
-            self._collision.run(self, dt)
+            self._collide(self._collision, dt)
 
         if self.joint_constraints:
             self._solve_joints(dt)
@@ -960,6 +967,52 @@ class PhysicsWorld:
             self._update_sleep(dt)
         self.time += dt
         self.step_count += 1
+
+
+    def _collide(self, stages: '_CollisionStages', dt: float) -> None:
+        """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
+        pairs = stages.broadphase.pairs(self)
+        solid: list[tuple[int, int]] = []
+        sensed: list[tuple[int, int]] = []
+        reporting = self.contact_reporting != 'off'
+        sensors = self._sensor
+        has_trigger = False
+        for i, j in pairs:
+            if self.trigger_shape[i] >= 0 or self.trigger_shape[j] >= 0:
+                has_trigger = True
+            elif sensors[i] or sensors[j]:
+                # Touches a sensor has are only ever reported, never solved.
+                if (reporting and self.collider_shape[i] >= 0
+                        and self.collider_shape[j] >= 0):
+                    sensed.append((i, j))
+            # A pair at rest (both asleep/static) needs no work; it is revived
+            # when a mover touches one of them (solver wakes the sleeper).
+            # Neither does a pair with no dynamic body, which nothing can move.
+            elif (self.collider_shape[i] >= 0 and self.collider_shape[j] >= 0
+                    and (self.is_awake_mover(i) or self.is_awake_mover(j))
+                    and (self.motion_type[i] == _DYNAMIC
+                         or self.motion_type[j] == _DYNAMIC)):
+                solid.append((i, j))
+        contacts = stages.narrowphase.generate(self, solid)
+        excluded: list[Contact] = []
+        if reporting and contacts and self._contact_filter is not None:
+            contacts, excluded = self._tracker.presolve(
+                self, contacts, self._contact_filter, self.reports_pair)
+        if sensed:
+            touched = stages.narrowphase.generate(self, sensed)
+            if touched:
+                measure(self, touched)
+                excluded += touched
+        stages.contacts = contacts
+        self.contacts = contacts
+        stages.solver.solve(self, contacts, dt)
+        if reporting:
+            self._record_contacts(stages.solver, contacts, excluded)
+        if has_trigger or stages.triggers.overlaps:
+            fired = stages.triggers.update(self, pairs)
+            self._log_triggers(fired)
+            for event in fired:
+                self.dispatch_trigger(*event)
 
     def writeback(self, alpha: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Interpolated poses for rendering: lerp prev→current by ``alpha``."""
@@ -972,12 +1025,19 @@ class PhysicsWorld:
     #: refit kinds -- 0 no shape, 1 sphere, 2 box, 3 other (per-body fallback)
     _RFIT_NONE, _RFIT_SPHERE, _RFIT_BOX, _RFIT_OTHER = 0, 1, 2, 3
 
-    def _build_refit_cache(self) -> None:
-        """Per-body shape kind and local half-extents for the vectorized AABB refit.
+    def _refit_shapes(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-body shape kind (``_RFIT_*``) and local half-extents, ``(n,)`` and ``(n, 3)``.
 
-        Shapes are immutable once created, so this only rebuilds when the body
-        count changes (a wave added/removed) -- not every step.
+        Shapes are immutable once created, so the arrays are rebuilt only when
+        the body count changes (a wave added/removed) or a slot is emptied --
+        not every step.
         """
+        if getattr(self, '_refit_cache_n', -1) != self._n:
+            self._build_refit_cache()
+        return self._refit_kind, self._refit_half
+
+    def _build_refit_cache(self) -> None:
+        """Rebuild the arrays :meth:`_refit_shapes` answers."""
         n = self._n
         kind = np.zeros(n, dtype=np.int8)
         half = np.zeros((n, 3), dtype='d')
@@ -1012,10 +1072,7 @@ class PhysicsWorld:
         n = self._n
         if n == 0:
             return
-        if getattr(self, '_refit_cache_n', -1) != n:
-            self._build_refit_cache()
-        kind = self._refit_kind
-        half = self._refit_half
+        kind, half = self._refit_shapes()
         pos = self._position[:n]
         absR = np.abs(mathutil.quat_to_matrix(self._orientation[:n]))
         hw = np.einsum('nij,nj->ni', absR, half)      # rotated box half-extents
@@ -1217,7 +1274,10 @@ def inertia_diagonal(shape: model.Shape | None, mass: float) -> np.ndarray:
 
 
 class _CollisionStages:
-    """Broad phase → narrow phase → contact solve → trigger events, per step."""
+    """The broad phase, narrow phase, contact solver and trigger system of a world.
+
+    :meth:`PhysicsWorld._collide` runs them, in that order, each step.
+    """
 
     def __init__(self, solver: Any = None, velocity_iterations: int = 10) -> None:
         """Build the broad/narrow phases, the contact solver, and the trigger system."""
@@ -1227,48 +1287,3 @@ class _CollisionStages:
             velocity_iterations=velocity_iterations)
         self.triggers = TriggerSystem()
         self.contacts: list[Contact] = []
-
-    def run(self, world: "PhysicsWorld", dt: float) -> None:
-        """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
-        pairs = self.broadphase.pairs(world)
-        solid: list[tuple[int, int]] = []
-        sensed: list[tuple[int, int]] = []
-        reporting = world.contact_reporting != 'off'
-        sensors = world._sensor
-        has_trigger = False
-        for i, j in pairs:
-            if world.trigger_shape[i] >= 0 or world.trigger_shape[j] >= 0:
-                has_trigger = True
-            elif sensors[i] or sensors[j]:
-                # Touches a sensor has are only ever reported, never solved.
-                if (reporting and world.collider_shape[i] >= 0
-                        and world.collider_shape[j] >= 0):
-                    sensed.append((i, j))
-            # A pair at rest (both asleep/static) needs no work; it is revived
-            # when a mover touches one of them (solver wakes the sleeper).
-            # Neither does a pair with no dynamic body, which nothing can move.
-            elif (world.collider_shape[i] >= 0 and world.collider_shape[j] >= 0
-                    and (world.is_awake_mover(i) or world.is_awake_mover(j))
-                    and (world.motion_type[i] == _DYNAMIC
-                         or world.motion_type[j] == _DYNAMIC)):
-                solid.append((i, j))
-        contacts = self.narrowphase.generate(world, solid)
-        excluded: list[Contact] = []
-        if reporting and contacts and world._contact_filter is not None:
-            contacts, excluded = world._tracker.presolve(
-                world, contacts, world._contact_filter, world._reports_pair)
-        if sensed:
-            touched = self.narrowphase.generate(world, sensed)
-            if touched:
-                measure(world, touched)
-                excluded += touched
-        self.contacts = contacts
-        world.contacts = contacts
-        self.solver.solve(world, contacts, dt)
-        if reporting:
-            world._record_contacts(self.solver, contacts, excluded)
-        if has_trigger or self.triggers.overlaps:
-            fired = self.triggers.update(world, pairs)
-            world._log_triggers(fired)
-            for event in fired:
-                world.dispatch_trigger(*event)

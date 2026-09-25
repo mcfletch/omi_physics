@@ -147,7 +147,7 @@ class TestItDoesLessWorkThanCastingEachOne:
     def _counted(self, monkeypatch):
         """How many candidate triangles each pass over the bundle was given."""
         walks = []
-        real = raycast_module._hit_triangles_many
+        real = raycast_module._hit_triangles_many  # noqa: SLF001 counting each pass's triangles
 
         def counting(origins, headings, triangles, limits):
             walks.append(len(triangles))
@@ -173,7 +173,7 @@ class TestItDoesLessWorkThanCastingEachOne:
         """One pass over every ray and every candidate triangle, rather than a
         pass per ray: four wheels are one numpy expression, not four."""
         passes = []
-        real = raycast_module._hit_triangles_many
+        real = raycast_module._hit_triangles_many  # noqa: SLF001 counting each pass's triangles
 
         def counting(origins, headings, triangles, limits):
             passes.append((len(origins), len(triangles)))

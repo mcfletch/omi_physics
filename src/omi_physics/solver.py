@@ -228,8 +228,8 @@ class SequentialImpulseSolver:
         Mutates the world's velocities and positions.  Empty ``contacts`` is a no-op.
 
         ``dt`` is part of the interface a solver implements --
-        :class:`~omi_physics.world._CollisionStages` hands the step to whatever
-        solver it was given -- and this one does not read it.  The position pass
+        the world's collision pass hands the step to whatever solver it was
+        given -- and this one does not read it.  The position pass
         is a split impulse rather than a Baumgarte bias, so how far it moves a
         pair apart does not depend on how long the step was.
         """

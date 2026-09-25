@@ -452,13 +452,12 @@ class ContactTracker:
         if now is not None:
             fresh = ~np.isin(now_keys, was, assume_unique=True)
             wanted = np.ones_like(fresh) if world.report_persist else fresh
-            generation = world._generation
             a_idx, b_idx = split_keys(now_keys)
             for row in np.flatnonzero(wanted).tolist():
                 a, b = int(a_idx[row]), int(b_idx[row])
                 events.append(ContactEvent(
                     'begin' if fresh[row] else 'persist',
-                    BodyRef(a, int(generation[a])), BodyRef(b, int(generation[b])),
+                    world.ref(a), world.ref(b),
                     now.point[row].copy(), now.normal[row].copy(),
                     float(now.approach[row]),
                     float(now.impulse[row]), float(now.friction[row]),
@@ -493,14 +492,13 @@ class ContactTracker:
               step: int, time: float) -> list[ContactEvent]:
         """``'end'`` events for the stored pairs at ``rows``."""
         events = []
-        generation = world._generation
         a_idx, b_idx = split_keys(self._keys[rows])
         for row, a, b in zip(rows.tolist(), a_idx.tolist(), b_idx.tolist(), strict=True):
             key = int(self._keys[row])
             solved = key not in self.ignored
             self.ignored.discard(key)
             events.append(ContactEvent(
-                'end', BodyRef(a, int(generation[a])), BodyRef(b, int(generation[b])),
+                'end', world.ref(a), world.ref(b),
                 self._point[row].copy(), self._normal[row].copy(),
                 0.0, 0.0, 0.0, 0.0, 0.0, 0,
                 step, time, reason=reason, solved=solved))
@@ -516,11 +514,11 @@ class ContactTracker:
         if not len(keys):
             return np.zeros(0, dtype=bool)
         a, b = split_keys(keys)
-        motion = world._motion_type
-        awake = world._awake
+        motion = world.motion_type
+        awake = world.awake
         mover_a = ((motion[a] == 2) & awake[a]) | (motion[a] == 1)
         mover_b = ((motion[b] == 2) & awake[b]) | (motion[b] == 1)
-        lo, hi = world._aabb_min, world._aabb_max
+        lo, hi = world.aabb_min, world.aabb_max
         overlap = np.all((hi[a] >= lo[b]) & (hi[b] >= lo[a]), axis=1)
         return ~mover_a & ~mover_b & overlap
 
@@ -571,10 +569,9 @@ class ContactTracker:
         approach, _slip = relative_motion(world, idx_a, idx_b, point, normal)
         mean_normal = normal.sum(axis=0)
         mean_normal /= np.linalg.norm(mean_normal) or 1.0
-        inverse = float(world._inv_mass[a] + world._inv_mass[b])
-        generation = world._generation
+        inverse = float(world.inv_mass[a] + world.inv_mass[b])
         return PairPreview(
-            BodyRef(a, int(generation[a])), BodyRef(b, int(generation[b])),
+            world.ref(a), world.ref(b),
             point.mean(axis=0), mean_normal, float(approach.max()),
             1.0 / inverse if inverse > 0.0 else 0.0, len(points),
             world.step_count, world.time)

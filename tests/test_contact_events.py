@@ -397,7 +397,8 @@ class TestBodyReferences:
         for _ in range(60):
             world.step(STEP)
         assert [(e.phase, e.reason) for e in heard] == [('begin', None), ('end', 'removed')]
-        assert shot in world._free
+        assert heard[0].b.index == shot
+        assert not world.alive(heard[0].b)
 
 
 def trigger_world():

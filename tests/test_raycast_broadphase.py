@@ -35,7 +35,7 @@ def _tiles(count=200, side=20.0):
 def tested(monkeypatch):
     """Count the bodies a cast tests exactly."""
     seen = []
-    original = raycast_module._hit_body
+    original = raycast_module._hit_body  # noqa: SLF001 counting the bodies a cast tests exactly
 
     def counting(world, body, *args):
         seen.append(body)

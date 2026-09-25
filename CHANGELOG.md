@@ -44,6 +44,10 @@ compatibility promise.
   a set speed, placed exactly on it when it arrives.
 - `gravity.Region` is a protocol: any object with `contains(position)` is a
   region.
+- `PhysicsWorld.reports_pair(a, b)`: whether `contact_reporting` records the
+  pair of body indices `a` and `b`.
+- `backend.has_gl_compute()`: whether the current GL context can dispatch
+  compute shaders, the test `select_backend('auto')` makes.
 
 ### Changed
 

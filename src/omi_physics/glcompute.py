@@ -204,7 +204,7 @@ class GLComputeBackend(NumpyBackend):
     name = 'glcompute'
 
     def __init__(self) -> None:
-        if not backend._has_gl_compute():
+        if not backend.has_gl_compute():
             raise RuntimeError('GL 4.3 compute shaders unavailable; use NumpyBackend')
         from OpenGL import GL  # noqa: PLC0415 PyOpenGL is an optional dependency
         self._gl = GL
@@ -326,7 +326,8 @@ class GLComputeBackend(NumpyBackend):
             self._fused_done = False
             return
         self._ensure(n)
-        fused = world._collision is None and not world.joint_constraints
+        fused = (world._collision is None  # noqa: SLF001 whether the world has a collision pass
+                 and not world.joint_constraints)
 
         self._up_vec3(self._grav, world.resolve_gravity(), n)
         self._scalars(world, n)

@@ -129,6 +129,7 @@ select = [
     "S202", "S301", "S310",  # no unchecked tar extraction, pickle loads or URL opens
     "S110", "BLE001", "TRY400",  # a caught error is narrowed, or logged with its traceback
     "PLC0415",  # imports are at the top, save an optional dependency or a named cycle
+    "SLF001",  # no reaching into another object's private members
 ]
 ignore = [
     # Paired assignments on one line: the solver and collision hot paths
@@ -161,6 +162,16 @@ ignore = [
 # arguments it is handed, and `pytest.raises` is itself the assertion -- so the
 # unused ones are deliberate.
 "tests/*" = ["ARG001", "ARG002", "ARG005"]
+# These test a mechanism that has no public surface by driving it directly:
+# the character's depenetration, substeps and void probe, the static-proxy
+# cache it shares between worlds, the threaded simulation's tick-rate window fed
+# synthetic times, and the contact events' delivery queue, solver swap and
+# compiled/pure-Python switch.
+"tests/test_character_fall.py" = ["SLF001"]
+"tests/test_character_proxy_cache.py" = ["SLF001"]
+"tests/test_character_void.py" = ["SLF001"]
+"tests/test_contact_events.py" = ["SLF001"]
+"tests/test_threaded_rate.py" = ["SLF001"]
 
 [tool.ruff.format]
 # Prose in docstrings is wrapped by hand to read at a comfortable width, and the

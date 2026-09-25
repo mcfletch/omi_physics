@@ -34,7 +34,7 @@ def pile(side=10, layers=3):
 
 def tracker_share(world, monkeypatch, steps=20):
     spent = [0.0]
-    record = PhysicsWorld._record_contacts
+    record = PhysicsWorld._record_contacts  # noqa: SLF001 timing the tracker's share of a step
 
     def timed(self, *args):
         start = time.perf_counter()

@@ -168,7 +168,8 @@ and `time` it happened at. An `'end'` carries a `reason`: `'separated'`, or
 
 - `contact_reporting` is `'off'` (the default, and no cost), `'flagged'` or
   `'all'`. Reporting every pair of a resting pile of 300 boxes adds about 2%
-  to its step.
+  to its step. `world.reports_pair(a, b)` is whether the setting records the
+  pair of body indices `a` and `b`.
 - `report_persist` adds a `'persist'` event for every touching pair on every
   step, and a `'stay'` for every trigger overlap. Off, a pair is still tracked
   and only its `'begin'` and `'end'` are reported.

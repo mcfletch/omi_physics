@@ -611,7 +611,7 @@ class CharacterController:
                reason: str | None = None) -> Any:
         """A contact event between static body ``j`` and :attr:`body`; None if unreported."""
         world, mine = self.world, cast(int, self.body)
-        if not world._reports_pair(j, mine):
+        if not world.reports_pair(j, mine):
             return None
         approach = (max(0.0, -float(np.dot(self._arrived, normal)))
                     if phase == 'begin' else 0.0)

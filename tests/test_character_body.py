@@ -109,10 +109,10 @@ class TestWhatItMeets:
     def test_a_removed_character_takes_its_body_with_it(self) -> None:
         world = floor_world()
         character = walker(world)
-        body = character.body
+        ref = world.ref(character.body)
         character.remove()
         assert character.body is None
-        assert body in world._free
+        assert not world.alive(ref)
 
 
 def test_a_sensor_body_is_never_solved() -> None:

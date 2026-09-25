@@ -34,7 +34,7 @@ def gl_context():
     if not win:
         pytest.skip('no GL 4.3 context available')
     glfw.make_context_current(win)
-    if not backend._has_gl_compute():
+    if not backend.has_gl_compute():
         glfw.destroy_window(win)
         pytest.skip('GL 4.3 compute shaders unavailable')
     yield win
@@ -118,7 +118,7 @@ def test_auto_falls_back_to_numpy_when_bodies_sleep(gl_context):
     world.step(1 / 60)
     assert world.backend.name == 'glcompute'
     for i in range(8):                       # sleep most bodies -> awake < 0.8*thr
-        world._awake[i] = False
+        world.awake[i] = False
     world.step(1 / 60)
     assert world.backend.name == 'numpy'
 
@@ -152,7 +152,8 @@ def test_gpu_fused_path_matches_numpy(gpu_backend):
     assert np.allclose(cpu.position, gpu.position, atol=1e-2)
     assert np.allclose(cpu.orientation, gpu.orientation, atol=1e-3)
     # the fused kernel actually ran (velocity round-trip skipped)
-    assert gpu_backend._fused_done is False   # reset after integrate_positions
+    # reset after integrate_positions
+    assert gpu_backend._fused_done is False  # noqa: SLF001 the only record the fused kernel ran
 
 
 def test_gpu_collision_path_matches_numpy(gpu_backend):
