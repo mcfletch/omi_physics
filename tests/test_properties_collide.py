@@ -106,7 +106,10 @@ class TestShapesThatAreApartDoNotTouch:
         if np.linalg.norm(away) < 1e-6:
             return
         gap = (proxy_scale(A) + proxy_scale(B)) * 4.0
-        assert collide.collide(0, 1, A, translated(B, direction * gap)) == []
+        # Measured from A: moving B by a fixed amount could carry it from one
+        # side of A onto A itself.
+        offset = np.asarray(A.center) - np.asarray(B.center) + direction * gap
+        assert collide.collide(0, 1, A, translated(B, offset)) == []
 
 
 def overlap_along(A, B, normal) -> float:
