@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 
-from omi_physics import gjk, mathutil
-from omi_physics.body import ConvexProxy, SphereProxy
+from omi_physics import gjk, mathutil, model
+from omi_physics.body import ConvexProxy, SphereProxy, make_proxy
 
 I3 = np.eye(3)
 
@@ -66,3 +66,23 @@ def test_gjk_oriented_boxes():
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.parametrize('x', [0.0, 1e-9, -2.34e-13, 0.1, 1.0, 7.3])
+def test_a_capsule_just_into_a_long_flat_box_is_found_wherever_it_stands(x):
+    """GJK hands EPA a tetrahedron in whatever winding it ended in.
+
+    On a long thin box the first vertices it finds lie almost in a line, and a
+    tetrahedron taken with its faces wound inward had EPA expand the wrong way
+    and answer a sideways normal at no depth: a capsule 2 cm into the floor
+    was reported as not touching it.
+    """
+    from omi_physics import collide
+    ident = np.array([0.0, 0.0, 0.0, 1.0])
+    floor = make_proxy(model.Shape.box((60, 1, 60)), np.array([0.0, -0.5, 0.0]), ident)
+    capsule = make_proxy(model.Shape.capsule(height=1.2, radius=0.32),
+                         np.array([x, 0.9001, -x]), ident)
+    contacts = collide.collide(0, 1, capsule, floor)
+    assert len(contacts) == 1
+    assert contacts[0].depth == pytest.approx(0.0199, abs=1e-6)
+    assert np.allclose(contacts[0].normal, (0, -1, 0), atol=1e-6)

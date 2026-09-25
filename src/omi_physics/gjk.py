@@ -132,6 +132,11 @@ def epa(A: 'SupportProxy', B: 'SupportProxy', simplex: list[_Vertex],
         if tetra is None:
             return None
         verts = tetra
+    # The faces below are wound outward only for a tetrahedron in this order,
+    # and GJK hands over its simplex in whatever order it ended in. Wound
+    # inward, every face "sees" the points behind it and the polytope grows
+    # the wrong way.
+    _orient(verts)
     faces = [(0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)]
     for _ in range(max_iter):
         normal, dist, face = _closest_face(verts, faces)
@@ -168,10 +173,14 @@ def _expand_to_tetra(A: 'SupportProxy', B: 'SupportProxy',
             pts.append(w)
     if len(pts) < 4:
         return None
-    v0, v1, v2, v3 = pts[:4]
-    if np.dot(np.cross(v1.v - v0.v, v2.v - v0.v), v3.v - v0.v) > 0:
-        pts[1], pts[2] = pts[2], pts[1]
     return pts[:4]
+
+
+def _orient(tetra: list[_Vertex]) -> None:
+    """Order ``tetra`` so the faces :func:`epa` starts from are wound outward."""
+    v0, v1, v2, v3 = tetra
+    if np.dot(np.cross(v1.v - v0.v, v2.v - v0.v), v3.v - v0.v) > 0:
+        tetra[1], tetra[2] = tetra[2], tetra[1]
 
 
 def _closest_face(verts: list[_Vertex], faces: list[tuple[int, int, int]]
@@ -189,10 +198,12 @@ def _closest_face(verts: list[_Vertex], faces: list[tuple[int, int, int]]
         ln = np.linalg.norm(n)
         if ln < EPS:
             continue
+        # The polytope is wound outward, so its winding says which way each
+        # face looks. The origin is inside, so every face is at a distance of
+        # zero or more; one the origin lies on comes out as zero, or a hair
+        # below, and taking the sign from that would turn it round.
         n = n / ln
-        d = np.dot(n, a)
-        if d < 0:
-            n, d = -n, -d
+        d = float(np.dot(n, a))
         if d < best_d:
             best_n, best_d, best_f = n, d, f
     return best_n, best_d, best_f
