@@ -26,9 +26,8 @@ compatibility promise.
   its first solve, answered with a `Verdict` of `SOLVE`, `IGNORE_STEP` or
   `IGNORE_PAIR`.
 - Trigger events (`TriggerEvent`, with the entering body's `point`) join the
-  contact log in step order. A
-  trigger's `collisionFilter` is read from glTF, written back and honoured, and
-  a kinematic body enters triggers.
+  contact log in step order. A trigger's `collisionFilter` is read from glTF,
+  written back and honoured, and a kinematic body enters triggers.
 - Sensor bodies (`add_body(..., sensor=True)`, `PhysicsWorld.is_sensor`): they
   enter triggers and report touches with `solved=False`, and nothing is solved
   against them. A `CharacterController` built with `body=True` has one, and
