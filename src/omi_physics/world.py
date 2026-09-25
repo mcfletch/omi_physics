@@ -469,6 +469,15 @@ class PhysicsWorld:
                 batch = ContactBatch(*(column[keep] for column in batch))
         self._deliver(self._tracker.update(self, batch, flags))
 
+    def report_contact_events(self, events: list[ContactEvent]) -> None:
+        """Log and deliver contact events the step did not produce itself.
+
+        For a body something other than the solver collides: a character
+        controller reports its capsule meeting the static world through this,
+        so its touches reach the same listeners and log as every other.
+        """
+        self._deliver(events)
+
     def _deliver(self, events: list[ContactEvent]) -> None:
         """Log ``events`` and call the contact listeners with each, in order.
 

@@ -43,6 +43,11 @@ _STATIC_PROXIES: "weakref.WeakKeyDictionary[Any, dict[int, Proxy]]" = \
     weakref.WeakKeyDictionary()
 
 
+def _depth_of_contact(contact: Any) -> float:
+    """A contact's depth, for picking the deepest."""
+    return float(contact.depth)
+
+
 def _static_proxies(world: "PhysicsWorld") -> dict[int, Proxy]:
     """The proxy cache belonging to ``world``, made on first use."""
     found = _STATIC_PROXIES.get(world)
@@ -180,6 +185,11 @@ class CharacterController:
         #: and nothing is solved against it, so the character still collides
         #: only with what the controller collides it with.
         self.body: int | None = None
+        #: Static colliders the capsule touches, each with the unit normal from
+        #: the surface into the capsule and the point it touches at.
+        self._touching: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        #: Velocity the capsule arrived with at the start of the last update.
+        self._arrived = np.zeros(3)
         if body:
             shape = world.add_shape(self._shape(self.caps.standHeight))
             self.body = world.add_body(model.Motion(type=model.KINEMATIC),
@@ -527,6 +537,7 @@ class CharacterController:
         depend on the geometry rather than on the frame rate.
         """
         start = self.position.copy()
+        self._arrived = self.velocity.copy()
         for piece in self._substeps(dt):
             was_grounded = self.grounded
             self._step(piece)
@@ -538,18 +549,95 @@ class CharacterController:
         self.velocity = (self.position - start) / dt if dt > 0 else np.zeros(3)
         self._carry_body()
 
+    #: How far past the capsule's surface a static collider still counts as
+    #: touched, in metres. A capsule resting on a floor is pushed just clear
+    #: of it, so touching is measured with this much to spare.
+    TOUCH_SKIN = 0.02
+
     def _carry_body(self) -> None:
-        """Put :attr:`body` where the capsule is, moving at the capsule's velocity."""
+        """Put :attr:`body` where the capsule is, and report what it began or stopped touching.
+
+        The body moves at the capsule's velocity, so a touch it has with a
+        moving body has a closing speed. The controller's own collisions, with
+        the static world, are reported here while the world records contacts.
+        """
         if self.body is None:
             return
-        self.world.place_body(self.body, position=self.position)
-        self.world.linear_velocity[self.body] = self.velocity
+        world = self.world
+        world.place_body(self.body, position=self.position)
+        world.linear_velocity[self.body] = self.velocity
+        if world.contact_reporting == 'off':
+            self._touching = {}
+            return
+        now = self._touches_static()
+        events = [self._event(j, 'begin', normal, point)
+                  for j, (normal, point) in now.items() if j not in self._touching]
+        events += [self._event(j, 'end', normal, point, reason='separated')
+                   for j, (normal, point) in self._touching.items() if j not in now]
+        self._touching = now
+        world.report_contact_events([event for event in events if event is not None])
+
+    def _touches_static(self) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+        """The static colliders within :data:`TOUCH_SKIN` of the capsule."""
+        middle = max(self.height - 2 * self.caps.radius, 1e-3)
+        skin = model.Shape.capsule(height=middle, radius=self.caps.radius + self.TOUCH_SKIN)
+        capsule = make_proxy(skin, self.position, IDENT)
+        found: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for j in self._static_bodies():
+            other = self._static_proxy(j)
+            if isinstance(other, TriangleMeshProxy):
+                pushes, depths = collide.capsule_mesh_pushes(
+                    cast(CapsuleProxy, capsule), other,
+                    self._near_triangles(j, other, cast(CapsuleProxy, capsule)))
+                if not len(depths):
+                    continue
+                normal = np.asarray(pushes[int(np.argmax(depths))], dtype='d')
+            else:
+                contacts = collide.collide(0, 1, capsule, other)
+                if not contacts:
+                    continue
+                normal = -max(contacts, key=_depth_of_contact).normal
+            found[j] = (normal, self._surface_point(normal))
+        return found
+
+    def _surface_point(self, normal: np.ndarray) -> np.ndarray:
+        """Where the capsule's surface meets a collider whose normal is ``normal``."""
+        half = max(self.height * 0.5 - self.caps.radius, 0.0)
+        end = self.position - UP * half * float(np.sign(normal[1]))
+        return end - normal * self.caps.radius
+
+    def _event(self, j: int, phase: str, normal: np.ndarray, point: np.ndarray,
+               reason: str | None = None) -> Any:
+        """A contact event between static body ``j`` and :attr:`body`; None if unreported."""
+        from .contactevents import ContactEvent
+        world, mine = self.world, cast(int, self.body)
+        if not world._reports_pair(j, mine):
+            return None
+        approach = (max(0.0, -float(np.dot(self._arrived, normal)))
+                    if phase == 'begin' else 0.0)
+        # The normal runs from the lower-indexed body to the other; ``normal``
+        # runs from the surface into the capsule.
+        a, b = (j, mine) if j < mine else (mine, j)
+        return ContactEvent(phase, world.ref(a), world.ref(b), point,
+                            normal if j < mine else -normal, approach, 0.0, 0.0, 0.0,
+                            0.0, 1 if phase == 'begin' else 0, world.step_count,
+                            world.time, reason=reason)
 
     def remove(self) -> None:
-        """Take :attr:`body` out of the world; the controller keeps working without it."""
-        if self.body is not None:
-            self.world.remove_body(self.body)
-            self.body = None
+        """Take :attr:`body` out of the world; the controller keeps working without it.
+
+        What the capsule was touching ends with ``reason='removed'``.
+        """
+        if self.body is None:
+            return
+        if self.world.contact_reporting != 'off':
+            self.world.report_contact_events([
+                event for event in (self._event(j, 'end', normal, point, reason='removed')
+                                    for j, (normal, point) in self._touching.items())
+                if event is not None])
+        self._touching = {}
+        self.world.remove_body(self.body)
+        self.body = None
 
     def _reach(self) -> tuple[float, float]:
         """How far the capsule may travel before a surface stops overlapping it.

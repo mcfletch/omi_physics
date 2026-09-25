@@ -101,7 +101,7 @@ class TestWhatItMeets:
         start = world.position[crate].copy()
         walk(world, character, 1.5)
         touches = [event for event in heard
-                   if character.body in (event.a.index, event.b.index)]
+                   if {character.body, crate} == {event.a.index, event.b.index}]
         assert touches and touches[0].phase == 'begin'
         assert not touches[0].solved
         assert np.allclose(world.position[crate], start, atol=1e-3)
@@ -127,3 +127,44 @@ def test_a_sensor_body_is_never_solved() -> None:
     assert world.linear_velocity[ball][0] == pytest.approx(-2.0)
     assert world.contacts == []
     assert world.is_sensor(sensor)
+
+
+class TestWhatItStandsOnAndWalksInto:
+    def wall(self, world, x=0.0):
+        shape = world.add_shape(model.Shape.box((0.4, 3.0, 4.0)))
+        return world.add_body(model.Motion(type=model.STATIC),
+                              collider=model.Collider(shape=shape), position=(x, 1.5, 0.0))
+
+    def test_landing_on_the_floor_begins_a_contact(self) -> None:
+        world = floor_world()
+        character = CharacterController(world, CharacterCapabilities(), body=True,
+                                        position=(0.0, 3.0, 0.0))
+        heard = []
+        world.add_contact_listener(heard.append)
+        for _ in range(90):
+            character.update(DT)
+        floor = 0
+        began = [e for e in heard if e.phase == 'begin']
+        assert [(e.a.index, e.b.index) for e in began] == [(floor, character.body)]
+        assert began[0].approach > 3.0
+        assert np.allclose(began[0].normal, (0, 1, 0), atol=0.05)
+
+    def test_walking_into_a_wall_and_away_begins_and_ends(self) -> None:
+        world = floor_world()
+        wall = self.wall(world)
+        character = walker(world)
+        heard = []
+        world.add_contact_listener(heard.append)
+        walk(world, character, 2.0)
+        walk(world, character, 1.0, direction=(-1, 0, 0))
+        at_wall = [(e.phase, e.reason) for e in heard
+                   if wall in (e.a.index, e.b.index)]
+        assert at_wall == [('begin', None), ('end', 'separated')]
+
+    def test_nothing_is_reported_without_a_listener(self) -> None:
+        world = floor_world()
+        self.wall(world)
+        character = walker(world)
+        walk(world, character, 2.0)
+        assert world.contact_reporting == 'off'
+        assert len(world.contact_log) == 0
