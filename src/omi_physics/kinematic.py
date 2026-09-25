@@ -106,9 +106,17 @@ class KinematicMover:
         self.world = world
         self.index = index
         self.speed = float(speed)
-        #: Where the body is going, in world coordinates.
-        self.target = np.array(world.position[index] if target is None else target,
-                               dtype='d')
+        self._target = np.array(world.position[index] if target is None else target,
+                                dtype='d')
+
+    @property
+    def target(self) -> np.ndarray:
+        """Where the body is going, in world coordinates."""
+        return self._target
+
+    @target.setter
+    def target(self, position: Vec) -> None:
+        self._target = np.array(position, dtype='d')
 
     @property
     def arrived(self) -> bool:
@@ -119,7 +127,7 @@ class KinematicMover:
     def update(self, dt: float) -> None:
         """Set this frame's velocity toward :attr:`target`, or place the body on it."""
         world, i = self.world, self.index
-        target = np.asarray(self.target, dtype='d')
+        target = self._target
         gap = target - world.position[i]
         distance = float(np.linalg.norm(gap))
         if distance <= self.speed * max(dt, 0.0):
