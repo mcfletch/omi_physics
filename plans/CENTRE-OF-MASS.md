@@ -1,6 +1,14 @@
 # Honouring a body's centre of mass
 
-*Proposed.*
+*Proposed; the offset shapes it needs have landed.*
+
+2026-10: `Shape.compound` places shapes at offsets in a body's frame, and
+broadphase bounds, the narrow phase, raycasts and `massprops` all read the
+offsets. A caller can hold a body's mass off-centre today by building its
+collider as a compound offset by `-centerOfMass` and converting the pose
+itself, which is what OpenGLContext's X3D `RigidBody.centerOfMass` does.
+What remains is the rest of the list below: `add_body` reading
+`Motion.centerOfMass` and the accessors that give back the node point.
 
 `model.Motion` carries `centerOfMass`, `omi_gltf` reads and writes it, and
 nothing in the solver looks at it. A body's origin is its mass, the centre of

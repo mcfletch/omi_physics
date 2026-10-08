@@ -251,6 +251,94 @@ hit = raycast(world, origin, direction, filter=team_shot)
   collider's filter it collides with, in the same terms as two colliders.
   `raycast_many` and `bodies_along` take both as `raycast` does.
 
+### Shapes in pieces, cylinders and cones
+
+A body's collider is one shape, and `Shape.compound` makes one shape of
+several, each placed in the body's frame. The body's origin is where its mass
+is, so a part placed away from the origin is a shape hung off-centre; a
+compound's mass is shared among its parts by volume.
+
+```python
+from omi_physics import model
+
+hammer = model.Shape.compound([
+    model.ShapePart(model.Shape.box((0.1, 0.1, 0.8)), position=(0.0, 0.0, 0.25)),
+    model.ShapePart(model.Shape.box((0.3, 0.12, 0.12)), position=(0.0, 0.0, -0.2)),
+])
+cone = model.Shape(type='cylinder', height=1.0, radiusBottom=0.5, radiusTop=0.0)
+```
+
+A `cylinder` has flat ends and narrows from `radiusBottom` to `radiusTop`;
+zero at either end is a cone. A ray meets each part, side and end exactly. A
+triangle mesh is for what does not move: two meshes make no contacts with
+each other, so a moving body is given a convex shape.
+
+### Hinges, sliders and wheels
+
+`omi_physics.joints` holds two bodies together in the ways a machine does.
+Each joint is given its anchor and axes in world coordinates as the bodies
+stand when it is added; either body may be `-1`, the world. Angles are in
+radians, measured from where the joint was added.
+
+```python
+from omi_physics.joints import HingeJoint, SliderJoint, TwoAxisHingeJoint
+
+door = world.add_joint_constraint(HingeJoint(
+    frame, leaf, anchor=(0.0, 1.0, 0.5), axis=(0, 1, 0), lower=0.0, upper=1.6,
+    stop_bounce=0.2))
+piston = world.add_joint_constraint(SliderJoint(
+    block, rod, axis=(1, 0, 0), lower=0.0, upper=0.3, motor_speed=0.5, motor_force=200.0))
+wheel = world.add_joint_constraint(TwoAxisHingeJoint(
+    chassis, tyre, anchor=(0.8, 0.3, 1.2), axis1=(0, 1, 0), axis2=(1, 0, 0),
+    lower1=-0.5, upper1=0.5, motor2_speed=20.0, motor2_torque=300.0,
+    suspension_stiffness=30000.0, suspension_damping=2000.0))
+door.angle(world), piston.separation(world), wheel.angle2_rate(world)
+```
+
+- `BallJoint` shares a point; `HingeJoint` turns about one axis;
+  `SliderJoint` slides along one and turns about none, and its `force`
+  pushes the bodies apart each step; `UniversalJoint` keeps one axis on each
+  body at the angle they started at, so a spin is carried across;
+  `TwoAxisHingeJoint` is a steered, sprung wheel; `MotorJoint` turns two
+  bodies against each other by torques about up to three axes.
+- Stops (`lower`, `upper`) throw the joint back at `stop_bounce` times its
+  speed and take out `stop_erp` of an overshoot each step; equal stops lock
+  the axis. A motor reaches its speed with at most its force or torque.
+- Each joint's `erp` (default 0.2) is the fraction of its drift taken out a
+  step and `cfm` the give of its locked rows. Jointed bodies do not collide
+  with each other unless `collide_connected` is set.
+- The rows of every joint are solved together, warm started from the last
+  step, compiled where the accelerator is built. `remove_joint_constraint`
+  takes a joint away.
+
+### Which pairs collide, and how
+
+`set_pair_rule(rule)` asks `rule(a, b)` about each pair the world would
+solve, each step: False lets them pass through each other, None leaves their
+materials in charge, and a `model.ContactParameters` says how they meet.
+
+```python
+belt = model.ContactParameters(friction=1.0, friction_direction=(1, 0, 0),
+                               surface_speed=(0.8, 0.0))
+world.set_pair_rule(lambda a, b: belt if conveyor in (a, b) else None)
+```
+
+`ContactParameters` carries restitution and the closing speed below which
+nothing bounces, two friction coefficients and the direction of the first, a
+surface speed that carries the second body across the first, slip and
+softness (constraint-force mixing, metres per newton-second) and the fraction
+of an overlap corrected each step. `world.contact_solver` exposes the
+solver's iterations, `slop`, `correction`, `softness` and `max_correction`.
+
+### Pushing, spinning and resting
+
+`set_force(i, force)` and `set_torque(i, torque)` push a body every step
+until changed. `set_exact_rotation(i)` integrates a fast spin through its
+whole angle rather than to first order. `set_sleep(i, linear, angular,
+after)` gives one body its own sleep thresholds, an infinite `after` keeping
+it awake; `sleep_linear_speed`, `sleep_angular_speed` and `sleep_time` are
+the world's.
+
 ### Doors, lifts and platforms
 
 A kinematic body moves at the velocity it is given and is pushed by nothing.
@@ -422,14 +510,16 @@ src/omi_physics/        the engine (importable as omi_physics)
   gjk.py                GJK/EPA for convex shapes
   narrowphase.py        contact generation, routes to accelerators
   solver.py             island-parallel sequential-impulse contact solver
-  joints.py             point / distance / hinge constraints and motors
+  joints.py             ball, hinge, slider, universal, two-axis hinge, motor joints
+  jointrows.py          joints as rows of velocity constraints, solved together
+  massprops.py          volume, centroid and inertia of every shape
   character.py          kinematic character controller
   kinematic.py          kinematic bodies driven along a pose, or to a target
   vehicle.py            raycast vehicle: suspension, drive, steering
   cookery.py / hull.py  shape cooking (convex hulls, trimeshes)
   omi_gltf.py           read/write OMI physics from glTF documents
   threaded.py           ThreadedSimulation — background-thread stepping
-  _solver_native.pyx    Cython contact solver accelerator
+  _solver_native.pyx    Cython contact and joint-row solver accelerator
   _collide_native.pyx   Cython collision accelerator
 tests/                  pytest suite (pure NumPy; GPU-parity tests skip w/o GL)
   test_properties_*.py  property tests over generated input (hypothesis)

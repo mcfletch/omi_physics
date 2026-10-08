@@ -47,7 +47,7 @@ sequenceDiagram
         W->>W: trigger enter / stay / exit events
     end
     opt joints present
-        W->>JO: solve_joints(dt)
+        W->>JO: solve_joints(dt): the others, then every row joint's rows together
     end
     W->>B: integrate_positions(dt)
     Note right of B: x += v·dt, then q ← integrate(q, ω, dt)
@@ -61,16 +61,16 @@ sequenceDiagram
 
 | Stage | Reads | Writes |
 | --- | --- | --- |
-| **integrate forces** | `linear/angular_velocity`, `gravity`, damping, drag | `linear/angular_velocity` |
+| **integrate forces** | `linear/angular_velocity`, `gravity`, damping, drag, each body's steady `force` and `torque`, each joint's own force | `linear/angular_velocity` |
 | **refit AABBs** | `position`, `orientation`, shape half-extents | `aabb_min`, `aabb_max` |
-| **broadphase** | `aabb_min/max`, collision filters | candidate `(i, j)` pairs |
+| **broadphase** | `aabb_min/max`, collision filters, jointed pairs, the pair rule | candidate `(i, j)` pairs, each pair's `ContactParameters` |
 | **narrowphase** | candidate pairs, `position`, `orientation`, shapes | `Contact` manifolds (normal, points, depth) |
 | **contact filter** | reported pairs on their first step, pre-solve velocities | which pairs the solver sees |
 | **solver** | contacts, velocities, inverse mass/inertia, materials | `linear/angular_velocity`, positional correction, `Contact.approach`, `slip`, impulses |
 | **contact tracker** | the solver's contact arrays, last step's touching pairs, `awake`, AABBs | `ContactEvent`s to listeners and `contact_log` |
 | **triggers** | trigger pairs, trigger and collider filters | `TriggerEvent`s to listeners and `contact_log` |
 | **joints** | joint definitions, body poses/velocities | velocities, poses |
-| **integrate positions** | velocities | `position`, `orientation` |
+| **integrate positions** | velocities | `position`, `orientation`; a body with exact rotation turns through its whole angle |
 | **sleeping** | velocities over time | `awake`, `sleep_timer` |
 
 ## Broadphase → narrowphase → solve
