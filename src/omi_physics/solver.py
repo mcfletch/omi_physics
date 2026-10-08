@@ -50,18 +50,54 @@ def _skew_apply(inv_inertia_world: np.ndarray, r: np.ndarray,
     return inv_inertia_world @ _cross(r, impulse)
 
 
-def _basis(n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Two orthonormal tangents spanning the plane perpendicular to unit normal ``n``."""
+def _basis(n: np.ndarray, direction: np.ndarray | None = None
+           ) -> tuple[np.ndarray, np.ndarray]:
+    """Two orthonormal tangents spanning the plane perpendicular to unit normal ``n``.
+
+    The first lies along ``direction`` taken across the normal, where one is
+    given and is not along the normal itself.
+    """
+    if direction is not None:
+        across = direction - float(np.dot(direction, n)) * n
+        length = float(np.sqrt(across[0] * across[0] + across[1] * across[1]
+                               + across[2] * across[2]))
+        if length > 1e-9:
+            t1 = across / length
+            return t1, _cross(n, t1)
     a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     t1 = mathutil.normalize(_cross(a, n))
     t2 = _cross(n, t1)
     return t1, t2
 
 
+class _Terms:
+    """What each contact of a solve is to do, as arrays a row per contact.
+
+    From the pair's :class:`~omi_physics.model.ContactParameters` where a
+    pair rule gave it some, and from the bodies' materials and the solver's
+    own settings where not.
+    """
+    __slots__ = ('restitution', 'threshold', 'friction', 'direction', 'surface',
+                 'softness', 'correction')
+
+    def __init__(self, count: int) -> None:
+        self.restitution = np.empty(count)
+        self.threshold = np.empty(count)
+        #: The two friction coefficients.
+        self.friction = np.empty((count, 2))
+        #: The first friction direction, or zero for the solver's own choice.
+        self.direction = np.zeros((count, 3))
+        #: How fast the second body is carried across the first, per direction.
+        self.surface = np.zeros((count, 2))
+        #: Softness of the normal row and of each friction row, divided by the step.
+        self.softness = np.zeros((count, 3))
+        self.correction = np.empty(count)
+
+
 class _ContactConstraint:
     """Solver scratch for one contact: contact arms, normal/tangent basis, and masses."""
     __slots__ = ('c', 'rA', 'rB', 'n', 't1', 't2', 'nMass', 't1Mass', 't2Mass',
-                 'restitution', 'friction', 'vBias')
+                 'restitution', 'friction', 'friction2', 'vBias', 'surface', 'softness')
 
     c: 'Contact'
     rA: np.ndarray
@@ -74,7 +110,10 @@ class _ContactConstraint:
     t2Mass: float
     restitution: float
     friction: float
+    friction2: float
     vBias: float
+    surface: tuple[float, float]
+    softness: tuple[float, float, float]
 
     def __init__(self, contact: 'Contact') -> None:
         self.c = contact
@@ -83,15 +122,16 @@ class _ContactConstraint:
 class SequentialImpulseSolver:
     """Projected Gauss-Seidel contact solver: normal, friction, then position pass."""
 
-    def __init__(self, velocity_iterations: int = 10, position_iterations: int = 3,
-                 baumgarte: float = 0.2, slop: float = 0.005,
+    def __init__(self, velocity_iterations: int = 10, slop: float = 0.005,
                  restitution_threshold: float = 0.5,
                  warm_start: bool = True,
-                 max_correction: float = 0.2) -> None:
+                 max_correction: float = 0.2, correction: float = 0.8,
+                 softness: float = 0.0) -> None:
         self.velocity_iterations = velocity_iterations
-        self.position_iterations = position_iterations
-        self.baumgarte = baumgarte
+        #: How far, in metres, a pair may overlap before the position pass
+        #: pushes it apart.
         self.slop = slop
+        #: The closing speed, in metres a second, below which nothing bounces.
         self.restitution_threshold = restitution_threshold
         self.warm_start = warm_start
         #: The furthest, in metres, the position pass will push a pair apart in
@@ -99,6 +139,11 @@ class SequentialImpulseSolver:
         #: or driven there at speed -- then climbs out over a few frames rather
         #: than being flung out of the level in one.
         self.max_correction = max_correction
+        #: The fraction of an overlap the position pass takes out each step.
+        self.correction = correction
+        #: Constraint-force mixing of every contact a pair rule says nothing
+        #: about, in metres per newton-second: zero is a hard contact.
+        self.softness = softness
         # (a,b) -> [(point, nImpulse, t0, t1)] carried to the next step for warm start
         self._cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
         #: The last solve's contacts as arrays, impulses included, where the
@@ -128,7 +173,51 @@ class SequentialImpulseSolver:
         """Physics material of body ``i`` (the default material when it has none)."""
         return world.material_for(world.collider_material[i])
 
-    def _prepare(self, world: "PhysicsWorld", contacts: list["Contact"],
+    def _terms(self, world: "PhysicsWorld", contacts: list["Contact"], dt: float) -> _Terms:
+        """Each contact's bounce, friction, give and correction (:class:`_Terms`)."""
+        terms = _Terms(len(contacts))
+        combine = model.combine
+        softness = self.softness / dt if dt > 0.0 else 0.0
+        rules = world.pair_parameters
+        for i, c in enumerate(contacts):
+            a, b = c.a, c.b
+            found = rules.get((a, b)) if rules else None
+            if found is None and rules:
+                found = rules.get((b, a))
+                flipped = True
+            else:
+                flipped = False
+            if found is None:
+                mat_a, mat_b = self._material(world, a), self._material(world, b)
+                terms.restitution[i] = combine(mat_a.restitution, mat_b.restitution,
+                                               mat_a.restitutionCombine)
+                override = world.pair_friction_for(world.collider_material[a],
+                                                   world.collider_material[b])
+                mu = (override[1] if override is not None else
+                      combine(mat_a.dynamicFriction, mat_b.dynamicFriction,
+                              mat_a.frictionCombine))
+                terms.friction[i, 0] = mu
+                terms.friction[i, 1] = mu
+                terms.threshold[i] = self.restitution_threshold
+                terms.softness[i, 0] = softness
+                terms.correction[i] = self.correction
+                continue
+            terms.restitution[i] = found.restitution
+            terms.threshold[i] = (self.restitution_threshold if found.bounce_speed is None
+                                  else found.bounce_speed)
+            terms.friction[i] = found.frictions
+            if found.friction_direction is not None:
+                terms.direction[i] = found.friction_direction
+            sign = -1.0 if flipped else 1.0
+            terms.surface[i] = (sign * found.surface_speed[0], sign * found.surface_speed[1])
+            if dt > 0.0:
+                terms.softness[i] = (found.softness / dt, found.slip[0] / dt,
+                                     found.slip[1] / dt)
+            terms.correction[i] = (self.correction if found.error_correction is None
+                                   else found.error_correction)
+        return terms
+
+    def _prepare(self, world: "PhysicsWorld", contacts: list["Contact"], terms: _Terms,
                  ) -> tuple[list[_ContactConstraint], dict[int, np.ndarray]]:
         """Build a constraint per contact and cache each body's world inverse inertia.
 
@@ -139,7 +228,7 @@ class SequentialImpulseSolver:
         """
         cons = []
         invI: dict[int, np.ndarray] = {}
-        for c in contacts:
+        for index, c in enumerate(contacts):
             a, b = c.a, c.b
             if a not in invI:
                 invI[a] = self._inv_inertia_world(world, a)
@@ -149,20 +238,18 @@ class SequentialImpulseSolver:
             k.rA = c.point - world.position[a]
             k.rB = c.point - world.position[b]
             k.n = c.normal
-            k.t1, k.t2 = _basis(c.normal)
-            k.nMass = self._effective_mass(world, invI, a, b, k.rA, k.rB, k.n)
-            k.t1Mass = self._effective_mass(world, invI, a, b, k.rA, k.rB, k.t1)
-            k.t2Mass = self._effective_mass(world, invI, a, b, k.rA, k.rB, k.t2)
-            mat_a, mat_b = self._material(world, a), self._material(world, b)
-            k.restitution = model.combine(mat_a.restitution, mat_b.restitution,
-                                          mat_a.restitutionCombine)
-            override = world.pair_friction_for(world.collider_material[a],
-                                               world.collider_material[b])
-            if override is not None:
-                k.friction = override[1]                # dynamic mu
-            else:
-                k.friction = model.combine(mat_a.dynamicFriction, mat_b.dynamicFriction,
-                                           mat_a.frictionCombine)
+            direction = terms.direction[index]
+            k.t1, k.t2 = _basis(c.normal, direction if direction.any() else None)
+            c.tangent = k.t1
+            soft_n, soft_1, soft_2 = (float(value) for value in terms.softness[index])
+            k.softness = (soft_n, soft_1, soft_2)
+            k.nMass = self._effective_mass(world, invI, a, b, k.rA, k.rB, k.n, soft_n)
+            k.t1Mass = self._effective_mass(world, invI, a, b, k.rA, k.rB, k.t1, soft_1)
+            k.t2Mass = self._effective_mass(world, invI, a, b, k.rA, k.rB, k.t2, soft_2)
+            k.restitution = float(terms.restitution[index])
+            k.friction = float(terms.friction[index, 0])
+            k.friction2 = float(terms.friction[index, 1])
+            k.surface = (float(terms.surface[index, 0]), float(terms.surface[index, 1]))
             # How hard they met, which restitution is a fraction of and
             # impact_on answers from. Taken before anything is solved because
             # the iterations below are precisely the removal of it.
@@ -172,7 +259,7 @@ class SequentialImpulseSolver:
             c.approach = -along
             c.slip = float(np.linalg.norm(relative - along * k.n))
             k.vBias = (k.restitution * c.approach
-                       if c.approach > self.restitution_threshold else 0.0)
+                       if c.approach > float(terms.threshold[index]) else 0.0)
             if self.warm_start:
                 self._seed_from_cache(k)
             cons.append(k)
@@ -211,45 +298,45 @@ class SequentialImpulseSolver:
 
     def _effective_mass(self, world: "PhysicsWorld", invI: dict[int, np.ndarray],
                         a: int, b: int, rA: np.ndarray, rB: np.ndarray,
-                        dir: np.ndarray) -> float:
-        """Reciprocal of the pair's inverse mass along ``dir`` (0 for two immovable bodies)."""
+                        dir: np.ndarray, softness: float = 0.0) -> float:
+        """Reciprocal of the pair's inverse mass along ``dir``, with ``softness`` added.
+
+        Zero for two immovable bodies and a hard row.
+        """
         raxn = _cross(rA, dir)
         rbxn = _cross(rB, dir)
         k = world.inv_mass[a] + world.inv_mass[b]
         k += np.dot(raxn, invI[a] @ raxn)
         k += np.dot(rbxn, invI[b] @ rbxn)
+        k += softness
         return 1.0 / k if k > 1e-12 else 0.0
 
     # -- solve -----------------------------------------------------------
     def solve(self, world: "PhysicsWorld", contacts: list["Contact"],
-              dt: float) -> None:  # noqa: ARG002 - see below
+              dt: float) -> None:
         """Resolve ``contacts`` in place: velocity iterations then a position pass.
 
         Mutates the world's velocities and positions.  Empty ``contacts`` is a no-op.
-
-        ``dt`` is part of the interface a solver implements --
-        the world's collision pass hands the step to whatever solver it was
-        given -- and this one does not read it.  The position pass
-        is a split impulse rather than a Baumgarte bias, so how far it moves a
-        pair apart does not depend on how long the step was.
+        ``dt`` turns a contact's softness, a constraint-force mixing, into the
+        give of its rows; the position pass is a split impulse rather than a
+        Baumgarte bias, so how far it moves a pair apart does not depend on
+        how long the step was.
         """
         self.last_batch = None
         if not contacts:
             return
         contacts = self._static_last(world, contacts)
         self._wake_sleepers(world, contacts)
-        if _native is not None and hasattr(_native, 'prepare_and_solve'):
-            self._solve_native_full(world, contacts)
-            return
-        cons, invI = self._prepare(world, contacts)
+        terms = self._terms(world, contacts, dt)
         if _native is not None:
-            self._solve_native(world, cons, invI)
-        else:
-            if self.warm_start:
-                self._apply_warm_start(world, cons, invI)
-            for _ in range(self.velocity_iterations):
-                self._solve_velocity(world, cons, invI)
-            self._solve_positions(world, contacts)
+            self._solve_native_full(world, contacts, terms)
+            return
+        cons, invI = self._prepare(world, contacts, terms)
+        if self.warm_start:
+            self._apply_warm_start(world, cons, invI)
+        for _ in range(self.velocity_iterations):
+            self._solve_velocity(world, cons, invI)
+        self._solve_positions(world, contacts, terms.correction)
         if self.warm_start:
             self._store_cache(cons)
 
@@ -300,32 +387,22 @@ class SequentialImpulseSolver:
                 best, best_d = (nImp, t0, t1), d
         return best
 
-    def _solve_native_full(self, world: "PhysicsWorld", contacts: list["Contact"]) -> None:
+    def _solve_native_full(self, world: "PhysicsWorld", contacts: list["Contact"],
+                           terms: _Terms) -> None:
         """Assemble contact arrays and run prep + velocity + position in the kernel.
 
-        Only the material combine, the warm-start seeding and the record of how
-        hard each pair met stay in Python (all cheap per contact); the geometric
-        constraint setup and all iterations are native.
+        Only the warm-start seeding and the record of how hard each pair met
+        stay in Python (both cheap per contact); the geometric constraint setup
+        and all iterations are native.
         """
         K = len(contacts)
         a_idx = np.empty(K, dtype=np.intp); b_idx = np.empty(K, dtype=np.intp)
         point = np.empty((K, 3)); normal = np.empty((K, 3)); depth = np.empty(K)
-        restitution = np.empty(K); friction = np.empty(K)
-        nImp = np.zeros(K); tImp = np.zeros((K, 2))
+        nImp = np.zeros(K); tImp = np.zeros((K, 2)); first = np.empty((K, 3))
         warm = self.warm_start
-        combine = model.combine
         for i, c in enumerate(contacts):
-            a, b = c.a, c.b
-            a_idx[i] = a; b_idx[i] = b
+            a_idx[i] = c.a; b_idx[i] = c.b
             point[i] = c.point; normal[i] = c.normal; depth[i] = c.depth
-            mat_a, mat_b = self._material(world, a), self._material(world, b)
-            restitution[i] = combine(mat_a.restitution, mat_b.restitution,
-                                     mat_a.restitutionCombine)
-            override = world.pair_friction_for(world.collider_material[a],
-                                               world.collider_material[b])
-            friction[i] = (override[1] if override is not None else
-                           combine(mat_a.dynamicFriction, mat_b.dynamicFriction,
-                                   mat_a.frictionCombine))
             if warm:
                 seed = self._seed_pair(c)
                 if seed is not None:
@@ -342,13 +419,15 @@ class SequentialImpulseSolver:
         _native.prepare_and_solve(
             a_idx, b_idx, point, normal, depth,
             world.position, world.linear_velocity, world.angular_velocity,
-            world.inv_mass, invIw, restitution, friction, nImp, tImp,
-            self.restitution_threshold, self.velocity_iterations, warm,
-            0.8, self.slop, self.max_correction)
+            world.inv_mass, invIw, terms.restitution, terms.threshold,
+            np.ascontiguousarray(terms.friction), terms.direction, terms.surface,
+            terms.softness, terms.correction, nImp, tImp, first,
+            self.velocity_iterations, warm, self.slop, self.max_correction)
         cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
         for i, c in enumerate(contacts):
             c.normal_impulse = float(nImp[i])
             c.tangent_impulse[0] = tImp[i, 0]; c.tangent_impulse[1] = tImp[i, 1]
+            c.tangent = first[i]
             if warm:
                 cache.setdefault((c.a, c.b), []).append(
                     (c.point.copy(), nImp[i], tImp[i, 0], tImp[i, 1]))
@@ -356,50 +435,8 @@ class SequentialImpulseSolver:
             self._cache = cache
         self.last_batch = ContactBatch(
             a_idx, b_idx, point, normal, depth, approach, slip, nImp,
-            world_tangent(normal, tImp), np.ones(K, dtype=bool))
+            world_tangent(normal, tImp, first), np.ones(K, dtype=bool))
         self.last_batch_step = world.step_count
-
-    def _solve_native(self, world: "PhysicsWorld", cons: list[_ContactConstraint],
-                      invI: dict[int, np.ndarray]) -> None:
-        """Run the velocity and position iterations in the Cython kernel.
-
-        Packs the per-contact constraint data into SoA arrays once, then the
-        native loops do all ``velocity_iterations`` (+ warm start) and the split-
-        impulse position pass without returning to Python. Accumulated impulses
-        are written back onto the contacts so the warm-start cache still works.
-        """
-        K = len(cons)
-        a_idx = np.empty(K, dtype=np.intp)
-        b_idx = np.empty(K, dtype=np.intp)
-        rA = np.empty((K, 3)); rB = np.empty((K, 3)); nrm = np.empty((K, 3))
-        t1 = np.empty((K, 3)); t2 = np.empty((K, 3))
-        nMass = np.empty(K); t1Mass = np.empty(K); t2Mass = np.empty(K)
-        friction = np.empty(K); vBias = np.empty(K); depth = np.empty(K)
-        invIa = np.empty((K, 3, 3)); invIb = np.empty((K, 3, 3))
-        nImp = np.empty(K); tImp = np.empty((K, 2))
-        for i, k in enumerate(cons):
-            c = k.c
-            a_idx[i] = c.a; b_idx[i] = c.b
-            rA[i] = k.rA; rB[i] = k.rB; nrm[i] = k.n; t1[i] = k.t1; t2[i] = k.t2
-            nMass[i] = k.nMass; t1Mass[i] = k.t1Mass; t2Mass[i] = k.t2Mass
-            friction[i] = k.friction; vBias[i] = k.vBias; depth[i] = c.depth
-            invIa[i] = invI[c.a]; invIb[i] = invI[c.b]
-            nImp[i] = c.normal_impulse
-            tImp[i, 0] = c.tangent_impulse[0]; tImp[i, 1] = c.tangent_impulse[1]
-        ima = np.ascontiguousarray(world.inv_mass[a_idx])
-        imb = np.ascontiguousarray(world.inv_mass[b_idx])
-        _native.solve_velocity(a_idx, b_idx, rA, rB, nrm, t1, t2,
-                               nMass, t1Mass, t2Mass, friction, vBias,
-                               invIa, invIb, ima, imb, nImp, tImp,
-                               world.linear_velocity, world.angular_velocity,
-                               self.velocity_iterations, self.warm_start)
-        for i, k in enumerate(cons):
-            k.c.normal_impulse = nImp[i]
-            k.c.tangent_impulse[0] = tImp[i, 0]
-            k.c.tangent_impulse[1] = tImp[i, 1]
-        _native.solve_positions(a_idx, b_idx, nrm, depth, ima, imb,
-                                world.position, 0.8, self.slop,
-                                self.max_correction)
 
     def _wake_sleepers(self, world: "PhysicsWorld", contacts: list["Contact"],
                        wake_speed: float = 0.15) -> None:
@@ -446,10 +483,12 @@ class SequentialImpulseSolver:
             a, b = c.a, c.b
             rA, rB, nrm = k.rA, k.rB, k.n
             iIa, iIb, ima, imb = invI[a], invI[b], im[a], im[b]
+            soft_n, soft_1, soft_2 = k.softness
 
             dv = lv[b] + _cross(av[b], rB) - lv[a] - _cross(av[a], rA)
             vn = dv[0] * nrm[0] + dv[1] * nrm[1] + dv[2] * nrm[2]
-            new_impulse = c.normal_impulse - k.nMass * (vn - k.vBias)
+            new_impulse = c.normal_impulse - k.nMass * (vn - k.vBias
+                                                        + soft_n * c.normal_impulse)
             if new_impulse < 0.0:
                 new_impulse = 0.0
             P = (new_impulse - c.normal_impulse) * nrm
@@ -459,12 +498,14 @@ class SequentialImpulseSolver:
             lv[b] += imb * P
             av[b] += iIb @ _cross(rB, P)
 
-            max_friction = k.friction * c.normal_impulse
             dv = lv[b] + _cross(av[b], rB) - lv[a] - _cross(av[a], rA)
-            for t, tMass, comp in ((k.t1, k.t1Mass, 0), (k.t2, k.t2Mass, 1)):
+            for t, tMass, comp, mu, speed, soft in (
+                    (k.t1, k.t1Mass, 0, k.friction, k.surface[0], soft_1),
+                    (k.t2, k.t2Mass, 1, k.friction2, k.surface[1], soft_2)):
+                max_friction = mu * c.normal_impulse
                 vt = dv[0] * t[0] + dv[1] * t[1] + dv[2] * t[2]
                 old = c.tangent_impulse[comp]
-                new = old - tMass * vt
+                new = old - tMass * (vt - speed + soft * old)
                 if new > max_friction:
                     new = max_friction
                 elif new < -max_friction:
@@ -477,7 +518,7 @@ class SequentialImpulseSolver:
                 av[b] += iIb @ _cross(rB, Pt)
 
     def _solve_positions(self, world: "PhysicsWorld", contacts: list["Contact"],
-                         correction: float = 0.8) -> None:
+                         correction: np.ndarray) -> None:
         """One split-impulse pass: push overlapping bodies apart along the normal.
 
         Each contact is corrected against what the pass has **already** done,
@@ -489,15 +530,16 @@ class SequentialImpulseSolver:
         movement already applied leaves the deepest point of a manifold in
         charge and the rest of it with little left to do.
 
+        ``correction`` is the fraction of each contact's overlap taken out.
         The correction is bounded by :attr:`max_correction` as well, so a body
         that arrives deep inside another comes out over a few frames.
         """
         moved: dict[int, np.ndarray] = {}
         unmoved = np.zeros(3)
-        for c in contacts:
+        for index, c in enumerate(contacts):
             a, b = c.a, c.b
             done = float(np.dot(moved.get(b, unmoved) - moved.get(a, unmoved), c.normal))
-            corr = correction * max(c.depth - done - self.slop, 0.0)
+            corr = float(correction[index]) * max(c.depth - done - self.slop, 0.0)
             if corr <= 0:
                 continue
             inv_sum = world.inv_mass[a] + world.inv_mass[b]

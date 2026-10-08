@@ -95,6 +95,11 @@ class PhysicsWorld:
         # material-combine rule, so a specific pairing (e.g. rubber-on-ice) can be
         # tuned without disturbing any other pairing.
         self.pair_friction: dict[tuple[int, int], tuple[float, float]] = {}
+        #: Asked of each pair that might collide, each step (:meth:`set_pair_rule`).
+        self._pair_rule: Callable[[int, int], Any] | None = None
+        #: What the pair rule said this step about the pairs it gave
+        #: parameters for, keyed by the pair as it was asked.
+        self.pair_parameters: dict[tuple[int, int], model.ContactParameters] = {}
 
         self._n = 0
         self._cap = 0
@@ -318,6 +323,27 @@ class PhysicsWorld:
                           material_b: int) -> tuple[float, float] | None:
         """Return ``(static_mu, dynamic_mu)`` for the pair, or ``None`` if unset."""
         return self.pair_friction.get(self._pair_key(material_a, material_b))
+
+    def set_pair_rule(self, rule: 'Callable[[int, int], Any] | None') -> None:
+        """Ask ``rule(a, b)`` whether, and how, two bodies collide, each step they might.
+
+        The rule is asked about every pair the broad phase finds that the
+        world would otherwise solve, once a step, before the narrow phase.
+        It answers False to let the pair pass through each other, None to
+        leave the bodies' materials in charge, or a
+        :class:`~omi_physics.model.ContactParameters` saying how they meet.
+        A surface speed in the parameters carries ``b`` across ``a``. None
+        removes the rule.
+        """
+        self._pair_rule = rule
+        if rule is None:
+            self.pair_parameters = {}
+
+    @property
+    def contact_solver(self) -> Any:
+        """The contact solver; its iterations, slop and corrections are settable."""
+        self._collision = self._collision or _CollisionStages()
+        return self._collision.solver
 
     @staticmethod
     def _pair_key(a: int, b: int) -> tuple[int, int]:
@@ -987,6 +1013,9 @@ class PhysicsWorld:
         """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
         pairs = stages.broadphase.pairs(self)
         jointed = self._jointed() if self.row_joints else None
+        rule = self._pair_rule
+        if rule is not None:
+            self.pair_parameters = {}
         solid: list[tuple[int, int]] = []
         sensed: list[tuple[int, int]] = []
         reporting = self.contact_reporting != 'off'
@@ -1008,6 +1037,12 @@ class PhysicsWorld:
                     and (self.motion_type[i] == _DYNAMIC
                          or self.motion_type[j] == _DYNAMIC)
                     and not (jointed and (min(i, j), max(i, j)) in jointed)):
+                if rule is not None:
+                    verdict = rule(i, j)
+                    if verdict is False:
+                        continue
+                    if verdict is not None:
+                        self.pair_parameters[(i, j)] = verdict
                 solid.append((i, j))
         contacts = stages.narrowphase.generate(self, solid)
         excluded: list[Contact] = []

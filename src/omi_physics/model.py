@@ -164,6 +164,44 @@ class Material:
 
 
 @dataclass
+class ContactParameters:
+    """How one pair of bodies meets: bounce, friction and give, in place of their materials.
+
+    A pair rule (:meth:`~omi_physics.world.PhysicsWorld.set_pair_rule`)
+    answers one for the pairs it decides.
+
+    ``restitution`` is the fraction of the closing speed a contact throws
+    back, once the pair closes faster than ``bounce_speed`` metres a second
+    (None: the solver's own threshold). ``friction`` is a Coulomb
+    coefficient, or a pair of them: the first along ``friction_direction``
+    and the second across it (without a direction the two act along
+    directions the solver chooses). ``surface_speed`` is how fast, in metres a
+    second, the second body is carried across the first along those two
+    directions, as a belt carries what sits on it. ``slip`` lets each
+    friction direction give in proportion to the force on it, and
+    ``softness`` lets the contact itself give: both are constraint-force
+    mixing, in metres per newton-second. ``error_correction`` is the fraction
+    of an overlap taken out each step (None: the solver's own).
+    """
+    restitution: float = 0.0
+    bounce_speed: float | None = None
+    friction: 'float | tuple[float, float]' = 0.6
+    friction_direction: tuple | None = None
+    surface_speed: tuple = (0.0, 0.0)
+    slip: tuple = (0.0, 0.0)
+    softness: float = 0.0
+    error_correction: float | None = None
+
+    @property
+    def frictions(self) -> tuple[float, float]:
+        """The two friction coefficients."""
+        if isinstance(self.friction, (int, float)):
+            return float(self.friction), float(self.friction)
+        first, second = self.friction
+        return float(first), float(second)
+
+
+@dataclass
 class CollisionFilter:
     """``collisionFilters[]`` — the standard layer/mask system.
 

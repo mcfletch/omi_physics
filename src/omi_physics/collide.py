@@ -75,6 +75,9 @@ class Contact:
     approach: float = 0.0
     #: Tangential relative speed before the solve, in metres per second.
     slip: float = 0.0
+    #: The solver's first friction direction; ``tangent_impulse`` is along it
+    #: and along ``normal`` × it. None until the contact is solved.
+    tangent: np.ndarray | None = None
 
 
 def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> list[Contact]:

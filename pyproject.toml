@@ -171,8 +171,9 @@ ignore = [
 "tests/test_character_proxy_cache.py" = ["SLF001"]
 "tests/test_character_void.py" = ["SLF001"]
 "tests/test_contact_events.py" = ["SLF001"]
-# Runs every joint test with the compiled row solver and with its Python twin.
+# Run each test with the compiled solver and with its Python twin.
 "tests/test_axis_joints.py" = ["SLF001"]
+"tests/test_contact_parameters.py" = ["SLF001"]
 "tests/test_threaded_rate.py" = ["SLF001"]
 
 [tool.ruff.format]
