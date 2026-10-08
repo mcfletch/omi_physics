@@ -32,6 +32,7 @@ from .contactevents import (
     measure,
 )
 from .gravity import apply_volumes
+from .massprops import inertia_diagonal
 from .mathutil import Vec
 from .narrowphase import NarrowPhase
 from .solver import SequentialImpulseSolver
@@ -788,7 +789,10 @@ class PhysicsWorld:
         """Drop per-body caches other modules keep on the world."""
         meshes = getattr(self, '_raycast_meshes', None)
         if meshes is not None:
-            meshes.pop(i, None)
+            # A compound's meshes are kept under the body's index and the part's.
+            for key in [key for key in meshes
+                        if key == i or (isinstance(key, tuple) and key[0] == i)]:
+                del meshes[key]
 
     def _reset_body(self, i: int) -> None:
         """Empty a slot: no collider, no motion, and nowhere the broad phase looks."""
@@ -1243,34 +1247,6 @@ class PhysicsWorld:
         for _ in range(self.joint_iterations):
             for c in self.joint_constraints:
                 c.solve(self, dt)
-
-
-def inertia_diagonal(shape: model.Shape | None, mass: float) -> np.ndarray:
-    """Solid-body inertia diagonal for a primitive shape about its centre."""
-    if shape is None:
-        return np.zeros(3)
-    t = shape.type
-    if t == 'sphere':
-        v = 0.4 * mass * shape.radius ** 2
-        return np.array([v, v, v])
-    if t == 'box':
-        x, y, z = shape.size
-        k = mass / 12.0
-        return k * np.array([y * y + z * z, x * x + z * z, x * x + y * y])
-    if t in ('capsule', 'cylinder'):
-        r = shape.radiusBottom
-        h = shape.height
-        ix = mass * (3 * r * r + h * h) / 12.0
-        iy = 0.5 * mass * r * r
-        return np.array([ix, iy, ix])
-    # convex / trimesh: approximate with the AABB box of the points
-    if shape.points is not None and len(shape.points):
-        lo = shape.points.min(axis=0)
-        hi = shape.points.max(axis=0)
-        x, y, z = hi - lo
-        k = mass / 12.0
-        return k * np.array([y * y + z * z, x * x + z * z, x * x + y * y])
-    return np.zeros(3)
 
 
 class _CollisionStages:

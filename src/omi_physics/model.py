@@ -10,6 +10,7 @@ References:
     OMI_physics_shape / OMI_physics_body / OMI_physics_gravity / OMI_physics_joint
     https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0
 """
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -36,7 +37,9 @@ class Shape:
     Only the fields relevant to ``type`` are meaningful; the rest keep their
     defaults.  ``convex``/``trimesh`` carry an explicit vertex array (and, for
     ``trimesh``, triangle indices) so the simulation never depends on render
-    geometry.
+    geometry.  A ``cylinder`` has flat ends and may narrow along its height:
+    ``radiusTop`` 0 is a cone.  A ``compound`` is not an OMI shape type; it
+    holds ``parts`` (:meth:`compound`).
     """
     type: str = 'box'
     size: tuple = (1.0, 1.0, 1.0)              # box
@@ -47,6 +50,8 @@ class Shape:
     points: np.ndarray | None = None         # convex / trimesh vertices (M,3)
     indices: np.ndarray | None = None        # trimesh triangle indices (T,3)
     mesh: int = -1                              # glTF mesh index (convex / trimesh)
+    #: The shapes of a ``compound``, each placed in the body's frame.
+    parts: 'list[ShapePart] | None' = None
 
     @classmethod
     def box(cls, size: Vec = (1.0, 1.0, 1.0)) -> 'Shape':
@@ -80,6 +85,32 @@ class Shape:
         """A static triangle-soup collider from vertices and ``(T, 3)`` triangle indices."""
         return cls(type='trimesh', points=np.asarray(points, dtype='d'),
                    indices=np.asarray(indices, dtype='i'))
+
+    @classmethod
+    def compound(cls, parts: 'Iterable[ShapePart | tuple]') -> 'Shape':
+        """Several shapes held together at offsets in one body's frame.
+
+        Each of ``parts`` is a :class:`ShapePart`, or a ``(shape, position,
+        orientation)`` triple. A part may itself be a compound. The body's
+        origin is where its mass is, so a part placed away from the origin
+        is a shape hung off-centre: a wheel on an axle, a weight on a lever,
+        a collider whose mass sits low in it.
+        """
+        placed = [part if isinstance(part, ShapePart) else ShapePart(*part)
+                  for part in parts]
+        return cls(type='compound', parts=placed)
+
+
+@dataclass
+class ShapePart:
+    """One shape of a ``compound``, placed in the body's frame.
+
+    ``position`` is the part's centre, in metres from the body's origin;
+    ``orientation`` turns the part, a unit quaternion ``(x, y, z, w)``.
+    """
+    shape: Shape
+    position: tuple = (0.0, 0.0, 0.0)
+    orientation: tuple = (0.0, 0.0, 0.0, 1.0)
 
 
 @dataclass

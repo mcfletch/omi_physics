@@ -112,6 +112,69 @@ class CapsuleProxy:
         return self.center
 
 
+class CylinderProxy:
+    """A flat-ended cylinder along the local Y axis, narrowing to a cone.
+
+    ``radius_bottom`` is the radius of the end at ``-half_height`` and
+    ``radius_top`` of the end at ``+half_height``; either may be zero.
+    """
+    kind = 'cylinder'
+
+    def __init__(self, center: ArrayLike, half_height: float, radius_bottom: float,
+                 radius_top: float, rotation: ArrayLike):
+        self.center = np.asarray(center, dtype='d')
+        self.half_height = float(half_height)
+        self.radius_bottom = float(radius_bottom)
+        self.radius_top = float(radius_top)
+        self.R = np.asarray(rotation, dtype='d')
+        self.axis = self.R[:, 1]
+        self.bottom = self.center - self.axis * self.half_height
+        self.top = self.center + self.axis * self.half_height
+
+    def aabb(self) -> _AABB:
+        """Axis-aligned bounding box as ``(lo, hi)``: the boxes of the two end discs."""
+        # A disc of radius r across axis a reaches r * sqrt(1 - a_k^2) along
+        # world axis k.
+        spread = np.sqrt(np.maximum(1.0 - self.axis * self.axis, 0.0))
+        lo = np.minimum(self.bottom - self.radius_bottom * spread,
+                        self.top - self.radius_top * spread)
+        hi = np.maximum(self.bottom + self.radius_bottom * spread,
+                        self.top + self.radius_top * spread)
+        return lo, hi
+
+    def support(self, direction: Vec) -> np.ndarray:
+        """Farthest point along ``direction``: a point on the rim of one end."""
+        d = np.asarray(direction, dtype='d')
+        radial = d - np.dot(d, self.axis) * self.axis
+        length = float(np.linalg.norm(radial))
+        radial = radial / length if length > 1e-12 else np.zeros(3)
+        bottom = self.bottom + self.radius_bottom * radial
+        top = self.top + self.radius_top * radial
+        return top if np.dot(top, d) >= np.dot(bottom, d) else bottom
+
+    def center_hint(self) -> np.ndarray:
+        """A representative interior point (the middle of the axis)."""
+        return self.center
+
+
+class CompoundProxy:
+    """Several proxies that move as one body, collided part by part."""
+    kind = 'compound'
+
+    def __init__(self, parts: 'list[Proxy]'):
+        self.parts = parts
+
+    def aabb(self) -> _AABB:
+        """Axis-aligned bounding box of every part, as ``(lo, hi)``."""
+        boxes = [part.aabb() for part in self.parts]
+        return (np.min([lo for lo, _ in boxes], axis=0),
+                np.max([hi for _, hi in boxes], axis=0))
+
+    def center_hint(self) -> np.ndarray:
+        """A representative point (the mean of the parts' own)."""
+        return np.mean([part.center_hint() for part in self.parts], axis=0)
+
+
 class ConvexProxy:
     """A world-space convex point cloud (its own convex hull)."""
     kind = 'convex'
@@ -210,9 +273,11 @@ class TriangleMeshProxy:
 
 
 # A support proxy answers ``support(direction)``; the mesh proxy does not (it is
-# collided triangle-by-triangle instead).  ``Proxy`` is any collision proxy.
-SupportProxy = SphereProxy | BoxProxy | CapsuleProxy | ConvexProxy | TriangleProxy
-Proxy = SupportProxy | TriangleMeshProxy
+# collided triangle-by-triangle instead), nor does a compound (part by part).
+# ``Proxy`` is any collision proxy.
+SupportProxy = (SphereProxy | BoxProxy | CapsuleProxy | CylinderProxy | ConvexProxy
+                | TriangleProxy)
+Proxy = SupportProxy | TriangleMeshProxy | CompoundProxy
 
 
 def make_proxy(shape: 'model.Shape', position: ArrayLike,
@@ -228,8 +293,8 @@ def make_proxy(shape: 'model.Shape', position: ArrayLike,
     if t == 'capsule':
         return CapsuleProxy(pos, 0.5 * shape.height, shape.radiusBottom, R)
     if t == 'cylinder':
-        # treated as a capsule-ish convex for AABB / support; narrow phase uses support
-        return CapsuleProxy(pos, 0.5 * shape.height, shape.radiusBottom, R)
+        return CylinderProxy(pos, 0.5 * shape.height, shape.radiusBottom,
+                             shape.radiusTop, R)
     if t == 'convex':
         if shape.points is None:
             raise ValueError('convex shape has no points')
@@ -238,7 +303,20 @@ def make_proxy(shape: 'model.Shape', position: ArrayLike,
         if shape.points is None or shape.indices is None:
             raise ValueError('trimesh shape needs both points and indices')
         return TriangleMeshProxy(shape.points, shape.indices, pos, R)
+    if t == 'compound':
+        return CompoundProxy([make_proxy(part.shape, *part_pose(part, pos, orientation))
+                              for part in shape.parts or ()])
     raise ValueError('unknown shape type %r' % t)
+
+
+def part_pose(part: 'model.ShapePart', position: ArrayLike,
+              orientation: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
+    """Where a compound's ``part`` is for a body at the pose given: ``(position, orientation)``."""
+    q = np.asarray(orientation, dtype='d')
+    placed = (np.asarray(position, dtype='d')
+              + mathutil.quat_to_matrix(q) @ np.asarray(part.position, dtype='d'))
+    turned = mathutil.quat_mul(q, np.asarray(part.orientation, dtype='d'))
+    return placed, turned
 
 
 def world_aabb(shape: 'model.Shape', position: ArrayLike,
@@ -251,6 +329,14 @@ def world_aabb(shape: 'model.Shape', position: ArrayLike,
     being measured. A streaming world measures a tile the moment it arrives.
     """
     kind = str(shape.type)
+    if kind == 'compound':
+        boxes = [world_aabb(part.shape, *part_pose(part, position, orientation))
+                 for part in shape.parts or ()]
+        if not boxes:
+            centre = np.asarray(position, dtype='d')
+            return centre.copy(), centre.copy()
+        return (np.min([lo for lo, _ in boxes], axis=0),
+                np.max([hi for _, hi in boxes], axis=0))
     if kind in ('trimesh', 'convex') and shape.points is not None:
         points = np.asarray(shape.points, dtype='d')
         if len(points):
