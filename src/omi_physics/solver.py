@@ -211,8 +211,8 @@ class SequentialImpulseSolver:
             sign = -1.0 if flipped else 1.0
             terms.surface[i] = (sign * found.surface_speed[0], sign * found.surface_speed[1])
             if dt > 0.0:
-                terms.softness[i] = (found.softness / dt, found.slip[0] / dt,
-                                     found.slip[1] / dt)
+                give = self.softness if found.softness is None else found.softness
+                terms.softness[i] = (give / dt, found.slip[0] / dt, found.slip[1] / dt)
             terms.correction[i] = (self.correction if found.error_correction is None
                                    else found.error_correction)
         return terms

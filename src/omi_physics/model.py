@@ -180,8 +180,9 @@ class ContactParameters:
     directions, as a belt carries what sits on it. ``slip`` lets each
     friction direction give in proportion to the force on it, and
     ``softness`` lets the contact itself give: both are constraint-force
-    mixing, in metres per newton-second. ``error_correction`` is the fraction
-    of an overlap taken out each step (None: the solver's own).
+    mixing, in metres per newton-second (a ``softness`` of None: the solver's
+    own). ``error_correction`` is the fraction of an overlap taken out each
+    step (None: the solver's own).
     """
     restitution: float = 0.0
     bounce_speed: float | None = None
@@ -189,7 +190,7 @@ class ContactParameters:
     friction_direction: tuple | None = None
     surface_speed: tuple = (0.0, 0.0)
     slip: tuple = (0.0, 0.0)
-    softness: float = 0.0
+    softness: float | None = None
     error_correction: float | None = None
 
     @property
