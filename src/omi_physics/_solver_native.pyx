@@ -336,3 +336,94 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
             pos[b, 0] += imbk * dL * normal[k, 0]
             pos[b, 1] += imbk * dL * normal[k, 1]
             pos[b, 2] += imbk * dL * normal[k, 2]
+
+
+cdef inline void _apply_row(Py_ssize_t a, Py_ssize_t b, double amount, double* lin,
+                            double* turn_a, double* turn_b, double[:, ::1] lv,
+                            double[:, ::1] av, double[::1] inv_mass) noexcept nogil:
+    """Apply ``amount`` of a row's impulse: ``b`` along it, ``a`` against it."""
+    cdef int i
+    cdef double scale
+    if amount == 0.0:
+        return
+    if a >= 0:
+        scale = inv_mass[a] * amount
+        for i in range(3):
+            lv[a, i] = lv[a, i] - scale * lin[i]
+            av[a, i] = av[a, i] - turn_a[i] * amount
+    if b >= 0:
+        scale = inv_mass[b] * amount
+        for i in range(3):
+            lv[b, i] = lv[b, i] + scale * lin[i]
+            av[b, i] = av[b, i] + turn_b[i] * amount
+
+
+def solve_rows(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
+               double[:, ::1] lin, double[:, ::1] ang_a, double[:, ::1] ang_b,
+               double[::1] bias, double[::1] low, double[::1] high, double[::1] softness,
+               double[::1] impulse, double[:, ::1] lv, double[:, ::1] av,
+               double[::1] inv_mass, double[:, :, ::1] invIw, int iters):
+    """Solve joint rows by Gauss-Seidel, warm started from ``impulse``.
+
+    The twin of ``jointrows._solve_rows``, operation for operation; see
+    :mod:`omi_physics.jointrows` for what a row is. A body index below zero
+    is the world. ``impulse`` carries each row's accumulated impulse in and out.
+    """
+    cdef Py_ssize_t K = a_idx.shape[0]
+    cdef double[::1] mass = np.zeros(K)
+    cdef double[:, ::1] turn_a = np.zeros((K, 3))
+    cdef double[:, ::1] turn_b = np.zeros((K, 3))
+    cdef Py_ssize_t k, a, b, it
+    cdef int i
+    cdef double effective, lx, ly, lz, jv, old, new
+    with nogil:
+        for k in range(K):
+            a = a_idx[k]; b = b_idx[k]
+            lx = lin[k, 0]; ly = lin[k, 1]; lz = lin[k, 2]
+            effective = 0.0
+            if a >= 0:
+                effective += inv_mass[a] * (lx * lx + ly * ly + lz * lz)
+                for i in range(3):
+                    turn_a[k, i] = (invIw[a, i, 0] * ang_a[k, 0]
+                                    + invIw[a, i, 1] * ang_a[k, 1]
+                                    + invIw[a, i, 2] * ang_a[k, 2])
+                effective += (ang_a[k, 0] * turn_a[k, 0] + ang_a[k, 1] * turn_a[k, 1]
+                              + ang_a[k, 2] * turn_a[k, 2])
+            if b >= 0:
+                effective += inv_mass[b] * (lx * lx + ly * ly + lz * lz)
+                for i in range(3):
+                    turn_b[k, i] = (invIw[b, i, 0] * ang_b[k, 0]
+                                    + invIw[b, i, 1] * ang_b[k, 1]
+                                    + invIw[b, i, 2] * ang_b[k, 2])
+                effective += (ang_b[k, 0] * turn_b[k, 0] + ang_b[k, 1] * turn_b[k, 1]
+                              + ang_b[k, 2] * turn_b[k, 2])
+            effective += softness[k]
+            if effective > 1e-12:
+                mass[k] = 1.0 / effective
+            else:
+                mass[k] = 0.0
+            _apply_row(a, b, impulse[k], &lin[k, 0], &turn_a[k, 0], &turn_b[k, 0],
+                       lv, av, inv_mass)
+        for it in range(iters):
+            for k in range(K):
+                a = a_idx[k]; b = b_idx[k]
+                jv = 0.0
+                if b >= 0:
+                    jv += (lin[k, 0] * lv[b, 0] + lin[k, 1] * lv[b, 1]
+                           + lin[k, 2] * lv[b, 2])
+                    jv += (ang_b[k, 0] * av[b, 0] + ang_b[k, 1] * av[b, 1]
+                           + ang_b[k, 2] * av[b, 2])
+                if a >= 0:
+                    jv -= (lin[k, 0] * lv[a, 0] + lin[k, 1] * lv[a, 1]
+                           + lin[k, 2] * lv[a, 2])
+                    jv -= (ang_a[k, 0] * av[a, 0] + ang_a[k, 1] * av[a, 1]
+                           + ang_a[k, 2] * av[a, 2])
+                old = impulse[k]
+                new = old + mass[k] * (bias[k] - jv - softness[k] * old)
+                if new < low[k]:
+                    new = low[k]
+                elif new > high[k]:
+                    new = high[k]
+                impulse[k] = new
+                _apply_row(a, b, new - old, &lin[k, 0], &turn_a[k, 0], &turn_b[k, 0],
+                           lv, av, inv_mass)

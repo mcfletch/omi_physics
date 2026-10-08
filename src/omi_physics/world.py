@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from . import mathutil, model
+from . import jointrows, mathutil, model
 from .backend import NumpyBackend, select_backend
 from .body import world_aabb
 from .broadphase import BroadPhase
@@ -32,6 +32,7 @@ from .contactevents import (
     measure,
 )
 from .gravity import apply_volumes
+from .jointrows import RowJoint
 from .massprops import inertia_diagonal
 from .mathutil import Vec
 from .narrowphase import NarrowPhase
@@ -134,6 +135,8 @@ class PhysicsWorld:
         self._listener_error: Exception | None = None
         self._listener_depth = 0
         self.joint_constraints: list[Any] = []
+        #: The joints of :attr:`joint_constraints` built from rows.
+        self.row_joints: list[RowJoint] = []
         self.joint_iterations = 10
 
     # -- storage ---------------------------------------------------------
@@ -957,6 +960,8 @@ class PhysicsWorld:
         self._prev_orientation[:self._n] = self.orientation
 
         self.backend.integrate_forces(self, dt)
+        if self.row_joints:
+            jointrows.drive(self, self.row_joints, dt)
 
         if self._collision is not None:
             self.backend.refit_aabbs(self)
@@ -973,9 +978,15 @@ class PhysicsWorld:
         self.step_count += 1
 
 
+    def _jointed(self) -> set[tuple[int, int]]:
+        """The body pairs a row joint holds and keeps from colliding, smaller index first."""
+        return {(min(joint.a, joint.b), max(joint.a, joint.b)) for joint in self.row_joints
+                if not joint.collide_connected and joint.a >= 0 and joint.b >= 0}
+
     def _collide(self, stages: '_CollisionStages', dt: float) -> None:
         """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
         pairs = stages.broadphase.pairs(self)
+        jointed = self._jointed() if self.row_joints else None
         solid: list[tuple[int, int]] = []
         sensed: list[tuple[int, int]] = []
         reporting = self.contact_reporting != 'off'
@@ -995,7 +1006,8 @@ class PhysicsWorld:
             elif (self.collider_shape[i] >= 0 and self.collider_shape[j] >= 0
                     and (self.is_awake_mover(i) or self.is_awake_mover(j))
                     and (self.motion_type[i] == _DYNAMIC
-                         or self.motion_type[j] == _DYNAMIC)):
+                         or self.motion_type[j] == _DYNAMIC)
+                    and not (jointed and (min(i, j), max(i, j)) in jointed)):
                 solid.append((i, j))
         contacts = stages.narrowphase.generate(self, solid)
         excluded: list[Contact] = []
@@ -1226,16 +1238,39 @@ class PhysicsWorld:
                                  trigger_index, other_index)
 
     def add_joint_constraint(self, constraint: Any) -> Any:
-        """Register a joint constraint, waking the bodies it touches; return it."""
+        """Register a joint constraint, waking the bodies it touches; return it.
+
+        A joint built from rows (:class:`~omi_physics.jointrows.RowJoint`)
+        fixes its anchors and axes in its bodies' frames here, where the
+        bodies are now.
+        """
         self.joint_constraints.append(constraint)
+        if isinstance(constraint, RowJoint):
+            constraint.bind(self)
+            self.row_joints.append(constraint)
         for i in (getattr(constraint, 'a', None), getattr(constraint, 'b', None),
                   getattr(constraint, 'body', None)):
             if i is not None and i >= 0:
                 self.wake(i)
         return constraint
 
+    def remove_joint_constraint(self, constraint: Any) -> None:
+        """Stop solving ``constraint``; one the world does not hold is ignored."""
+        if constraint in self.joint_constraints:
+            self.joint_constraints.remove(constraint)
+        if constraint in self.row_joints:
+            self.row_joints.remove(constraint)
+        for i in (getattr(constraint, 'a', None), getattr(constraint, 'b', None),
+                  getattr(constraint, 'body', None)):
+            if i is not None and 0 <= i < self._n:
+                self.wake(i)
+
     def _solve_joints(self, dt: float) -> None:
-        """Prepare and iteratively solve every joint constraint, waking their bodies."""
+        """Prepare and iteratively solve every joint constraint, waking their bodies.
+
+        The joints built from rows are solved together after the others
+        (:func:`omi_physics.jointrows.solve`).
+        """
         for c in self.joint_constraints:
             i = getattr(c, 'body', None)
             if i is not None and i >= 0:
@@ -1243,10 +1278,14 @@ class PhysicsWorld:
             for i in (getattr(c, 'a', -1), getattr(c, 'b', -1)):
                 if i >= 0:
                     self.wake(i)
-            c.prepare(self)
+            if not isinstance(c, RowJoint):
+                c.prepare(self)
+        legacy = [c for c in self.joint_constraints if not isinstance(c, RowJoint)]
         for _ in range(self.joint_iterations):
-            for c in self.joint_constraints:
+            for c in legacy:
                 c.solve(self, dt)
+        if self.row_joints:
+            jointrows.solve(self, self.row_joints, dt, self.joint_iterations)
 
 
 class _CollisionStages:
