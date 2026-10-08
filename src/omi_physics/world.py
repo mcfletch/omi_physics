@@ -78,6 +78,12 @@ class PhysicsWorld:
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
         self.sleep_enabled = sleep_enabled
+        #: A dynamic body slower than this, in metres a second, and turning
+        #: slower than :attr:`sleep_angular_speed` radians a second, for
+        #: :attr:`sleep_time` seconds, sleeps (:meth:`set_sleep` for one body).
+        self.sleep_linear_speed = 0.08
+        self.sleep_angular_speed = 0.25
+        self.sleep_time = 0.4
         # Baseline resistance applied to every dynamic body on top of its own
         # damping, so no motion persists forever and scenes settle to sleep.
         # Zero on the bare world (deterministic integrator tests); gameplay
@@ -147,14 +153,14 @@ class PhysicsWorld:
     # -- storage ---------------------------------------------------------
     _VEC = ('position', 'prev_position', 'orientation', 'prev_orientation',
             'linear_velocity', 'angular_velocity', 'inv_inertia',
-            'aabb_min', 'aabb_max')
+            'aabb_min', 'aabb_max', 'force', 'torque')
     _SCALAR_F = ('inv_mass', 'mass', 'gravity_factor', 'linear_damping',
                  'angular_damping', 'quadratic_drag', 'sleep_timer',
-                 'restitution_pad')
+                 'restitution_pad', 'sleep_linear', 'sleep_angular', 'sleep_after')
     _SCALAR_I = ('motion_type', 'collider_shape', 'collider_material',
                  'collider_filter', 'trigger_shape', 'trigger_filter', 'island')
     #: The remaining per-body columns, each with a type of its own.
-    _SLOT = ('awake', 'generation', 'report', 'sensor', 'vacant')
+    _SLOT = ('awake', 'generation', 'report', 'sensor', 'vacant', 'exact_rotation')
 
     # Columnar backing arrays, built by ``_alloc``/``_grow`` via ``setattr``.
     _position: np.ndarray
@@ -166,6 +172,12 @@ class PhysicsWorld:
     _inv_inertia: np.ndarray
     _aabb_min: np.ndarray
     _aabb_max: np.ndarray
+    _force: np.ndarray
+    _torque: np.ndarray
+    _sleep_linear: np.ndarray
+    _sleep_angular: np.ndarray
+    _sleep_after: np.ndarray
+    _exact_rotation: np.ndarray
     _inv_mass: np.ndarray
     _mass: np.ndarray
     _gravity_factor: np.ndarray
@@ -203,6 +215,12 @@ class PhysicsWorld:
         self._sensor = np.zeros(cap, dtype=bool)
         #: True for a slot whose body has been removed and not yet replaced.
         self._vacant = np.zeros(cap, dtype=bool)
+        #: True for a body whose turning is integrated exactly (:meth:`set_exact_rotation`).
+        self._exact_rotation = np.zeros(cap, dtype=bool)
+        # Below zero: the world's own thresholds (:meth:`set_sleep`).
+        self._sleep_linear[:] = -1.0
+        self._sleep_angular[:] = -1.0
+        self._sleep_after[:] = -1.0
         self._orientation[:, 3] = 1.0
         self._prev_orientation[:, 3] = 1.0
 
@@ -642,6 +660,69 @@ class PhysicsWorld:
         self._angular_velocity[i] += inv_inertia_world @ np.asarray(impulse, dtype='d')
         self.wake(i)
 
+    def set_force(self, i: int, force: Vec) -> None:
+        """Push body ``i`` with ``force`` newtons through its centre, every step until changed.
+
+        A steady thrust, wind or a tow; zero takes it away. A static or
+        kinematic body is not moved by it. Wakes the body.
+        """
+        self._force[i] = np.asarray(force, dtype='d')
+        self.wake(i)
+
+    def set_torque(self, i: int, torque: Vec) -> None:
+        """Turn body ``i`` by ``torque`` newton-metres about world axes, each step until changed."""
+        self._torque[i] = np.asarray(torque, dtype='d')
+        self.wake(i)
+
+    def set_exact_rotation(self, i: int, exact: bool = True) -> None:
+        """Integrate body ``i``'s turning exactly rather than to first order.
+
+        The first-order step turns a body a little less than its spin asks
+        each step, which a wheel or a propeller spinning many times a second
+        shows as a lag; the exact step turns it through the whole angle.
+        """
+        self._exact_rotation[i] = bool(exact)
+
+    def set_sleep(self, i: int, linear: float | None = None, angular: float | None = None,
+                  after: float | None = None) -> None:
+        """Body ``i``'s own sleep: below ``linear`` m/s and ``angular`` rad/s for ``after`` seconds.
+
+        None leaves that threshold to the world's (:attr:`sleep_linear_speed`,
+        :attr:`sleep_angular_speed`, :attr:`sleep_time`); an infinite
+        ``after`` keeps the body awake.
+        """
+        self._sleep_linear[i] = -1.0 if linear is None else float(linear)
+        self._sleep_angular[i] = -1.0 if angular is None else float(angular)
+        self._sleep_after[i] = -1.0 if after is None else float(after)
+
+    def _apply_steady_forces(self, dt: float) -> None:
+        """Add a step of each dynamic body's steady force and torque to its velocities."""
+        n = self._n
+        pushed = (np.any(self._force[:n] != 0.0, axis=1)
+                  | np.any(self._torque[:n] != 0.0, axis=1))
+        pushed &= self._motion_type[:n] == _DYNAMIC
+        if not pushed.any():
+            return
+        rows = np.nonzero(pushed)[0]
+        self._awake[rows] = True
+        self._sleep_timer[rows] = 0.0
+        self._linear_velocity[rows] += (self._inv_mass[rows, None] * self._force[rows]) * dt
+        rotation = mathutil.quat_to_matrix(self._orientation[rows])
+        local = np.einsum('nji,nj->ni', rotation, self._torque[rows])
+        self._angular_velocity[rows] += np.einsum(
+            'nij,nj->ni', rotation, self._inv_inertia[rows] * local) * dt
+
+    def _turn_exactly(self, turned: np.ndarray, before: np.ndarray, dt: float) -> None:
+        """Set the orientations of ``turned`` bodies from ``before`` by their whole spin."""
+        spin = self._angular_velocity[turned]
+        rate = np.linalg.norm(spin, axis=1)
+        angle = rate * dt
+        axis = np.divide(spin, rate[:, None], out=np.zeros_like(spin),
+                         where=rate[:, None] > 1e-12)
+        half = 0.5 * angle
+        step = np.concatenate((axis * np.sin(half)[:, None], np.cos(half)[:, None]), axis=1)
+        self._orientation[turned] = mathutil.quat_normalize(mathutil.quat_mul(step, before))
+
     # -- bodies ----------------------------------------------------------
     def add_body(self, motion: model.Motion | None = None,
                  collider: model.Collider | None = None,
@@ -685,6 +766,12 @@ class PhysicsWorld:
         self._sleep_timer[i] = 0.0
         self._report[i] = report_contacts
         self._sensor[i] = sensor
+        self._force[i] = 0.0
+        self._torque[i] = 0.0
+        self._exact_rotation[i] = False
+        self._sleep_linear[i] = -1.0
+        self._sleep_angular[i] = -1.0
+        self._sleep_after[i] = -1.0
 
         shape: model.Shape | None = None
         if collider is not None and 0 <= collider.shape < len(self.shapes):
@@ -835,6 +922,9 @@ class PhysicsWorld:
         self._motion_type[i] = _TYPE_INT[model.STATIC]
         self._linear_velocity[i] = 0.0
         self._angular_velocity[i] = 0.0
+        self._force[i] = 0.0
+        self._torque[i] = 0.0
+        self._exact_rotation[i] = False
         self._inv_mass[i] = 0.0
         self._mass[i] = 0.0
         self._inv_inertia[i] = 0.0
@@ -986,6 +1076,7 @@ class PhysicsWorld:
         self._prev_orientation[:self._n] = self.orientation
 
         self.backend.integrate_forces(self, dt)
+        self._apply_steady_forces(dt)
         if self.row_joints:
             jointrows.drive(self, self.row_joints, dt)
 
@@ -996,7 +1087,11 @@ class PhysicsWorld:
         if self.joint_constraints:
             self._solve_joints(dt)
 
+        exact = np.nonzero(self._exact_rotation[:self._n] & self.moving_mask())[0]
+        before = self._orientation[exact].copy() if len(exact) else None
         self.backend.integrate_positions(self, dt)
+        if before is not None:
+            self._turn_exactly(exact, before, dt)
 
         if self.sleep_enabled:
             self._update_sleep(dt)
@@ -1187,18 +1282,26 @@ class PhysicsWorld:
         self._refit_lo, self._refit_hi = lo, hi
         self._refit_pose, self._refit_quat = pose, quat
 
-    def _update_sleep(self, dt: float, lin_thresh: float = 0.08,
-                      ang_thresh: float = 0.25, t_sleep: float = 0.4) -> None:
+    def _update_sleep(self, dt: float) -> None:
         """Island-aware sleeping: a group of touching bodies sleeps only when
         *all* of them have been below the threshold long enough, so one jittering
         body can't keep the whole pile awake (and can't be re-woken by a resting
-        neighbour — only a real impact wakes it, see the solver)."""
+        neighbour — only a real impact wakes it, see the solver).
+
+        Each body's thresholds are its own where :meth:`set_sleep` gave them
+        and the world's otherwise."""
+        n = self._n
         dyn = self.motion_type == _DYNAMIC
+        lin_thresh = np.where(self._sleep_linear[:n] < 0.0, self.sleep_linear_speed,
+                              self._sleep_linear[:n])
+        ang_thresh = np.where(self._sleep_angular[:n] < 0.0, self.sleep_angular_speed,
+                              self._sleep_angular[:n])
+        t_sleep = np.where(self._sleep_after[:n] < 0.0, self.sleep_time, self._sleep_after[:n])
         speed2 = np.sum(self.linear_velocity ** 2, axis=1)
         spin2 = np.sum(self.angular_velocity ** 2, axis=1)
         slow = dyn & (speed2 < lin_thresh ** 2) & (spin2 < ang_thresh ** 2)
-        self._sleep_timer[:self._n][slow] += dt
-        self._sleep_timer[:self._n][~slow] = 0.0
+        self._sleep_timer[:n][slow] += dt
+        self._sleep_timer[:n][~slow] = 0.0
         ready = slow & (self.sleep_timer > t_sleep)
 
         to_sleep = np.zeros(self._n, dtype=bool)
