@@ -1289,7 +1289,7 @@ class PhysicsWorld:
         """Island-aware sleeping: a group of touching bodies sleeps only when
         *all* of them have been below the threshold long enough, so one jittering
         body can't keep the whole pile awake (and can't be re-woken by a resting
-        neighbour — only a real impact wakes it, see the solver).
+        neighbour; only a real impact wakes it, see the solver).
 
         Each body's thresholds are its own where :meth:`set_sleep` gave them
         and the world's otherwise."""
