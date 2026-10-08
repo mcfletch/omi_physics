@@ -268,7 +268,7 @@ def _drift(world: "PhysicsWorld", a: int, b: int, turn: np.ndarray) -> np.ndarra
     return -drift if drift[3] < 0.0 else drift
 
 
-class _Stops:
+class Stops:
     """A pair of stops on one axis of a joint, with how hard they push back.
 
     ``lower`` and ``upper`` bound the joint's angle (radians) or separation
@@ -327,7 +327,7 @@ class HingeJoint(BallJoint):
     """A door hinge: ``b`` turns against ``a`` about ``axis`` through ``anchor``, and no other way.
 
     ``lower`` and ``upper`` stop the angle, ``stop_bounce`` and ``stop_erp``
-    say how the stops push back (:class:`_Stops`). A motor turns the hinge at
+    say how the stops push back (:class:`Stops`). A motor turns the hinge at
     ``motor_speed`` radians a second with at most ``motor_torque`` newton-metres.
     """
 
@@ -336,7 +336,7 @@ class HingeJoint(BallJoint):
                  motor_speed: float = 0.0, motor_torque: float = 0.0) -> None:
         super().__init__(a, b, anchor)
         self.axis = mathutil.normalize(np.asarray(axis, dtype='d'))
-        self.stops = _Stops(lower, upper, stop_bounce, stop_erp)
+        self.stops = Stops(lower, upper, stop_bounce, stop_erp)
         self.motor_speed = float(motor_speed)
         self.motor_torque = float(motor_torque)
 
@@ -395,7 +395,7 @@ class SliderJoint(RowJoint):
                  motor_force: float = 0.0) -> None:
         super().__init__(a, b)
         self.axis = mathutil.normalize(np.asarray(axis, dtype='d'))
-        self.stops = _Stops(lower, upper, stop_bounce, stop_erp)
+        self.stops = Stops(lower, upper, stop_bounce, stop_erp)
         self.force = float(force)
         self.motor_speed = float(motor_speed)
         self.motor_force = float(motor_force)
@@ -518,7 +518,7 @@ class TwoAxisHingeJoint(UniversalJoint):
                  motor2_torque: float = 0.0, suspension_stiffness: float = 0.0,
                  suspension_damping: float = 0.0) -> None:
         super().__init__(a, b, anchor, axis1, axis2)
-        self.stops1 = _Stops(lower1, upper1, stop1_bounce, stop1_erp)
+        self.stops1 = Stops(lower1, upper1, stop1_bounce, stop1_erp)
         self.motor1_speed = float(motor1_speed)
         self.motor1_torque = float(motor1_torque)
         self.motor2_speed = float(motor2_speed)

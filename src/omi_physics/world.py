@@ -269,6 +269,9 @@ class PhysicsWorld:
     awake = _column('awake')
     island = _column('island')
     sleep_timer = _column('sleep_timer')
+    #: The steady force and torque on each body (:meth:`set_force`, :meth:`set_torque`).
+    force = _column('force')
+    torque = _column('torque')
 
     @property
     def body_count(self) -> int:
