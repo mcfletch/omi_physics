@@ -68,13 +68,19 @@ def _cook_convex(pts: np.ndarray) -> model.Shape:
 
 
 def _fit_primitive(pts: np.ndarray) -> model.Shape:
-    """Best-fit primitive: a sphere for near-spherical clouds, else an AABB box."""
+    """Best-fit primitive: a sphere for a cloud round a centre, else an AABB box.
+
+    Points all one distance from the centre are not enough to be a sphere: the
+    eight corners of any box are too. A sphere also reaches that distance along
+    each axis, where a box's faces are nearer than its corners.
+    """
     centroid = pts.mean(axis=0)
     radii = np.linalg.norm(pts - centroid, axis=1)
     mean_r = max(radii.mean(), 1e-9)
-    if radii.std() / mean_r < 0.1:
-        return model.Shape.sphere(float(mean_r))
     lo, hi = pts.min(axis=0), pts.max(axis=0)
+    reach = np.minimum(hi - centroid, centroid - lo)
+    if radii.std() / mean_r < 0.1 and reach.min() >= 0.8 * mean_r:
+        return model.Shape.sphere(float(mean_r))
     return model.Shape.box(tuple(hi - lo))
 
 

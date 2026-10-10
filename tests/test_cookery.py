@@ -45,6 +45,16 @@ def test_sphereish_mesh_cooks_to_sphere():
     assert shape.radius == pytest.approx(1.3, abs=0.1)
 
 
+@pytest.mark.parametrize('size', [(1.0, 1.0, 1.0), (2.0, 8.0, 2.0), (0.5, 0.5, 3.0)])
+def test_the_eight_corners_of_a_box_cook_to_a_box(size):
+    """All eight corners of a box are one distance from its centre, as a sphere's points are."""
+    corners = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)],
+                       dtype='d') * np.array(size) / 2.0
+    shape = cook_shape(corners, strategy='primitive')
+    assert shape.type == 'box'
+    assert np.allclose(shape.size, size)
+
+
 def test_convex_strategy_spans_the_cube_corners():
     pts = box_surface((1, 1, 1))
     shape = cook_shape(pts, strategy='convex')

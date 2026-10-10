@@ -68,6 +68,9 @@ compatibility promise.
 
 ### Fixed
 
+- `cook_shape(..., strategy='primitive')` fitted every box as a sphere, because
+  the eight corners of a box are all one distance from its centre. A sphere is
+  now chosen only where the points also reach that distance along each axis.
 - EPA expands the face the origin lies on, so a capsule resting on a box is
   found.
 - GJK reports an overlap when the origin lies on an edge or a face of its
