@@ -25,6 +25,7 @@ from ._accel import accelerators_disabled
 from .body import (
     BoxProxy,
     CapsuleProxy,
+    CompoundProxy,
     Proxy,
     SphereProxy,
     SupportProxy,
@@ -74,6 +75,9 @@ class Contact:
     approach: float = 0.0
     #: Tangential relative speed before the solve, in metres per second.
     slip: float = 0.0
+    #: The solver's first friction direction; ``tangent_impulse`` is along it
+    #: and along ``normal`` × it. None until the contact is solved.
+    tangent: np.ndarray | None = None
 
 
 def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> list[Contact]:
@@ -277,8 +281,15 @@ def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
 
     The returned contacts always point from body ``a`` toward body ``b`` regardless
     of the proxies' order.  Any pair not covered by an analytic routine falls back
-    to GJK/EPA; a triangle mesh on either side is collided triangle-by-triangle.
+    to GJK/EPA; a triangle mesh on either side is collided triangle-by-triangle,
+    and a compound part by part.
     """
+    if PA.kind == 'compound':
+        return [contact for part in cast(CompoundProxy, PA).parts
+                for contact in collide(a, b, part, PB)]
+    if PB.kind == 'compound':
+        return [contact for part in cast(CompoundProxy, PB).parts
+                for contact in collide(a, b, PA, part)]
     if PA.kind == 'trimesh' or PB.kind == 'trimesh':
         return _collide_mesh(a, b, PA, PB)
     key = (PA.kind, PB.kind)
@@ -299,8 +310,13 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     A capsule mover (the character) uses the analytic capsule↔triangle test — far
     faster and more robust than GJK/EPA, whose polytope expansion stalls on the
     big flat wall/floor triangles of an arbitrary mesh.
+
+    Two triangle soups have no inside to be in, so a mesh against a mesh
+    makes no contacts; a body that moves is given a convex shape instead.
     """
     from .gjk import collide_convex  # noqa: PLC0415 gjk imports collide.Contact
+    if PA.kind == 'trimesh' and PB.kind == 'trimesh':
+        return []
     if PA.kind == 'trimesh':
         mesh, other, mesh_is_a = cast(TriangleMeshProxy, PA), cast(SupportProxy, PB), True
     else:

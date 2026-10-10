@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from . import mathutil, model
+from . import jointrows, mathutil, model
 from .backend import NumpyBackend, select_backend
 from .body import world_aabb
 from .broadphase import BroadPhase
@@ -32,6 +32,8 @@ from .contactevents import (
     measure,
 )
 from .gravity import apply_volumes
+from .jointrows import RowJoint
+from .massprops import inertia_diagonal
 from .mathutil import Vec
 from .narrowphase import NarrowPhase
 from .solver import SequentialImpulseSolver
@@ -76,6 +78,12 @@ class PhysicsWorld:
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
         self.sleep_enabled = sleep_enabled
+        #: A dynamic body slower than this, in metres a second, and turning
+        #: slower than :attr:`sleep_angular_speed` radians a second, for
+        #: :attr:`sleep_time` seconds, sleeps (:meth:`set_sleep` for one body).
+        self.sleep_linear_speed = 0.08
+        self.sleep_angular_speed = 0.25
+        self.sleep_time = 0.4
         # Baseline resistance applied to every dynamic body on top of its own
         # damping, so no motion persists forever and scenes settle to sleep.
         # Zero on the bare world (deterministic integrator tests); gameplay
@@ -93,6 +101,11 @@ class PhysicsWorld:
         # material-combine rule, so a specific pairing (e.g. rubber-on-ice) can be
         # tuned without disturbing any other pairing.
         self.pair_friction: dict[tuple[int, int], tuple[float, float]] = {}
+        #: Asked of each pair that might collide, each step (:meth:`set_pair_rule`).
+        self._pair_rule: Callable[[int, int], Any] | None = None
+        #: What the pair rule said this step about the pairs it gave
+        #: parameters for, keyed by the pair as it was asked.
+        self.pair_parameters: dict[tuple[int, int], model.ContactParameters] = {}
 
         self._n = 0
         self._cap = 0
@@ -133,19 +146,21 @@ class PhysicsWorld:
         self._listener_error: Exception | None = None
         self._listener_depth = 0
         self.joint_constraints: list[Any] = []
+        #: The joints of :attr:`joint_constraints` built from rows.
+        self.row_joints: list[RowJoint] = []
         self.joint_iterations = 10
 
     # -- storage ---------------------------------------------------------
     _VEC = ('position', 'prev_position', 'orientation', 'prev_orientation',
             'linear_velocity', 'angular_velocity', 'inv_inertia',
-            'aabb_min', 'aabb_max')
+            'aabb_min', 'aabb_max', 'force', 'torque')
     _SCALAR_F = ('inv_mass', 'mass', 'gravity_factor', 'linear_damping',
                  'angular_damping', 'quadratic_drag', 'sleep_timer',
-                 'restitution_pad')
+                 'restitution_pad', 'sleep_linear', 'sleep_angular', 'sleep_after')
     _SCALAR_I = ('motion_type', 'collider_shape', 'collider_material',
                  'collider_filter', 'trigger_shape', 'trigger_filter', 'island')
     #: The remaining per-body columns, each with a type of its own.
-    _SLOT = ('awake', 'generation', 'report', 'sensor', 'vacant')
+    _SLOT = ('awake', 'generation', 'report', 'sensor', 'vacant', 'exact_rotation')
 
     # Columnar backing arrays, built by ``_alloc``/``_grow`` via ``setattr``.
     _position: np.ndarray
@@ -157,6 +172,12 @@ class PhysicsWorld:
     _inv_inertia: np.ndarray
     _aabb_min: np.ndarray
     _aabb_max: np.ndarray
+    _force: np.ndarray
+    _torque: np.ndarray
+    _sleep_linear: np.ndarray
+    _sleep_angular: np.ndarray
+    _sleep_after: np.ndarray
+    _exact_rotation: np.ndarray
     _inv_mass: np.ndarray
     _mass: np.ndarray
     _gravity_factor: np.ndarray
@@ -194,6 +215,12 @@ class PhysicsWorld:
         self._sensor = np.zeros(cap, dtype=bool)
         #: True for a slot whose body has been removed and not yet replaced.
         self._vacant = np.zeros(cap, dtype=bool)
+        #: True for a body whose turning is integrated exactly (:meth:`set_exact_rotation`).
+        self._exact_rotation = np.zeros(cap, dtype=bool)
+        # Below zero: the world's own thresholds (:meth:`set_sleep`).
+        self._sleep_linear[:] = -1.0
+        self._sleep_angular[:] = -1.0
+        self._sleep_after[:] = -1.0
         self._orientation[:, 3] = 1.0
         self._prev_orientation[:, 3] = 1.0
 
@@ -242,6 +269,9 @@ class PhysicsWorld:
     awake = _column('awake')
     island = _column('island')
     sleep_timer = _column('sleep_timer')
+    #: The steady force and torque on each body (:meth:`set_force`, :meth:`set_torque`).
+    force = _column('force')
+    torque = _column('torque')
 
     @property
     def body_count(self) -> int:
@@ -314,6 +344,27 @@ class PhysicsWorld:
                           material_b: int) -> tuple[float, float] | None:
         """Return ``(static_mu, dynamic_mu)`` for the pair, or ``None`` if unset."""
         return self.pair_friction.get(self._pair_key(material_a, material_b))
+
+    def set_pair_rule(self, rule: 'Callable[[int, int], Any] | None') -> None:
+        """Ask ``rule(a, b)`` whether, and how, two bodies collide, each step they might.
+
+        The rule is asked about every pair the broad phase finds that the
+        world would otherwise solve, once a step, before the narrow phase.
+        It answers False to let the pair pass through each other, None to
+        leave the bodies' materials in charge, or a
+        :class:`~omi_physics.model.ContactParameters` saying how they meet.
+        A surface speed in the parameters carries ``b`` across ``a``. None
+        removes the rule.
+        """
+        self._pair_rule = rule
+        if rule is None:
+            self.pair_parameters = {}
+
+    @property
+    def contact_solver(self) -> Any:
+        """The contact solver; its iterations, slop and corrections are settable."""
+        self._collision = self._collision or _CollisionStages()
+        return self._collision.solver
 
     @staticmethod
     def _pair_key(a: int, b: int) -> tuple[int, int]:
@@ -612,6 +663,69 @@ class PhysicsWorld:
         self._angular_velocity[i] += inv_inertia_world @ np.asarray(impulse, dtype='d')
         self.wake(i)
 
+    def set_force(self, i: int, force: Vec) -> None:
+        """Push body ``i`` with ``force`` newtons through its centre, every step until changed.
+
+        A steady thrust, wind or a tow; zero takes it away. A static or
+        kinematic body is not moved by it. Wakes the body.
+        """
+        self._force[i] = np.asarray(force, dtype='d')
+        self.wake(i)
+
+    def set_torque(self, i: int, torque: Vec) -> None:
+        """Turn body ``i`` by ``torque`` newton-metres about world axes, each step until changed."""
+        self._torque[i] = np.asarray(torque, dtype='d')
+        self.wake(i)
+
+    def set_exact_rotation(self, i: int, exact: bool = True) -> None:
+        """Integrate body ``i``'s turning exactly rather than to first order.
+
+        The first-order step turns a body a little less than its spin asks
+        each step, which a wheel or a propeller spinning many times a second
+        shows as a lag; the exact step turns it through the whole angle.
+        """
+        self._exact_rotation[i] = bool(exact)
+
+    def set_sleep(self, i: int, linear: float | None = None, angular: float | None = None,
+                  after: float | None = None) -> None:
+        """Body ``i``'s own sleep: below ``linear`` m/s and ``angular`` rad/s for ``after`` seconds.
+
+        None leaves that threshold to the world's (:attr:`sleep_linear_speed`,
+        :attr:`sleep_angular_speed`, :attr:`sleep_time`); an infinite
+        ``after`` keeps the body awake.
+        """
+        self._sleep_linear[i] = -1.0 if linear is None else float(linear)
+        self._sleep_angular[i] = -1.0 if angular is None else float(angular)
+        self._sleep_after[i] = -1.0 if after is None else float(after)
+
+    def _apply_steady_forces(self, dt: float) -> None:
+        """Add a step of each dynamic body's steady force and torque to its velocities."""
+        n = self._n
+        pushed = (np.any(self._force[:n] != 0.0, axis=1)
+                  | np.any(self._torque[:n] != 0.0, axis=1))
+        pushed &= self._motion_type[:n] == _DYNAMIC
+        if not pushed.any():
+            return
+        rows = np.nonzero(pushed)[0]
+        self._awake[rows] = True
+        self._sleep_timer[rows] = 0.0
+        self._linear_velocity[rows] += (self._inv_mass[rows, None] * self._force[rows]) * dt
+        rotation = mathutil.quat_to_matrix(self._orientation[rows])
+        local = np.einsum('nji,nj->ni', rotation, self._torque[rows])
+        self._angular_velocity[rows] += np.einsum(
+            'nij,nj->ni', rotation, self._inv_inertia[rows] * local) * dt
+
+    def _turn_exactly(self, turned: np.ndarray, before: np.ndarray, dt: float) -> None:
+        """Set the orientations of ``turned`` bodies from ``before`` by their whole spin."""
+        spin = self._angular_velocity[turned]
+        rate = np.linalg.norm(spin, axis=1)
+        angle = rate * dt
+        axis = np.divide(spin, rate[:, None], out=np.zeros_like(spin),
+                         where=rate[:, None] > 1e-12)
+        half = 0.5 * angle
+        step = np.concatenate((axis * np.sin(half)[:, None], np.cos(half)[:, None]), axis=1)
+        self._orientation[turned] = mathutil.quat_normalize(mathutil.quat_mul(step, before))
+
     # -- bodies ----------------------------------------------------------
     def add_body(self, motion: model.Motion | None = None,
                  collider: model.Collider | None = None,
@@ -655,6 +769,12 @@ class PhysicsWorld:
         self._sleep_timer[i] = 0.0
         self._report[i] = report_contacts
         self._sensor[i] = sensor
+        self._force[i] = 0.0
+        self._torque[i] = 0.0
+        self._exact_rotation[i] = False
+        self._sleep_linear[i] = -1.0
+        self._sleep_angular[i] = -1.0
+        self._sleep_after[i] = -1.0
 
         shape: model.Shape | None = None
         if collider is not None and 0 <= collider.shape < len(self.shapes):
@@ -788,7 +908,10 @@ class PhysicsWorld:
         """Drop per-body caches other modules keep on the world."""
         meshes = getattr(self, '_raycast_meshes', None)
         if meshes is not None:
-            meshes.pop(i, None)
+            # A compound's meshes are kept under the body's index and the part's.
+            for key in [key for key in meshes
+                        if key == i or (isinstance(key, tuple) and key[0] == i)]:
+                del meshes[key]
 
     def _reset_body(self, i: int) -> None:
         """Empty a slot: no collider, no motion, and nowhere the broad phase looks."""
@@ -802,6 +925,9 @@ class PhysicsWorld:
         self._motion_type[i] = _TYPE_INT[model.STATIC]
         self._linear_velocity[i] = 0.0
         self._angular_velocity[i] = 0.0
+        self._force[i] = 0.0
+        self._torque[i] = 0.0
+        self._exact_rotation[i] = False
         self._inv_mass[i] = 0.0
         self._mass[i] = 0.0
         self._inv_inertia[i] = 0.0
@@ -953,6 +1079,9 @@ class PhysicsWorld:
         self._prev_orientation[:self._n] = self.orientation
 
         self.backend.integrate_forces(self, dt)
+        self._apply_steady_forces(dt)
+        if self.row_joints:
+            jointrows.drive(self, self.row_joints, dt)
 
         if self._collision is not None:
             self.backend.refit_aabbs(self)
@@ -961,7 +1090,11 @@ class PhysicsWorld:
         if self.joint_constraints:
             self._solve_joints(dt)
 
+        exact = np.nonzero(self._exact_rotation[:self._n] & self.moving_mask())[0]
+        before = self._orientation[exact].copy() if len(exact) else None
         self.backend.integrate_positions(self, dt)
+        if before is not None:
+            self._turn_exactly(exact, before, dt)
 
         if self.sleep_enabled:
             self._update_sleep(dt)
@@ -969,9 +1102,18 @@ class PhysicsWorld:
         self.step_count += 1
 
 
+    def _jointed(self) -> set[tuple[int, int]]:
+        """The body pairs a row joint holds and keeps from colliding, smaller index first."""
+        return {(min(joint.a, joint.b), max(joint.a, joint.b)) for joint in self.row_joints
+                if not joint.collide_connected and joint.a >= 0 and joint.b >= 0}
+
     def _collide(self, stages: '_CollisionStages', dt: float) -> None:
         """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
         pairs = stages.broadphase.pairs(self)
+        jointed = self._jointed() if self.row_joints else None
+        rule = self._pair_rule
+        if rule is not None:
+            self.pair_parameters = {}
         solid: list[tuple[int, int]] = []
         sensed: list[tuple[int, int]] = []
         reporting = self.contact_reporting != 'off'
@@ -991,7 +1133,14 @@ class PhysicsWorld:
             elif (self.collider_shape[i] >= 0 and self.collider_shape[j] >= 0
                     and (self.is_awake_mover(i) or self.is_awake_mover(j))
                     and (self.motion_type[i] == _DYNAMIC
-                         or self.motion_type[j] == _DYNAMIC)):
+                         or self.motion_type[j] == _DYNAMIC)
+                    and not (jointed and (min(i, j), max(i, j)) in jointed)):
+                if rule is not None:
+                    verdict = rule(i, j)
+                    if verdict is False:
+                        continue
+                    if verdict is not None:
+                        self.pair_parameters[(i, j)] = verdict
                 solid.append((i, j))
         contacts = stages.narrowphase.generate(self, solid)
         excluded: list[Contact] = []
@@ -1136,18 +1285,26 @@ class PhysicsWorld:
         self._refit_lo, self._refit_hi = lo, hi
         self._refit_pose, self._refit_quat = pose, quat
 
-    def _update_sleep(self, dt: float, lin_thresh: float = 0.08,
-                      ang_thresh: float = 0.25, t_sleep: float = 0.4) -> None:
+    def _update_sleep(self, dt: float) -> None:
         """Island-aware sleeping: a group of touching bodies sleeps only when
         *all* of them have been below the threshold long enough, so one jittering
         body can't keep the whole pile awake (and can't be re-woken by a resting
-        neighbour — only a real impact wakes it, see the solver)."""
+        neighbour; only a real impact wakes it, see the solver).
+
+        Each body's thresholds are its own where :meth:`set_sleep` gave them
+        and the world's otherwise."""
+        n = self._n
         dyn = self.motion_type == _DYNAMIC
+        lin_thresh = np.where(self._sleep_linear[:n] < 0.0, self.sleep_linear_speed,
+                              self._sleep_linear[:n])
+        ang_thresh = np.where(self._sleep_angular[:n] < 0.0, self.sleep_angular_speed,
+                              self._sleep_angular[:n])
+        t_sleep = np.where(self._sleep_after[:n] < 0.0, self.sleep_time, self._sleep_after[:n])
         speed2 = np.sum(self.linear_velocity ** 2, axis=1)
         spin2 = np.sum(self.angular_velocity ** 2, axis=1)
         slow = dyn & (speed2 < lin_thresh ** 2) & (spin2 < ang_thresh ** 2)
-        self._sleep_timer[:self._n][slow] += dt
-        self._sleep_timer[:self._n][~slow] = 0.0
+        self._sleep_timer[:n][slow] += dt
+        self._sleep_timer[:n][~slow] = 0.0
         ready = slow & (self.sleep_timer > t_sleep)
 
         to_sleep = np.zeros(self._n, dtype=bool)
@@ -1222,16 +1379,39 @@ class PhysicsWorld:
                                  trigger_index, other_index)
 
     def add_joint_constraint(self, constraint: Any) -> Any:
-        """Register a joint constraint, waking the bodies it touches; return it."""
+        """Register a joint constraint, waking the bodies it touches; return it.
+
+        A joint built from rows (:class:`~omi_physics.jointrows.RowJoint`)
+        fixes its anchors and axes in its bodies' frames here, where the
+        bodies are now.
+        """
         self.joint_constraints.append(constraint)
+        if isinstance(constraint, RowJoint):
+            constraint.bind(self)
+            self.row_joints.append(constraint)
         for i in (getattr(constraint, 'a', None), getattr(constraint, 'b', None),
                   getattr(constraint, 'body', None)):
             if i is not None and i >= 0:
                 self.wake(i)
         return constraint
 
+    def remove_joint_constraint(self, constraint: Any) -> None:
+        """Stop solving ``constraint``; one the world does not hold is ignored."""
+        if constraint in self.joint_constraints:
+            self.joint_constraints.remove(constraint)
+        if constraint in self.row_joints:
+            self.row_joints.remove(constraint)
+        for i in (getattr(constraint, 'a', None), getattr(constraint, 'b', None),
+                  getattr(constraint, 'body', None)):
+            if i is not None and 0 <= i < self._n:
+                self.wake(i)
+
     def _solve_joints(self, dt: float) -> None:
-        """Prepare and iteratively solve every joint constraint, waking their bodies."""
+        """Prepare and iteratively solve every joint constraint, waking their bodies.
+
+        The joints built from rows are solved together after the others
+        (:func:`omi_physics.jointrows.solve`).
+        """
         for c in self.joint_constraints:
             i = getattr(c, 'body', None)
             if i is not None and i >= 0:
@@ -1239,38 +1419,14 @@ class PhysicsWorld:
             for i in (getattr(c, 'a', -1), getattr(c, 'b', -1)):
                 if i >= 0:
                     self.wake(i)
-            c.prepare(self)
+            if not isinstance(c, RowJoint):
+                c.prepare(self)
+        legacy = [c for c in self.joint_constraints if not isinstance(c, RowJoint)]
         for _ in range(self.joint_iterations):
-            for c in self.joint_constraints:
+            for c in legacy:
                 c.solve(self, dt)
-
-
-def inertia_diagonal(shape: model.Shape | None, mass: float) -> np.ndarray:
-    """Solid-body inertia diagonal for a primitive shape about its centre."""
-    if shape is None:
-        return np.zeros(3)
-    t = shape.type
-    if t == 'sphere':
-        v = 0.4 * mass * shape.radius ** 2
-        return np.array([v, v, v])
-    if t == 'box':
-        x, y, z = shape.size
-        k = mass / 12.0
-        return k * np.array([y * y + z * z, x * x + z * z, x * x + y * y])
-    if t in ('capsule', 'cylinder'):
-        r = shape.radiusBottom
-        h = shape.height
-        ix = mass * (3 * r * r + h * h) / 12.0
-        iy = 0.5 * mass * r * r
-        return np.array([ix, iy, ix])
-    # convex / trimesh: approximate with the AABB box of the points
-    if shape.points is not None and len(shape.points):
-        lo = shape.points.min(axis=0)
-        hi = shape.points.max(axis=0)
-        x, y, z = hi - lo
-        k = mass / 12.0
-        return k * np.array([y * y + z * z, x * x + z * z, x * x + y * y])
-    return np.zeros(3)
+        if self.row_joints:
+            jointrows.solve(self, self.row_joints, dt, self.joint_iterations)
 
 
 class _CollisionStages:

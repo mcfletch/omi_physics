@@ -17,7 +17,7 @@ in the second.
 ```mermaid
 classDiagram
     class Shape {
-        type: box|sphere|capsule|cylinder|convex|trimesh
+        type: box|sphere|capsule|cylinder|convex|trimesh|compound
         size / radius / height
         Shape.box(size)
         Shape.sphere(radius)

@@ -8,7 +8,7 @@ same results. Nothing else in the code changes.
 
 | Accelerator | Replaces | Used by |
 | --- | --- | --- |
-| `_solver_native.pyx` | sequential-impulse inner loops (constraint prep, warm start, velocity + position iterations) | `solver.py` |
+| `_solver_native.pyx` | sequential-impulse inner loops (constraint prep with each contact's parameters, warm start, velocity + position iterations); the joint-row solve | `solver.py`, `jointrows.py` |
 | `_collide_native.pyx` | SAT box-box (with Sutherland–Hodgman clipping), sphere-sphere, sphere-box; **capsule against a batch of triangles** | `narrowphase.py`, `collide.py` |
 
 ## The fallback contract
@@ -23,8 +23,8 @@ try:
 except ImportError:
     _native = None
 ...
-if _native is not None and hasattr(_native, 'prepare_and_solve'):
-    self._solve_native_full(world, contacts)   # native path
+if _native is not None:
+    self._solve_native_full(world, contacts, terms)   # native path
 else:
     ...                                        # identical NumPy/Python path
 ```

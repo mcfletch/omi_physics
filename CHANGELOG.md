@@ -7,8 +7,32 @@ compatibility promise.
 
 ## [0.4.0] - unreleased
 
+### Changed
+
+- A `cylinder` is a flat-ended cylinder rather than a capsule of its height.
+- A triangle mesh against a triangle mesh makes no contacts.
+- `SequentialImpulseSolver` no longer takes `position_iterations` or
+  `baumgarte`, which nothing read.
+
 ### Added
 
+- Compound shapes: `Shape.compound` and `ShapePart`, shapes placed at offsets
+  in one body's frame, collided, cast at and weighed part by part.
+- Cylinders with flat ends, narrowing to a cone (`radiusTop` 0), collided,
+  cast at and weighed as such.
+- `massprops`: volume, centroid and inertia of every shape.
+- Articulated joints: `BallJoint`, `HingeJoint`, `SliderJoint`,
+  `UniversalJoint`, `TwoAxisHingeJoint` and `MotorJoint`, with stops, bounce,
+  motors, a suspension and angle, rate and anchor readings, built from rows
+  (`jointrows`) solved together and warm started, compiled where built.
+  `remove_joint_constraint`. Jointed bodies do not collide unless
+  `collide_connected` is set.
+- `PhysicsWorld.set_pair_rule` and `model.ContactParameters`: which pairs
+  collide, and with what restitution, bounce speed, friction in two
+  directions, surface speed, slip, softness and error correction.
+  `PhysicsWorld.contact_solver`; the solver's `correction` and `softness`.
+- `PhysicsWorld.set_force`, `set_torque`, `set_exact_rotation` and
+  `set_sleep`; `sleep_linear_speed`, `sleep_angular_speed`, `sleep_time`.
 - Contact events on every step. The world records one `ContactEvent` per
   touching pair, with a phase of `'begin'`, `'persist'` or `'end'`, the closing
   speed, the normal and friction impulses, slip, depth, a point and a normal.

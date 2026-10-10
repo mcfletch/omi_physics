@@ -165,12 +165,15 @@ ignore = [
 # These test a mechanism that has no public surface by driving it directly:
 # the character's depenetration, substeps and void probe, the static-proxy
 # cache it shares between worlds, the threaded simulation's tick-rate window fed
-# synthetic times, and the contact events' delivery queue, solver swap and
-# compiled/pure-Python switch.
+# synthetic times, the contact events' delivery queue, solver swap and
+# compiled/pure-Python switch, and the joint rows' compiled/pure-Python switch.
 "tests/test_character_fall.py" = ["SLF001"]
 "tests/test_character_proxy_cache.py" = ["SLF001"]
 "tests/test_character_void.py" = ["SLF001"]
 "tests/test_contact_events.py" = ["SLF001"]
+# Run each test with the compiled solver and with its Python twin.
+"tests/test_axis_joints.py" = ["SLF001"]
+"tests/test_contact_parameters.py" = ["SLF001"]
 "tests/test_threaded_rate.py" = ["SLF001"]
 
 [tool.ruff.format]

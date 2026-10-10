@@ -12,136 +12,6 @@ import numpy as np
 from libc.math cimport sqrt
 
 
-cdef inline void _apply(double[:, ::1] lv, double[:, ::1] av,
-                        Py_ssize_t a, Py_ssize_t b, double ima, double imb,
-                        double[:, :, ::1] invIa, double[:, :, ::1] invIb,
-                        double[:, ::1] rA, double[:, ::1] rB, Py_ssize_t k,
-                        double Px, double Py, double Pz) noexcept nogil:
-    """Apply impulse ``P`` to body ``b`` and ``-P`` to ``a`` (linear + angular)."""
-    cdef double crx, cry, crz
-    lv[a, 0] -= ima * Px; lv[a, 1] -= ima * Py; lv[a, 2] -= ima * Pz
-    lv[b, 0] += imb * Px; lv[b, 1] += imb * Py; lv[b, 2] += imb * Pz
-    crx = rA[k, 1] * Pz - rA[k, 2] * Py
-    cry = rA[k, 2] * Px - rA[k, 0] * Pz
-    crz = rA[k, 0] * Py - rA[k, 1] * Px
-    av[a, 0] -= invIa[k, 0, 0] * crx + invIa[k, 0, 1] * cry + invIa[k, 0, 2] * crz
-    av[a, 1] -= invIa[k, 1, 0] * crx + invIa[k, 1, 1] * cry + invIa[k, 1, 2] * crz
-    av[a, 2] -= invIa[k, 2, 0] * crx + invIa[k, 2, 1] * cry + invIa[k, 2, 2] * crz
-    crx = rB[k, 1] * Pz - rB[k, 2] * Py
-    cry = rB[k, 2] * Px - rB[k, 0] * Pz
-    crz = rB[k, 0] * Py - rB[k, 1] * Px
-    av[b, 0] += invIb[k, 0, 0] * crx + invIb[k, 0, 1] * cry + invIb[k, 0, 2] * crz
-    av[b, 1] += invIb[k, 1, 0] * crx + invIb[k, 1, 1] * cry + invIb[k, 1, 2] * crz
-    av[b, 2] += invIb[k, 2, 0] * crx + invIb[k, 2, 1] * cry + invIb[k, 2, 2] * crz
-
-
-def solve_velocity(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
-                   double[:, ::1] rA, double[:, ::1] rB,
-                   double[:, ::1] n, double[:, ::1] t1, double[:, ::1] t2,
-                   double[::1] nMass, double[::1] t1Mass, double[::1] t2Mass,
-                   double[::1] friction, double[::1] vBias,
-                   double[:, :, ::1] invIa, double[:, :, ::1] invIb,
-                   double[::1] ima, double[::1] imb,
-                   double[::1] nImp, double[:, ::1] tImp,
-                   double[:, ::1] lv, double[:, ::1] av,
-                   int iters, bint warm_start):
-    """Warm-start then run ``iters`` velocity iterations, mutating ``lv``/``av``.
-
-    ``nImp``/``tImp`` carry the accumulated normal/tangent impulses in and out
-    (for warm starting the next step).
-    """
-    cdef Py_ssize_t K = a_idx.shape[0]
-    cdef Py_ssize_t it, k, a, b
-    cdef double dvx, dvy, dvz, vn, new, dL, maxf, vt, newt, nx, ny, nz
-    with nogil:
-        if warm_start:
-            for k in range(K):
-                a = a_idx[k]; b = b_idx[k]
-                _apply(lv, av, a, b, ima[k], imb[k], invIa, invIb, rA, rB, k,
-                       nImp[k] * n[k, 0] + tImp[k, 0] * t1[k, 0] + tImp[k, 1] * t2[k, 0],
-                       nImp[k] * n[k, 1] + tImp[k, 0] * t1[k, 1] + tImp[k, 1] * t2[k, 1],
-                       nImp[k] * n[k, 2] + tImp[k, 0] * t1[k, 2] + tImp[k, 1] * t2[k, 2])
-        for it in range(iters):
-            for k in range(K):
-                a = a_idx[k]; b = b_idx[k]
-                nx = n[k, 0]; ny = n[k, 1]; nz = n[k, 2]
-                dvx = (lv[b, 0] + av[b, 1] * rB[k, 2] - av[b, 2] * rB[k, 1]) - (lv[a, 0] + av[a, 1] * rA[k, 2] - av[a, 2] * rA[k, 1])
-                dvy = (lv[b, 1] + av[b, 2] * rB[k, 0] - av[b, 0] * rB[k, 2]) - (lv[a, 1] + av[a, 2] * rA[k, 0] - av[a, 0] * rA[k, 2])
-                dvz = (lv[b, 2] + av[b, 0] * rB[k, 1] - av[b, 1] * rB[k, 0]) - (lv[a, 2] + av[a, 0] * rA[k, 1] - av[a, 1] * rA[k, 0])
-                vn = dvx * nx + dvy * ny + dvz * nz
-                new = nImp[k] - nMass[k] * (vn - vBias[k])
-                if new < 0.0:
-                    new = 0.0
-                dL = new - nImp[k]; nImp[k] = new
-                _apply(lv, av, a, b, ima[k], imb[k], invIa, invIb, rA, rB, k,
-                       dL * nx, dL * ny, dL * nz)
-
-                maxf = friction[k] * nImp[k]
-                # Relative velocity is recomputed once; t1 and t2 share it, matching
-                # the reference solver's friction pass.
-                dvx = (lv[b, 0] + av[b, 1] * rB[k, 2] - av[b, 2] * rB[k, 1]) - (lv[a, 0] + av[a, 1] * rA[k, 2] - av[a, 2] * rA[k, 1])
-                dvy = (lv[b, 1] + av[b, 2] * rB[k, 0] - av[b, 0] * rB[k, 2]) - (lv[a, 1] + av[a, 2] * rA[k, 0] - av[a, 0] * rA[k, 2])
-                dvz = (lv[b, 2] + av[b, 0] * rB[k, 1] - av[b, 1] * rB[k, 0]) - (lv[a, 2] + av[a, 0] * rA[k, 1] - av[a, 1] * rA[k, 0])
-                vt = dvx * t1[k, 0] + dvy * t1[k, 1] + dvz * t1[k, 2]
-                newt = tImp[k, 0] - t1Mass[k] * vt
-                if newt > maxf:
-                    newt = maxf
-                elif newt < -maxf:
-                    newt = -maxf
-                dL = newt - tImp[k, 0]; tImp[k, 0] = newt
-                _apply(lv, av, a, b, ima[k], imb[k], invIa, invIb, rA, rB, k,
-                       dL * t1[k, 0], dL * t1[k, 1], dL * t1[k, 2])
-
-                vt = dvx * t2[k, 0] + dvy * t2[k, 1] + dvz * t2[k, 2]
-                newt = tImp[k, 1] - t2Mass[k] * vt
-                if newt > maxf:
-                    newt = maxf
-                elif newt < -maxf:
-                    newt = -maxf
-                dL = newt - tImp[k, 1]; tImp[k, 1] = newt
-                _apply(lv, av, a, b, ima[k], imb[k], invIa, invIb, rA, rB, k,
-                       dL * t2[k, 0], dL * t2[k, 1], dL * t2[k, 2])
-
-
-def solve_positions(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
-                    double[:, ::1] n, double[::1] depth,
-                    double[::1] ima, double[::1] imb,
-                    double[:, ::1] position, double correction, double slop,
-                    double max_correction):
-    """One split-impulse position pass: push overlapping bodies apart along ``n``.
-
-    Each contact is corrected against what the pass has already done -- see
-    ``solver.SequentialImpulseSolver._solve_positions``, whose answer this has
-    to match -- so the ``start`` copy is the pass's own before-and-after.
-    """
-    cdef Py_ssize_t K = a_idx.shape[0]
-    cdef double[:, ::1] start = np.array(position, dtype=np.float64, copy=True)
-    cdef Py_ssize_t k, a, b
-    cdef double corr, inv_sum, mv, done
-    with nogil:
-        for k in range(K):
-            a = a_idx[k]; b = b_idx[k]
-            done = (((position[b, 0] - start[b, 0]) - (position[a, 0] - start[a, 0])) * n[k, 0]
-                    + ((position[b, 1] - start[b, 1]) - (position[a, 1] - start[a, 1])) * n[k, 1]
-                    + ((position[b, 2] - start[b, 2]) - (position[a, 2] - start[a, 2])) * n[k, 2])
-            corr = depth[k] - done - slop
-            if corr <= 0.0:
-                continue
-            inv_sum = ima[k] + imb[k]
-            if inv_sum <= 1e-12:
-                continue
-            corr = correction * corr
-            if corr > max_correction:
-                corr = max_correction
-            mv = corr / inv_sum
-            position[a, 0] -= ima[k] * mv * n[k, 0]
-            position[a, 1] -= ima[k] * mv * n[k, 1]
-            position[a, 2] -= ima[k] * mv * n[k, 2]
-            position[b, 0] += imb[k] * mv * n[k, 0]
-            position[b, 1] += imb[k] * mv * n[k, 1]
-            position[b, 2] += imb[k] * mv * n[k, 2]
-
-
 cdef inline void _apply_w(double[:, ::1] lv, double[:, ::1] av,
                           Py_ssize_t a, Py_ssize_t b, double ima, double imb,
                           double[:, :, ::1] invIw, double* rAk, double* rBk,
@@ -166,8 +36,8 @@ cdef inline void _apply_w(double[:, ::1] lv, double[:, ::1] av,
 
 cdef inline double _effmass(double* r_a, double* r_b, double dx, double dy, double dz,
                             double[:, :, ::1] invIw, Py_ssize_t a, Py_ssize_t b,
-                            double ima, double imb) noexcept nogil:
-    """Reciprocal inverse mass of the pair along direction (dx,dy,dz)."""
+                            double ima, double imb, double softness) noexcept nogil:
+    """Reciprocal of the pair's inverse mass along (dx,dy,dz), with ``softness`` added."""
     cdef double ax, ay, az, bx, by, bz, wx, wy, wz, kk
     ax = r_a[1] * dz - r_a[2] * dy
     ay = r_a[2] * dx - r_a[0] * dz
@@ -184,6 +54,7 @@ cdef inline double _effmass(double* r_a, double* r_b, double dx, double dy, doub
     wy = invIw[b, 1, 0] * bx + invIw[b, 1, 1] * by + invIw[b, 1, 2] * bz
     wz = invIw[b, 2, 0] * bx + invIw[b, 2, 1] * by + invIw[b, 2, 2] * bz
     kk += bx * wx + by * wy + bz * wz
+    kk += softness
     if kk > 1e-12:
         return 1.0 / kk
     return 0.0
@@ -193,21 +64,30 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
                       double[:, ::1] point, double[:, ::1] normal, double[::1] depth,
                       double[:, ::1] pos, double[:, ::1] lv, double[:, ::1] av,
                       double[::1] inv_mass, double[:, :, ::1] invIw,
-                      double[::1] restitution, double[::1] friction,
-                      double[::1] nImp, double[:, ::1] tImp,
-                      double restitution_threshold, int iters, bint warm_start,
-                      double correction, double slop, double max_correction):
+                      double[::1] restitution, double[::1] threshold,
+                      double[:, ::1] friction, double[:, ::1] direction,
+                      double[:, ::1] surface, double[:, ::1] softness,
+                      double[::1] correction,
+                      double[::1] nImp, double[:, ::1] tImp, double[:, ::1] t1,
+                      int iters, bint warm_start, double slop, double max_correction):
     """Build constraints from contacts, then solve velocity + position, natively.
 
     Mirrors the pure-Python solver's ``_prepare`` (arms, tangent basis, effective
     masses, restitution bias) followed by warm start, ``iters`` velocity
     iterations and one split-impulse position pass. ``lv``/``av``/``pos`` are
-    mutated in place; ``nImp``/``tImp`` carry impulses in (warm start) and out.
+    mutated in place; ``nImp``/``tImp`` carry impulses in (warm start) and out,
+    and ``t1`` receives each contact's first friction direction.
+
+    Per contact: ``threshold`` is the closing speed below which nothing
+    bounces; ``friction`` the two coefficients; ``direction`` the first
+    friction direction, or zero; ``surface`` the target sliding speed along
+    each friction direction; ``softness`` the softness of the normal row and
+    of each friction row, already divided by the step; ``correction`` the
+    fraction of an overlap the position pass takes out.
     """
     cdef Py_ssize_t K = a_idx.shape[0]
     cdef double[:, ::1] rA = np.empty((K, 3))
     cdef double[:, ::1] rB = np.empty((K, 3))
-    cdef double[:, ::1] t1 = np.empty((K, 3))
     cdef double[:, ::1] t2 = np.empty((K, 3))
     cdef double[::1] nMass = np.empty(K)
     cdef double[::1] t1Mass = np.empty(K)
@@ -221,7 +101,7 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
     # the pass starts from when it reaches them.
     cdef double[:, ::1] startpos = np.array(pos, dtype=np.float64, copy=True)
     cdef Py_ssize_t k, it, a, b
-    cdef double nx, ny, nz, axx, ayy, azz, ln, inv, dvx, dvy, dvz, vn0
+    cdef double nx, ny, nz, axx, ayy, azz, ln, inv, dvx, dvy, dvz, vn0, along
     cdef double t1x, t1y, t1z, imak, imbk, maxf, vn, new, dL, vt, newt
     with nogil:
         for k in range(K):
@@ -235,32 +115,46 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
             rB[k, 1] = point[k, 1] - pos[b, 1]
             rB[k, 2] = point[k, 2] - pos[b, 2]
             nx = normal[k, 0]; ny = normal[k, 1]; nz = normal[k, 2]
-            # tangent basis: a = x-axis unless n is near-parallel to it, else y-axis
-            if (nx if nx >= 0 else -nx) < 0.9:
-                axx = 1.0; ayy = 0.0; azz = 0.0
+            ln = 0.0
+            if direction[k, 0] != 0.0 or direction[k, 1] != 0.0 or direction[k, 2] != 0.0:
+                # the given direction, taken across the normal
+                along = direction[k, 0] * nx + direction[k, 1] * ny + direction[k, 2] * nz
+                t1x = direction[k, 0] - along * nx
+                t1y = direction[k, 1] - along * ny
+                t1z = direction[k, 2] - along * nz
+                ln = sqrt(t1x * t1x + t1y * t1y + t1z * t1z)
+            if ln > 1e-9:
+                t1x = t1x / ln; t1y = t1y / ln; t1z = t1z / ln
             else:
-                axx = 0.0; ayy = 1.0; azz = 0.0
-            # t1 = normalize(a x n)
-            t1x = ayy * nz - azz * ny
-            t1y = azz * nx - axx * nz
-            t1z = axx * ny - ayy * nx
-            ln = sqrt(t1x * t1x + t1y * t1y + t1z * t1z)
-            inv = 1.0 / ln if ln > 1e-12 else 0.0
-            t1x *= inv; t1y *= inv; t1z *= inv
+                # tangent basis: a = x-axis unless n is near-parallel to it, else y-axis
+                if (nx if nx >= 0 else -nx) < 0.9:
+                    axx = 1.0; ayy = 0.0; azz = 0.0
+                else:
+                    axx = 0.0; ayy = 1.0; azz = 0.0
+                # t1 = normalize(a x n)
+                t1x = ayy * nz - azz * ny
+                t1y = azz * nx - axx * nz
+                t1z = axx * ny - ayy * nx
+                ln = sqrt(t1x * t1x + t1y * t1y + t1z * t1z)
+                inv = 1.0 / ln if ln > 1e-12 else 0.0
+                t1x *= inv; t1y *= inv; t1z *= inv
             t1[k, 0] = t1x; t1[k, 1] = t1y; t1[k, 2] = t1z
             # t2 = n x t1
             t2[k, 0] = ny * t1z - nz * t1y
             t2[k, 1] = nz * t1x - nx * t1z
             t2[k, 2] = nx * t1y - ny * t1x
-            nMass[k] = _effmass(&rA[k, 0], &rB[k, 0], nx, ny, nz, invIw, a, b, imak, imbk)
-            t1Mass[k] = _effmass(&rA[k, 0], &rB[k, 0], t1x, t1y, t1z, invIw, a, b, imak, imbk)
-            t2Mass[k] = _effmass(&rA[k, 0], &rB[k, 0], t2[k, 0], t2[k, 1], t2[k, 2], invIw, a, b, imak, imbk)
+            nMass[k] = _effmass(&rA[k, 0], &rB[k, 0], nx, ny, nz, invIw, a, b, imak, imbk,
+                                softness[k, 0])
+            t1Mass[k] = _effmass(&rA[k, 0], &rB[k, 0], t1x, t1y, t1z, invIw, a, b, imak, imbk,
+                                 softness[k, 1])
+            t2Mass[k] = _effmass(&rA[k, 0], &rB[k, 0], t2[k, 0], t2[k, 1], t2[k, 2], invIw,
+                                 a, b, imak, imbk, softness[k, 2])
             # restitution bias from the approach velocity
             dvx = (lv[b, 0] + av[b, 1] * rB[k, 2] - av[b, 2] * rB[k, 1]) - (lv[a, 0] + av[a, 1] * rA[k, 2] - av[a, 2] * rA[k, 1])
             dvy = (lv[b, 1] + av[b, 2] * rB[k, 0] - av[b, 0] * rB[k, 2]) - (lv[a, 1] + av[a, 2] * rA[k, 0] - av[a, 0] * rA[k, 2])
             dvz = (lv[b, 2] + av[b, 0] * rB[k, 1] - av[b, 1] * rB[k, 0]) - (lv[a, 2] + av[a, 0] * rA[k, 1] - av[a, 1] * rA[k, 0])
             vn0 = dvx * nx + dvy * ny + dvz * nz
-            if vn0 < -restitution_threshold:
+            if vn0 < -threshold[k]:
                 vBias[k] = -restitution[k] * vn0
             else:
                 vBias[k] = 0.0
@@ -281,19 +175,19 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
                 dvy = (lv[b, 1] + av[b, 2] * rB[k, 0] - av[b, 0] * rB[k, 2]) - (lv[a, 1] + av[a, 2] * rA[k, 0] - av[a, 0] * rA[k, 2])
                 dvz = (lv[b, 2] + av[b, 0] * rB[k, 1] - av[b, 1] * rB[k, 0]) - (lv[a, 2] + av[a, 0] * rA[k, 1] - av[a, 1] * rA[k, 0])
                 vn = dvx * nx + dvy * ny + dvz * nz
-                new = nImp[k] - nMass[k] * (vn - vBias[k])
+                new = nImp[k] - nMass[k] * (vn - vBias[k] + softness[k, 0] * nImp[k])
                 if new < 0.0:
                     new = 0.0
                 dL = new - nImp[k]; nImp[k] = new
                 _apply_w(lv, av, a, b, ima[k], imb[k], invIw, &rA[k, 0], &rB[k, 0],
                          dL * nx, dL * ny, dL * nz)
 
-                maxf = friction[k] * nImp[k]
                 dvx = (lv[b, 0] + av[b, 1] * rB[k, 2] - av[b, 2] * rB[k, 1]) - (lv[a, 0] + av[a, 1] * rA[k, 2] - av[a, 2] * rA[k, 1])
                 dvy = (lv[b, 1] + av[b, 2] * rB[k, 0] - av[b, 0] * rB[k, 2]) - (lv[a, 1] + av[a, 2] * rA[k, 0] - av[a, 0] * rA[k, 2])
                 dvz = (lv[b, 2] + av[b, 0] * rB[k, 1] - av[b, 1] * rB[k, 0]) - (lv[a, 2] + av[a, 0] * rA[k, 1] - av[a, 1] * rA[k, 0])
+                maxf = friction[k, 0] * nImp[k]
                 vt = dvx * t1[k, 0] + dvy * t1[k, 1] + dvz * t1[k, 2]
-                newt = tImp[k, 0] - t1Mass[k] * vt
+                newt = tImp[k, 0] - t1Mass[k] * (vt - surface[k, 0] + softness[k, 1] * tImp[k, 0])
                 if newt > maxf:
                     newt = maxf
                 elif newt < -maxf:
@@ -302,8 +196,9 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
                 _apply_w(lv, av, a, b, ima[k], imb[k], invIw, &rA[k, 0], &rB[k, 0],
                          dL * t1[k, 0], dL * t1[k, 1], dL * t1[k, 2])
 
+                maxf = friction[k, 1] * nImp[k]
                 vt = dvx * t2[k, 0] + dvy * t2[k, 1] + dvz * t2[k, 2]
-                newt = tImp[k, 1] - t2Mass[k] * vt
+                newt = tImp[k, 1] - t2Mass[k] * (vt - surface[k, 1] + softness[k, 2] * tImp[k, 1])
                 if newt > maxf:
                     newt = maxf
                 elif newt < -maxf:
@@ -326,7 +221,7 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
             imak = ima[k]; imbk = imb[k]
             if imak + imbk <= 1e-12:
                 continue
-            vn = correction * vn
+            vn = correction[k] * vn
             if vn > max_correction:
                 vn = max_correction
             dL = vn / (imak + imbk)
@@ -336,3 +231,94 @@ def prepare_and_solve(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
             pos[b, 0] += imbk * dL * normal[k, 0]
             pos[b, 1] += imbk * dL * normal[k, 1]
             pos[b, 2] += imbk * dL * normal[k, 2]
+
+
+cdef inline void _apply_row(Py_ssize_t a, Py_ssize_t b, double amount, double* lin,
+                            double* turn_a, double* turn_b, double[:, ::1] lv,
+                            double[:, ::1] av, double[::1] inv_mass) noexcept nogil:
+    """Apply ``amount`` of a row's impulse: ``b`` along it, ``a`` against it."""
+    cdef int i
+    cdef double scale
+    if amount == 0.0:
+        return
+    if a >= 0:
+        scale = inv_mass[a] * amount
+        for i in range(3):
+            lv[a, i] = lv[a, i] - scale * lin[i]
+            av[a, i] = av[a, i] - turn_a[i] * amount
+    if b >= 0:
+        scale = inv_mass[b] * amount
+        for i in range(3):
+            lv[b, i] = lv[b, i] + scale * lin[i]
+            av[b, i] = av[b, i] + turn_b[i] * amount
+
+
+def solve_rows(Py_ssize_t[::1] a_idx, Py_ssize_t[::1] b_idx,
+               double[:, ::1] lin, double[:, ::1] ang_a, double[:, ::1] ang_b,
+               double[::1] bias, double[::1] low, double[::1] high, double[::1] softness,
+               double[::1] impulse, double[:, ::1] lv, double[:, ::1] av,
+               double[::1] inv_mass, double[:, :, ::1] invIw, int iters):
+    """Solve joint rows by Gauss-Seidel, warm started from ``impulse``.
+
+    The twin of ``jointrows._solve_rows``, operation for operation; see
+    :mod:`omi_physics.jointrows` for what a row is. A body index below zero
+    is the world. ``impulse`` carries each row's accumulated impulse in and out.
+    """
+    cdef Py_ssize_t K = a_idx.shape[0]
+    cdef double[::1] mass = np.zeros(K)
+    cdef double[:, ::1] turn_a = np.zeros((K, 3))
+    cdef double[:, ::1] turn_b = np.zeros((K, 3))
+    cdef Py_ssize_t k, a, b, it
+    cdef int i
+    cdef double effective, lx, ly, lz, jv, old, new
+    with nogil:
+        for k in range(K):
+            a = a_idx[k]; b = b_idx[k]
+            lx = lin[k, 0]; ly = lin[k, 1]; lz = lin[k, 2]
+            effective = 0.0
+            if a >= 0:
+                effective += inv_mass[a] * (lx * lx + ly * ly + lz * lz)
+                for i in range(3):
+                    turn_a[k, i] = (invIw[a, i, 0] * ang_a[k, 0]
+                                    + invIw[a, i, 1] * ang_a[k, 1]
+                                    + invIw[a, i, 2] * ang_a[k, 2])
+                effective += (ang_a[k, 0] * turn_a[k, 0] + ang_a[k, 1] * turn_a[k, 1]
+                              + ang_a[k, 2] * turn_a[k, 2])
+            if b >= 0:
+                effective += inv_mass[b] * (lx * lx + ly * ly + lz * lz)
+                for i in range(3):
+                    turn_b[k, i] = (invIw[b, i, 0] * ang_b[k, 0]
+                                    + invIw[b, i, 1] * ang_b[k, 1]
+                                    + invIw[b, i, 2] * ang_b[k, 2])
+                effective += (ang_b[k, 0] * turn_b[k, 0] + ang_b[k, 1] * turn_b[k, 1]
+                              + ang_b[k, 2] * turn_b[k, 2])
+            effective += softness[k]
+            if effective > 1e-12:
+                mass[k] = 1.0 / effective
+            else:
+                mass[k] = 0.0
+            _apply_row(a, b, impulse[k], &lin[k, 0], &turn_a[k, 0], &turn_b[k, 0],
+                       lv, av, inv_mass)
+        for it in range(iters):
+            for k in range(K):
+                a = a_idx[k]; b = b_idx[k]
+                jv = 0.0
+                if b >= 0:
+                    jv += (lin[k, 0] * lv[b, 0] + lin[k, 1] * lv[b, 1]
+                           + lin[k, 2] * lv[b, 2])
+                    jv += (ang_b[k, 0] * av[b, 0] + ang_b[k, 1] * av[b, 1]
+                           + ang_b[k, 2] * av[b, 2])
+                if a >= 0:
+                    jv -= (lin[k, 0] * lv[a, 0] + lin[k, 1] * lv[a, 1]
+                           + lin[k, 2] * lv[a, 2])
+                    jv -= (ang_a[k, 0] * av[a, 0] + ang_a[k, 1] * av[a, 1]
+                           + ang_a[k, 2] * av[a, 2])
+                old = impulse[k]
+                new = old + mass[k] * (bias[k] - jv - softness[k] * old)
+                if new < low[k]:
+                    new = low[k]
+                elif new > high[k]:
+                    new = high[k]
+                impulse[k] = new
+                _apply_row(a, b, new - old, &lin[k, 0], &turn_a[k, 0], &turn_b[k, 0],
+                           lv, av, inv_mass)

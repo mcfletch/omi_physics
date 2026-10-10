@@ -76,6 +76,9 @@ def _write_shape(shape: model.Shape) -> dict:
                 'cylinder': {'height': shape.height,
                              'radiusBottom': shape.radiusBottom,
                              'radiusTop': shape.radiusTop}}
+    if t == 'compound':
+        raise ValueError('OMI_physics_shape has no compound type; a compound is '
+                         'written as one child node per part, each with its collider')
     return {'type': t, t: {'mesh': shape.mesh}}
 
 

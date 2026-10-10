@@ -15,8 +15,9 @@ colliders and a vehicle casts a ray per wheel per step; a Python loop over the
 bodies costs more than the exact tests it is there to avoid.
 
 Shapes are tested exactly: a sphere analytically, a box in its own frame, a
-capsule as a segment, a trimesh triangle by triangle through the proxy's own
-spatial grid. **A convex hull is not cast against**, because doing it properly
+capsule as a segment, a cylinder or cone as its slanted side and flat ends, a
+trimesh triangle by triangle through the proxy's own spatial grid, and a
+compound part by part. **A convex hull is not cast against**, because doing it properly
 needs the hull's faces and this holds only its points; such a body is left out
 of the answer and named by :func:`unsupported_shapes`, which is a prop you
 cannot shoot rather than a hit in the wrong place. The second would be blamed
@@ -304,10 +305,16 @@ def unsupported_shapes(world: Any) -> set[str]:
         index = int(world.collider_shape[body])
         if index < 0:
             continue
-        kind = str(world.shapes[index].type)
-        if kind not in SUPPORTED:
-            found.add(kind)
+        found.update(_unsupported_in(world.shapes[index]))
     return found
+
+
+def _unsupported_in(shape: Any) -> set[str]:
+    """The shape types in ``shape``, a compound's parts included, a ray cannot meet."""
+    kind = str(shape.type)
+    if kind == 'compound':
+        return {found for part in shape.parts or () for found in _unsupported_in(part.shape)}
+    return set() if kind in SUPPORTED else {kind}
 
 
 def _candidates(world: Any, count: int, ignored: set[int],
@@ -398,18 +405,43 @@ def _hit_body(world: Any, body: int, origin: np.ndarray, heading: np.ndarray,
               limit: float) -> RayHit | None:
     """The ray's meeting with one body, or None."""
     shape = world.shapes[int(world.collider_shape[body])]
-    kind = str(shape.type)
-    if kind not in SUPPORTED:
-        return None
     centre = np.asarray(world.position[body], dtype='d')
     rotation = _rotation(np.asarray(world.orientation[body], dtype='d'))
+    met = _hit_shape(world, body, shape, centre, rotation, origin, heading, limit)
+    if met is None:
+        return None
+    distance, normal, triangle = met
+    # Always back along the ray: an impact effect is oriented the same way
+    # whichever side of a surface was struck.
+    if float(np.dot(normal, heading)) > 0.0:
+        normal = -normal
+    return RayHit(body=body, distance=distance,
+                  point=origin + heading * distance, normal=normal,
+                  triangle=triangle)
+
+
+def _hit_shape(world: Any, key: Any, shape: Any, centre: np.ndarray,
+               rotation: np.ndarray, origin: np.ndarray, heading: np.ndarray,
+               limit: float) -> tuple[float, np.ndarray, int] | None:
+    """The ray against one shape at a pose: ``(distance, normal, triangle)`` or None.
+
+    ``key`` names the shape's place in the world for the trimesh cache: the
+    body index, or for a compound's part the body and the part's indices.
+    """
+    kind = str(shape.type)
+    if kind == 'compound':
+        return _hit_compound(world, key, shape, centre, rotation, origin, heading, limit)
+    if kind not in SUPPORTED:
+        return None
     triangle = NO_TRIANGLE
     if kind == 'sphere':
         found = _hit_sphere(origin, heading, centre, float(shape.radius), limit)
-    elif kind in ('capsule', 'cylinder'):
+    elif kind == 'capsule':
         found = _hit_capsule(origin, heading, centre, rotation, shape, limit)
+    elif kind == 'cylinder':
+        found = _hit_cylinder(origin, heading, centre, rotation, shape, limit)
     elif kind == 'trimesh':
-        placed = _placed(world, body, shape, centre, rotation)
+        placed = _placed(world, key, shape, centre, rotation)
         met = (None if placed is None
                else _hit_trimesh(origin, heading, limit, placed))
         found = None if met is None else met[:2]
@@ -419,14 +451,28 @@ def _hit_body(world: Any, body: int, origin: np.ndarray, heading: np.ndarray,
         found = _hit_box(origin, heading, centre, rotation, half, limit)
     if found is None:
         return None
-    distance, normal = found
-    # Always back along the ray: an impact effect is oriented the same way
-    # whichever side of a surface was struck.
-    if float(np.dot(normal, heading)) > 0.0:
-        normal = -normal
-    return RayHit(body=body, distance=distance,
-                  point=origin + heading * distance, normal=normal,
-                  triangle=triangle)
+    return found[0], found[1], triangle
+
+
+def _hit_compound(world: Any, key: Any, shape: Any, centre: np.ndarray,
+                  rotation: np.ndarray, origin: np.ndarray, heading: np.ndarray,
+                  limit: float) -> tuple[float, np.ndarray, int] | None:
+    """The nearest of a compound's parts the ray meets.
+
+    A triangle index from a part's mesh is the index in that part's own
+    mesh; which part it came from is not part of the answer.
+    """
+    base = key if isinstance(key, tuple) else (key,)
+    best: tuple[float, np.ndarray, int] | None = None
+    for index, part in enumerate(shape.parts or ()):
+        turn = _rotation(np.asarray(part.orientation, dtype='d'))
+        placed = centre + rotation @ np.asarray(part.position, dtype='d')
+        found = _hit_shape(world, base + (index,), part.shape, placed, rotation @ turn,
+                           origin, heading, limit)
+        if found is not None and (best is None or found[0] < best[0]):
+            best = found
+            limit = found[0]
+    return best
 
 
 def _rotation(quaternion: np.ndarray) -> np.ndarray:
@@ -543,6 +589,57 @@ def _hit_capsule(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
     return best
 
 
+def _hit_cylinder(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
+                  rotation: np.ndarray, shape: Any,
+                  limit: float) -> tuple[float, np.ndarray] | None:
+    """Ray against a flat-ended cylinder, which may narrow to a cone.
+
+    Solved in the cylinder's own frame, where its axis is y and its radius
+    runs linearly from ``radiusBottom`` at ``-height/2`` to ``radiusTop`` at
+    ``+height/2``: the slanted side as a quadratic, and each end as a disc.
+    """
+    half = 0.5 * float(shape.height)
+    bottom, top = float(shape.radiusBottom), float(shape.radiusTop)
+    start = rotation.T @ (origin - centre)
+    way = rotation.T @ heading
+    slope = (top - bottom) / max(2.0 * half, _TINY)
+    middle = 0.5 * (bottom + top)
+    best: tuple[float, np.ndarray] | None = None
+
+    def keep(distance: float, normal: np.ndarray) -> None:
+        nonlocal best
+        if 0.0 <= distance <= limit and (best is None or distance < best[0]):
+            best = (distance, normal)
+
+    for height, radius, facing in ((-half, bottom, -1.0), (half, top, 1.0)):
+        if abs(way[1]) >= _TINY and radius > 0.0:
+            distance = (height - start[1]) / way[1]
+            point = start + way * distance
+            if point[0] * point[0] + point[2] * point[2] <= radius * radius:
+                keep(distance, np.array([0.0, facing, 0.0]))
+    reach = slope * start[1] + middle
+    a = way[0] * way[0] + way[2] * way[2] - slope * slope * way[1] * way[1]
+    b = 2.0 * (start[0] * way[0] + start[2] * way[2] - slope * way[1] * reach)
+    c = start[0] * start[0] + start[2] * start[2] - reach * reach
+    if abs(a) >= _TINY:
+        discriminant = b * b - 4.0 * a * c
+        roots = ([] if discriminant < 0.0 else
+                 [(-b - math.sqrt(discriminant)) / (2.0 * a),
+                  (-b + math.sqrt(discriminant)) / (2.0 * a)])
+    elif abs(b) >= _TINY:
+        roots = [-c / b]
+    else:
+        roots = []
+    for distance in roots:
+        point = start + way * distance
+        radius = slope * point[1] + middle
+        if -half <= point[1] <= half and radius >= 0.0:
+            keep(distance, _unit(np.array([point[0], -slope * radius, point[2]])))
+    if best is None:
+        return None
+    return best[0], rotation @ best[1]
+
+
 class _Placed:
     """One trimesh in world space, kept so a cast does not rebuild it.
 
@@ -588,9 +685,12 @@ class _Placed:
                 and np.array_equal(self.rotation, rotation))
 
 
-def _placed(world: Any, body: int, shape: Any, centre: np.ndarray,
+def _placed(world: Any, body: Any, shape: Any, centre: np.ndarray,
             rotation: np.ndarray) -> _Placed | None:
     """This body's trimesh in world space, built once per pose.
+
+    ``body`` is the body's index, or for a mesh that is a compound's part a
+    tuple of the body's index and the part's.
 
     Kept on the world rather than in a module-level table, so it goes when the
     world does and two worlds never share an entry.

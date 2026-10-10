@@ -250,6 +250,9 @@ class ContactBatch(NamedTuple):
             return cls.empty()
         normal = np.array([c.normal for c in contacts], dtype='d')
         tangent_impulse = np.array([c.tangent_impulse for c in contacts], dtype='d')
+        first = None
+        if all(c.tangent is not None for c in contacts):
+            first = np.array([c.tangent for c in contacts], dtype='d')
         return cls(
             np.fromiter((c.a for c in contacts), dtype=np.intp, count=len(contacts)),
             np.fromiter((c.b for c in contacts), dtype=np.intp, count=len(contacts)),
@@ -260,7 +263,7 @@ class ContactBatch(NamedTuple):
             np.fromiter((c.slip for c in contacts), dtype='d', count=len(contacts)),
             np.fromiter((c.normal_impulse for c in contacts), dtype='d',
                         count=len(contacts)),
-            world_tangent(normal, tangent_impulse),
+            world_tangent(normal, tangent_impulse, first),
             np.full(len(contacts), solved, dtype=bool))
 
     def concatenate(self, other: 'ContactBatch') -> 'ContactBatch':
@@ -289,9 +292,17 @@ def tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return t1, cross(normal, t1)
 
 
-def world_tangent(normal: np.ndarray, tangent_impulse: np.ndarray) -> np.ndarray:
-    """Each point's friction impulse, from the solver's basis into world space."""
-    t1, t2 = tangent_basis(normal)
+def world_tangent(normal: np.ndarray, tangent_impulse: np.ndarray,
+                  first: np.ndarray | None = None) -> np.ndarray:
+    """Each point's friction impulse, from the solver's basis into world space.
+
+    ``first`` is each point's first friction direction where the solver
+    reported it; otherwise the basis is the one the solver chooses itself.
+    """
+    if first is None:
+        t1, t2 = tangent_basis(normal)
+    else:
+        t1, t2 = first, cross(normal, first)
     return tangent_impulse[:, 0:1] * t1 + tangent_impulse[:, 1:2] * t2
 
 
