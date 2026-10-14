@@ -90,8 +90,11 @@ def length(v: np.ndarray) -> float:
     a dispatch through ``__array_function__`` -- and on one 3-vector all of that
     costs several times the arithmetic. The hot paths here ask for the length of
     three floats, millions of times.
+
+    ``math.hypot`` scales before it squares, so a vector whose squared
+    components underflow to zero or overflow to infinity still has its length.
     """
-    return math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    return math.hypot(v[0], v[1], v[2])
 
 
 def flat_length(v: np.ndarray) -> float:
@@ -101,7 +104,7 @@ def flat_length(v: np.ndarray) -> float:
     two-element array to throw away, and how far something went along the
     ground is asked several times per movement step.
     """
-    return math.sqrt(v[0] * v[0] + v[2] * v[2])
+    return math.hypot(v[0], v[2])
 
 
 #: The rotation the identity quaternion names. Copied rather than handed out,

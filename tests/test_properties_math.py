@@ -241,6 +241,15 @@ class TestLengthOfOneVector:
     def test_it_matches_numpy(self, v):
         assert mathutil.length(v) == pytest.approx(float(np.linalg.norm(v)), rel=1e-12)
 
+    @pytest.mark.parametrize('scale', [1e-200, 1e200])
+    def test_it_measures_a_vector_whose_squares_leave_the_doubles(self, scale):
+        """The squares of these components underflow to zero or overflow to
+        infinity; the length is still an ordinary number."""
+        assert mathutil.length(np.array([3.0, 0.0, 4.0]) * scale) == pytest.approx(
+            5.0 * scale, rel=1e-12, abs=0.0)
+        assert mathutil.flat_length(np.array([3.0, 9.0, 4.0]) * scale) == pytest.approx(
+            5.0 * scale, rel=1e-12, abs=0.0)
+
     @given(v=vectors())
     @SETTINGS
     def test_the_flat_one_measures_x_and_z(self, v):

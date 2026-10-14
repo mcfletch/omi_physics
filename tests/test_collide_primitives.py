@@ -81,6 +81,51 @@ def test_oriented_box_box_hit():
     assert contacts                              # corner of rotated box pokes in
 
 
+#: A separation whose square is below the smallest double, so a distance taken
+#: as the root of a sum of squares reads zero across it.
+TINY_GAP = 1e-200
+#: A radius far smaller than TINY_GAP: shapes this size, that far apart, are apart.
+TINY_RADIUS = 6e-294
+
+
+def along(axis, distance):
+    """The point ``distance`` from the origin along coordinate ``axis``."""
+    point = np.zeros(3)
+    point[axis] = distance
+    return point
+
+
+@pytest.mark.parametrize('axis', range(3))
+def test_spheres_a_tiny_gap_apart_do_not_touch(axis):
+    A = SphereProxy((0, 0, 0), TINY_RADIUS)
+    B = SphereProxy(along(axis, TINY_GAP), TINY_RADIUS)
+    assert collide.collide(0, 1, A, B) == []
+
+
+@pytest.mark.parametrize('axis', range(3))
+@pytest.mark.parametrize('radius', [0.0, TINY_RADIUS])
+def test_sphere_a_tiny_gap_outside_a_box_does_not_touch(axis, radius):
+    S = SphereProxy(along(axis, TINY_GAP), radius)
+    B = box((0, 0, 0), (0, 0, 0))               # a box flattened to a point
+    assert collide.collide(0, 1, S, B) == []
+    assert collide.collide(0, 1, B, S) == []
+
+
+@pytest.mark.parametrize('axis', range(3))
+def test_compiled_spheres_a_tiny_gap_apart_do_not_touch(axis):
+    native = pytest.importorskip('omi_physics._collide_native')
+    count, _normal, _points, _depths = native.sphere_sphere(
+        np.zeros(3), TINY_RADIUS, along(axis, TINY_GAP), TINY_RADIUS)
+    assert count == 0
+
+
+@pytest.mark.parametrize('axis', range(3))
+def test_compiled_sphere_a_tiny_gap_outside_a_box_does_not_touch(axis):
+    native = pytest.importorskip('omi_physics._collide_native')
+    count, _normal, _points, _depths = native.sphere_box(
+        along(axis, TINY_GAP), 0.0, np.zeros(3), I3.copy(), np.zeros(3))
+    assert count == 0
+
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))

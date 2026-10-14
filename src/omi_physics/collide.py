@@ -83,7 +83,7 @@ class Contact:
 def sphere_sphere(a: int, b: int, A: SphereProxy, B: SphereProxy) -> list[Contact]:
     """Sphere↔sphere contact (empty if the spheres are apart)."""
     d = B.center - A.center
-    dist = np.linalg.norm(d)
+    dist = mathutil.length(d)
     r = A.radius + B.radius
     if dist >= r:
         return []
@@ -98,7 +98,7 @@ def sphere_box(a: int, b: int, S: SphereProxy, B: BoxProxy) -> list[Contact]:
     local = B.R.T @ (S.center - B.center)
     clamped = np.clip(local, -B.half, B.half)
     delta = local - clamped
-    dist = np.linalg.norm(delta)
+    dist = mathutil.length(delta)
     if dist > S.radius:
         return []
     if dist > EPS:

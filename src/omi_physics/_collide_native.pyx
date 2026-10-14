@@ -8,13 +8,25 @@ with fixed-size scratch, so a pair costs native arithmetic instead of dozens of
 tiny numpy calls. Boxes are passed as ``center(3)``, world rotation ``R(3,3)``
 (columns are the box axes) and half-extents ``half(3)``; no proxy object needed.
 """
-from libc.math cimport fabs, sqrt
+from libc.math cimport fabs, hypot, sqrt
 
 DEF EPS = 1e-9
+# Bounds on a sum of three squares inside which no square has underflowed or
+# overflowed, so its root is the length.
+DEF SQUARES_MIN = 1e-280
+DEF SQUARES_MAX = 1e280
 
 
 cdef inline double _dot3(double* a, double* b) noexcept nogil:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+cdef inline double _length3(double x, double y, double z) noexcept nogil:
+    """Length of ``(x, y, z)``, for components whose squares may leave the doubles."""
+    cdef double squares = x * x + y * y + z * z
+    if SQUARES_MIN < squares < SQUARES_MAX:
+        return sqrt(squares)
+    return hypot(hypot(x, y), z)
 
 
 cdef int _box_box(double* ca, double* Ra, double* ha,
@@ -285,7 +297,7 @@ def box_box(double[::1] ca, double[:, ::1] Ra, double[::1] ha,
 def sphere_sphere(double[::1] ca, double ra, double[::1] cb, double rb):
     """Sphere↔sphere: ``(count, normal a→b, [point], [depth])``."""
     cdef double dx = cb[0] - ca[0], dy = cb[1] - ca[1], dz = cb[2] - ca[2]
-    cdef double dist = sqrt(dx * dx + dy * dy + dz * dz)
+    cdef double dist = _length3(dx, dy, dz)
     cdef double r = ra + rb
     if dist >= r:
         return 0, (0.0, 0.0, 0.0), [], []
@@ -314,7 +326,7 @@ def sphere_box(double[::1] cs, double rs, double[::1] cb, double[:, ::1] Rb, dou
     if cz > hb[2]: cz = hb[2]
     elif cz < -hb[2]: cz = -hb[2]
     cdef double dx = lx - cx, dy = ly - cy, dz = lz - cz
-    cdef double dist = sqrt(dx * dx + dy * dy + dz * dz)
+    cdef double dist = _length3(dx, dy, dz)
     if dist > rs:
         return 0, (0.0, 0.0, 0.0), [], []
     cdef double nlx, nly, nlz, depth, m0, m1, m2, mm
