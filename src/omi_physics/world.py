@@ -1434,8 +1434,12 @@ class PhysicsWorld:
         self._refit_half = halves[chosen]
         self._refit_cache_n = n
 
-    def refit_aabbs(self, margin: float = 0.05) -> None:
+    def refit_aabbs(self, margin: float = 0.05, rows: np.ndarray | None = None) -> None:
         """Recompute each body's world AABB from its shape and pose, expanded by ``margin``.
+
+        With ``rows``, the boxes of those bodies alone are recomputed: for a
+        caller that has moved those bodies and no others, at the margin the
+        boxes were last fitted with.
 
         Only the boxes that can have changed are recomputed: those of bodies
         that move, and those of static bodies found at a pose other than the one
@@ -1455,6 +1459,12 @@ class PhysicsWorld:
             return
         kind, half = self._refit_shapes()
         seen_position, seen_orientation = self._fitted_poses()
+        if rows is not None and margin == self._fitted_margin:
+            rows = np.asarray(rows, dtype=np.intp)
+            seen_position[rows] = self._position[rows]
+            seen_orientation[rows] = self._orientation[rows]
+            self._refit_rows(rows, kind, half, margin)
+            return
         movers = np.flatnonzero(self._motion_type[:n] != _STATIC)
         seen_position[movers] = self._position[movers]
         seen_orientation[movers] = self._orientation[movers]

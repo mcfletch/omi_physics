@@ -44,3 +44,16 @@ def test_the_moved_static_body_has_its_box_where_it_is():
     world.step(DT)
     assert np.allclose((world.aabb_min[mover] + world.aabb_max[mover]) / 2.0, (30.0, 0.0, 0.0),
                        atol=1e-6)
+
+
+def test_refitting_named_rows_fits_those_boxes_as_a_full_refit_does():
+    world, mover, ball = world_with_a_ball_over_a_floor()
+    world.refit_aabbs()
+    world.position[ball] = (1.0, 2.0, 3.0)
+    world.position[mover] = (25.0, 0.0, 0.0)
+    world.refit_aabbs(rows=np.array([ball]))
+    named_min, named_max = world.aabb_min.copy(), world.aabb_max.copy()
+    world.refit_aabbs()
+    assert np.array_equal(named_min[ball], world.aabb_min[ball])
+    assert np.array_equal(named_max[ball], world.aabb_max[ball])
+    assert not np.array_equal(named_min[mover], world.aabb_min[mover])   # not named, not refitted
