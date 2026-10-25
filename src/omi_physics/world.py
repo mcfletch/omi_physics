@@ -100,6 +100,15 @@ class PhysicsWorld:
         self._fitted_position: np.ndarray = np.zeros((0, 3), dtype='d')
         self._fitted_orientation: np.ndarray = np.zeros((0, 4), dtype='d')
         self._fitted_margin = 0.05
+        #: The layout epoch the boxes were last fitted at (:meth:`refit_aabbs`).
+        self._fitted_epoch = -1
+        #: Whether a step compares every static body's pose with the one its box was
+        #: fitted at, and raises for one that was written without :meth:`moved`.
+        #: ``OMI_PHYSICS_CHECK_STATICS=1`` sets it, for tests.
+        self.check_statics = os.environ.get('OMI_PHYSICS_CHECK_STATICS', '').strip().lower() in (
+            '1', 'true', 'yes', 'on')
+        #: The rows of each motion type, as ``(population epoch, dynamic, kinematic, moving)``.
+        self._motion_rows: tuple[int, np.ndarray, np.ndarray, np.ndarray] | None = None
         self.fixed_dt = fixed_dt
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
@@ -310,7 +319,7 @@ class PhysicsWorld:
     def layout_epoch(self) -> int:
         """A number that changes when a fixed body is added, removed or placed.
 
-        A fixed body is one that is not dynamic and not a sensor. An index over
+        A fixed body is one that is not dynamic. An index over
         the fixed bodies (:class:`~omi_physics.staticindex.StaticGrid`) is as
         current as the epoch it was built at, and :meth:`layout_changes_since`
         says what it has missed. Moving a dynamic body, which a step does to many
@@ -769,8 +778,7 @@ class PhysicsWorld:
 
     def _apply_steady_forces(self, dt: float) -> None:
         """Add a step of each dynamic body's steady force and torque to its velocities."""
-        n = self._n
-        dynamic = np.flatnonzero(self._motion_type[:n] == _DYNAMIC)
+        dynamic = self._rows_by_motion()[0]
         pushed = (np.any(self._force[dynamic] != 0.0, axis=1)
                   | np.any(self._torque[dynamic] != 0.0, axis=1))
         if not pushed.any():
@@ -868,9 +876,10 @@ class PhysicsWorld:
         self.bodies[i] = handle
         self._patch_refit_cache(i)
         self._fit_body(i)
-        if motion.type != model.DYNAMIC and not sensor:
-            self._layout_changed(i)
         self._population_epoch += 1
+        if motion.type != model.DYNAMIC:
+            self._wake_near(i)
+            self._layout_changed(i)
         return i
 
     def add_bodies(self, shape_index: int, positions: ArrayLike,
@@ -942,8 +951,16 @@ class PhysicsWorld:
         fitted_position[indices] = points
         fitted_orientation[indices] = turn
         self._refit_cache_n = -1
-        self._layout_changed()
         self._population_epoch += 1
+        self._layout_changed()
+        dynamic = self._rows_by_motion()[0]
+        asleep = dynamic[~self._awake[dynamic]]
+        if len(asleep) and len(indices):
+            low, high = self._aabb_min[indices].min(axis=0), self._aabb_max[indices].max(axis=0)
+            near = asleep[np.all(self._aabb_max[asleep] >= low, axis=1)
+                          & np.all(self._aabb_min[asleep] <= high, axis=1)]
+            self._awake[near] = True
+            self._sleep_timer[near] = 0.0
         return indices
 
     def _fill_static(self, indices: np.ndarray, points: np.ndarray, motion: model.Motion,
@@ -1028,6 +1045,9 @@ class PhysicsWorld:
         Either argument may be left out, which moves or turns the body without
         touching the other.
         """
+        fixed = self._motion_type[i] == _STATIC
+        if fixed:
+            self._wake_near(i)
         if position is not None:
             self._position[i] = np.asarray(position, dtype='d')
             self._prev_position[i] = self._position[i]
@@ -1035,8 +1055,45 @@ class PhysicsWorld:
             self._orientation[i] = np.asarray(orientation, dtype='d')
             self._prev_orientation[i] = self._orientation[i]
         self._fit_body(i, margin)
-        if self._motion_type[i] == _STATIC and not self._sensor[i]:
+        if fixed:
+            self._wake_near(i)
             self._layout_changed(i)
+
+    def moved(self, rows: ArrayLike) -> None:
+        """Record that the bodies at ``rows`` were placed by writing their poses.
+
+        The poses are those in :attr:`position` and :attr:`orientation`.
+
+        A step refits the boxes of the bodies that move and of the static bodies
+        added, removed or placed since the last one, and looks at no other. A
+        static body written to without this keeps its old box, and the broad
+        phase finds it where it was; :attr:`check_statics` makes the next step
+        raise for it. :meth:`place_body` does the write and this together.
+        """
+        for i in np.atleast_1d(np.asarray(rows, dtype=np.intp)).tolist():
+            self._prev_position[i] = self._position[i]
+            self._prev_orientation[i] = self._orientation[i]
+            if self._motion_type[i] == _STATIC:
+                self._wake_near(i)
+                self._fit_body(i, self._fitted_margin)
+                self._wake_near(i)
+                self._layout_changed(i)
+
+    def _wake_near(self, i: int) -> None:
+        """Wake the dynamic bodies whose boxes overlap body ``i``'s.
+
+        A body asleep on a static body that is moved or taken away falls, and
+        one that a static body is moved into is pushed out.
+        """
+        dynamic = self._rows_by_motion()[0]
+        asleep = dynamic[~self._awake[dynamic]]
+        if not len(asleep):
+            return
+        low, high = self._aabb_min[i], self._aabb_max[i]
+        near = asleep[np.all(self._aabb_max[asleep] >= low, axis=1)
+                      & np.all(self._aabb_min[asleep] <= high, axis=1)]
+        self._awake[near] = True
+        self._sleep_timer[near] = 0.0
 
     def remove_body(self, i: int) -> None:
         """Take body ``i`` out of the world, freeing its slot for the next one.
@@ -1062,7 +1119,8 @@ class PhysicsWorld:
             raise IndexError("no body %r to remove" % (i,))
         if self._vacant[i]:
             return
-        if self._motion_type[i] != _DYNAMIC and not self._sensor[i]:
+        if self._motion_type[i] != _DYNAMIC:
+            self._wake_near(i)
             self._layout_changed(i)
         self._population_epoch += 1
         with self._listener_errors_raised_after():
@@ -1199,7 +1257,7 @@ class PhysicsWorld:
 
     def _select_auto_backend(self) -> None:
         """In ``auto`` mode, swap CPU↔GPU backend by awake-body count (with hysteresis)."""
-        awake = int(np.count_nonzero(self.dynamic_mask()))
+        awake = len(self.awake_dynamic_rows())
         if self.backend is self._cpu_backend:
             if awake >= self.gpu_threshold:
                 gpu = self._ensure_gpu_backend()
@@ -1226,6 +1284,31 @@ class PhysicsWorld:
     def dynamic_mask(self) -> np.ndarray:
         """Boolean mask of the awake dynamic bodies."""
         return (self.motion_type == _DYNAMIC) & self.awake
+
+    def _rows_by_motion(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The dynamic, the kinematic, and the dynamic or kinematic bodies' rows.
+
+        Found again when a body is added or removed, the only times a motion
+        type is given, so a step in a world of many static bodies reads none of them.
+        """
+        found = self._motion_rows
+        if found is None or found[0] != self._population_epoch:
+            kind = self._motion_type[:self._n]
+            dynamic = np.flatnonzero(kind == _DYNAMIC)
+            kinematic = np.flatnonzero(kind == _KINEMATIC)
+            found = self._motion_rows = (self._population_epoch, dynamic, kinematic,
+                                         np.flatnonzero(kind != _STATIC))
+        return found[1], found[2], found[3]
+
+    def awake_dynamic_rows(self) -> np.ndarray:
+        """The rows of the awake dynamic bodies, as :meth:`dynamic_mask` marks them."""
+        dynamic = self._rows_by_motion()[0]
+        return dynamic[self._awake[dynamic]]
+
+    def awake_moving_rows(self) -> np.ndarray:
+        """The rows of the awake dynamic or kinematic bodies, as :meth:`moving_mask` marks them."""
+        moving = self._rows_by_motion()[2]
+        return moving[self._awake[moving]]
 
     def moving_mask(self) -> np.ndarray:
         """Boolean mask of the awake dynamic or kinematic bodies."""
@@ -1312,8 +1395,11 @@ class PhysicsWorld:
         """The body of :meth:`step`."""
         if self._backend_mode == 'auto':
             self._select_auto_backend()
-        self._prev_position[:self._n] = self.position
-        self._prev_orientation[:self._n] = self.orientation
+        # A static body's previous pose is set wherever it is placed, so only the
+        # bodies that move are copied.
+        moving = self._rows_by_motion()[2]
+        self._prev_position[moving] = self._position[moving]
+        self._prev_orientation[moving] = self._orientation[moving]
 
         self.backend.integrate_forces(self, dt)
         self._apply_steady_forces(dt)
@@ -1327,7 +1413,8 @@ class PhysicsWorld:
         if self.joint_constraints:
             self._solve_joints(dt)
 
-        exact = np.nonzero(self._exact_rotation[:self._n] & self.moving_mask())[0]
+        exact = self.awake_moving_rows()
+        exact = exact[self._exact_rotation[exact]]
         before = self._orientation[exact].copy() if len(exact) else None
         self.backend.integrate_positions(self, dt)
         if before is not None:
@@ -1486,11 +1573,12 @@ class PhysicsWorld:
         boxes were last fitted with.
 
         Only the boxes that can have changed are recomputed: those of bodies
-        that move, and those of static bodies found at a pose other than the one
-        their box was fitted at (the pose is remembered per body, and one
-        comparison of whole arrays says whether any static body has been
-        moved). A world of ten thousand static trunks and a ball refits the
-        ball.
+        that move, and those of static bodies added, removed or placed since
+        the last refit (:attr:`layout_epoch`, :meth:`moved`). A world of ten
+        thousand static trunks and a ball refits the ball, and reads nothing of
+        the trunks. Where the world cannot say what changed (a bulk addition,
+        or more changes than it keeps), every pose is compared with the one its
+        box was fitted at.
 
         Boxes and spheres -- the overwhelming majority -- are batched: a box's
         world half-extent is ``|R| @ half`` (equivalent to the min/max over its
@@ -1509,13 +1597,22 @@ class PhysicsWorld:
             seen_orientation[rows] = self._orientation[rows]
             self._refit_rows(rows, kind, half, margin)
             return
-        movers = np.flatnonzero(self._motion_type[:n] != _STATIC)
-        seen_position[movers] = self._position[movers]
-        seen_orientation[movers] = self._orientation[movers]
-        if (margin == self._fitted_margin
-                and np.array_equal(self._position[:n], seen_position[:n])
-                and np.array_equal(self._orientation[:n], seen_orientation[:n])):
-            rows = movers
+        movers = self._rows_by_motion()[2]
+        changed = (self.layout_changes_since(self._fitted_epoch)
+                   if margin == self._fitted_margin and self._fitted_epoch >= 0 else None)
+        if changed is not None:
+            placed = np.unique(np.asarray(changed, dtype=np.intp))
+            placed = placed[placed < n]
+            placed = placed[~self._vacant[placed]]
+            # Placing a body fits its box (:meth:`place_body`), so one still at the
+            # pose it was fitted at needs nothing more.
+            placed = placed[(self._position[placed] != seen_position[placed]).any(axis=1)
+                            | (self._orientation[placed] != seen_orientation[placed]).any(axis=1)]
+            rows = np.union1d(movers, placed) if len(placed) else movers
+            if self.check_statics:
+                self._check_statics(rows, seen_position, seen_orientation)
+            seen_position[rows] = self._position[rows]
+            seen_orientation[rows] = self._orientation[rows]
         else:
             differs = ((self._position[:n] != seen_position[:n]).any(axis=1)
                        | (self._orientation[:n] != seen_orientation[:n]).any(axis=1))
@@ -1526,7 +1623,21 @@ class PhysicsWorld:
             seen_position[rows] = self._position[rows]
             seen_orientation[rows] = self._orientation[rows]
             self._fitted_margin = margin
+        self._fitted_epoch = self._layout_epoch
         self._refit_rows(rows, kind, half, margin)
+
+    def _check_statics(self, rows: np.ndarray, seen_position: np.ndarray,
+                       seen_orientation: np.ndarray) -> None:
+        """Raise for a body other than ``rows`` found away from the pose its box was fitted at."""
+        n = self._n
+        differs = ((self._position[:n] != seen_position[:n]).any(axis=1)
+                   | (self._orientation[:n] != seen_orientation[:n]).any(axis=1))
+        differs[rows] = False
+        differs &= ~self._vacant[:n]
+        if differs.any():
+            raise RuntimeError(
+                'bodies %s were moved by writing their poses with no call to moved(); '
+                'their boxes are where they were' % np.flatnonzero(differs)[:10].tolist())
 
     def _fitted_poses(self) -> tuple[np.ndarray, np.ndarray]:
         """The poses the bodies' boxes were last fitted at, one row per body slot."""
@@ -1618,9 +1729,7 @@ class PhysicsWorld:
 
         Each body's thresholds are its own where :meth:`set_sleep` gave them
         and the world's otherwise."""
-        n = self._n
-        dyn = self.motion_type == _DYNAMIC
-        rows = np.flatnonzero(dyn)
+        rows = self._rows_by_motion()[0]
         if not len(rows):
             return
         lin_thresh = np.where(self._sleep_linear[rows] < 0.0, self.sleep_linear_speed,
@@ -1635,26 +1744,22 @@ class PhysicsWorld:
         timer[rows[slow]] += dt
         timer[rows[~slow]] = 0.0
         settled = slow & (timer[rows] > t_sleep)
-        ready = np.zeros(n, dtype=bool)
-        ready[rows[settled]] = True
+        ready = set(rows[settled].tolist())
 
-        to_sleep = np.zeros(n, dtype=bool)
-        islands, contacted = self._contact_islands(dyn)
+        to_sleep: list[int] = []
+        islands, contacted = self._contact_islands()
         for members in islands:
-            if all(ready[m] for m in members):
-                for m in members:
-                    to_sleep[m] = True
-        for i in rows[settled]:
-            if i not in contacted:
-                to_sleep[i] = True
+            if all(m in ready for m in members):
+                to_sleep.extend(members)
+        to_sleep.extend(i for i in ready if i not in contacted)
 
-        self._awake[:n][to_sleep] = False
+        self._awake[np.asarray(to_sleep, dtype=np.intp)] = False
         self._awake[rows[~slow]] = True             # anything moving is awake
         resting = rows[~self._awake[rows]]
         self._linear_velocity[resting] = 0.0
         self._angular_velocity[resting] = 0.0
 
-    def _contact_islands(self, dyn: np.ndarray) -> tuple[list[list[int]], set[int]]:
+    def _contact_islands(self) -> tuple[list[list[int]], set[int]]:
         """Union-find the touching dynamic bodies into islands.
 
         Returns the list of islands (each a list of body indices) and the set of
@@ -1670,13 +1775,15 @@ class PhysicsWorld:
             return x
 
         contacted: set[int] = set()
+        kind = self._motion_type
         for c in self.contacts:
             a, b = c.a, c.b
-            if dyn[a]:
+            dynamic_a, dynamic_b = kind[a] == _DYNAMIC, kind[b] == _DYNAMIC
+            if dynamic_a:
                 contacted.add(a)
-            if dyn[b]:
+            if dynamic_b:
                 contacted.add(b)
-            if dyn[a] and dyn[b]:
+            if dynamic_a and dynamic_b:
                 parent[find(a)] = find(b)
         groups: dict[int, list[int]] = {}
         for i in contacted:

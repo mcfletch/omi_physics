@@ -90,15 +90,15 @@ class NarrowPhase:
             return contacts
 
         # Accelerated path: box↔box straight to native, everything else via proxies.
-        n = world.body_count
         kind, half = world._refit_shapes()  # noqa: SLF001 the world's refit cache is the dispatch table
         pos = world.position
         # Rotation matrices, batched, for the bodies in a pair: a world of ten
         # thousand static trunks has a handful of those in a step.
-        rot = np.zeros((n, 3, 3))
+        rot: dict[int, np.ndarray] = {}
         if pairs:
             involved = np.unique(np.array(pairs, dtype=np.intp))
-            rot[involved] = quat_to_matrix(world.orientation[involved])
+            rot = dict(zip(involved.tolist(), quat_to_matrix(world.orientation[involved]),
+                           strict=True))
         box_box = _native.box_box
         sph_sph = _native.sphere_sphere
         sph_box = _native.sphere_box

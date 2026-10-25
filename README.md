@@ -433,11 +433,23 @@ A step costs next to nothing for static bodies that are not near anything.
 Static bodies with a collider and no trigger pair with dynamic bodies only,
 so past 256 of them the broad phase keeps them sorted and each dynamic body
 asks for the few within its x range; a floor or a landscape far wider than
-the median body is tested against every dynamic body instead. The index is
-rebuilt when one of them is added, removed or moved. The refit of boxes,
-the sleep pass and the contact solver work on the bodies that move or touch.
-10,000 trunks beside 1 or 40 moving balls cost a step 1.2 to 1.5 times what
-it costs without them.
+the median body is tested against every dynamic body instead. The refit of
+boxes, the sleep pass and the contact solver work on the bodies that move or
+touch. 10,000 trunks beside 1 or 40 moving balls cost a step 1.2 to 1.5 times
+what it costs without them.
+
+A static body changes only through the world: `add_body`, `add_bodies`,
+`place_body` and `remove_body` record it (`layout_epoch`), and a step refits
+the boxes and updates the broad phase's index for the recorded bodies alone,
+reading nothing of the others. Up to 1,024 changes are swept with the moving
+bodies before the index is sorted again, so a world that streams a rock at a
+time does not sort every trunk for each. A body asleep on a static body that
+is moved or removed is woken. A pose written straight into `position` or
+`orientation` is recorded by `world.moved(rows)`; without it the body keeps
+its old box. `OMI_PHYSICS_CHECK_STATICS=1` (or `world.check_statics = True`)
+has each step compare every pose with the one its box was fitted at and raise
+`RuntimeError` for a write that was not recorded. A world of 100,000 static
+posts and one rolling ball steps in 0.4 ms.
 
 ### Hinges, sliders and wheels
 

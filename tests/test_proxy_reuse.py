@@ -88,6 +88,7 @@ class TestAStaticMeshIsBuiltOnce:
             world.step(STEP)
         resting = float(world.position[mover][1])
         world.position[0] = (0.0, -5.0, 0.0)         # the ground drops away
+        world.moved([0])
         # A body resting on it has gone to sleep by now, and the ground moving
         # out from under a sleeper is not something the engine notices for it.
         world.wake(mover)
@@ -102,6 +103,7 @@ class TestAStaticMeshIsBuiltOnce:
         world.step(STEP)
         before = len(counted)
         world.orientation[0] = (0.0, 0.383, 0.0, 0.924)
+        world.moved([0])
         world.step(STEP)
         assert len(counted) > before
 
@@ -125,6 +127,7 @@ class TestTheAabbIsNotRecomputedEither:
         world, _ = _world_with_terrain_and_a_box()
         world.refit_aabbs()
         world.position[0] = (100.0, 0.0, 0.0)
+        world.moved([0])
         world.refit_aabbs()
         assert world.aabb_min[0][0] == pytest.approx(60.0, abs=0.1)
 
@@ -218,6 +221,7 @@ class TestRefittingCostsWhatMoved:
         world.refit_aabbs()
         before = len(measured)
         world.position[3] = (999.0, 0.0, 0.0)
+        world.moved([3])
         world.refit_aabbs()
         assert len(measured) == before + 1
 
@@ -227,6 +231,7 @@ class TestRefittingCostsWhatMoved:
         world.refit_aabbs()
         before = len(measured)
         world.position[3] = (999.0, 0.0, 0.0)
+        world.moved([3])
         world.refit_aabbs()
         world.refit_aabbs()
         assert len(measured) == before + 1
@@ -248,6 +253,7 @@ class TestRefittingCostsWhatMoved:
         world, _mover = self._world()
         world.refit_aabbs()
         world.position[3] = (999.0, 0.0, 0.0)
+        world.moved([3])
         world.refit_aabbs()
         assert float(world.aabb_min[3][0]) > 900.0
 

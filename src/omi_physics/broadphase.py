@@ -245,9 +245,10 @@ class _InertIndex:
     An inert body is static, has a collider and no trigger, so it pairs with
     dynamic bodies only. The index lists them in the broad phase's own order
     (minimum x, then body index), the small ones apart from the large, and
-    remembers each one's rank in that order. :meth:`BroadPhase.pairs` rebuilds
-    it when an inert body is added, removed or moved, which it finds by
-    comparing the world's boxes with the ones the index was built from.
+    remembers each one's rank in that order. A static body is added, removed
+    or moved only through the world's methods, which record it
+    (:attr:`~omi_physics.world.PhysicsWorld.layout_epoch`), so the index is
+    current for every inert body the record does not name.
 
     A static body added, removed or placed since the build is not a reason to
     build it again: the broad phase sweeps up to :data:`LOOSE_LIMIT` of those with
@@ -283,14 +284,17 @@ class _InertIndex:
 
         ``inert`` is the world's inert set without the ``loose`` bodies, ``movers``
         the rows it leaves out, and ``loose`` the rows (possibly none) changed since
-        the build. The boxes of the movers and the loose bodies are brought up to date
-        first, so that one comparison of whole arrays says whether any other inert
-        body changed.
+        the build. Bodies past the ones the index was built over are new, and the
+        index answers while none of them is inert and not loose. With the world's
+        :attr:`~omi_physics.world.PhysicsWorld.check_statics`, the boxes of every
+        other inert body are compared with the ones the index was built from as well.
         """
         count = world.body_count
         built = len(self.inert)
         if count < built:
             return False
+        if not getattr(world, 'check_statics', False):
+            return not inert[built:count].any()
         kept = np.ones(built, dtype=bool)
         kept[loose[loose < built]] = False
         if not np.array_equal(inert[:built], self.inert & kept) or inert[built:].any():
@@ -325,6 +329,11 @@ class BroadPhase:
         self.tree = DynamicAABBTree(fatten=fatten)
         self._known: set[int] = set()
         self._inert: _InertIndex | None = None
+        #: The inert mask, with the world's population epoch and body count it was found at.
+        self._inert_mask: tuple[int, int, np.ndarray | None] | None = None
+        #: :meth:`_index_for`'s answer, with the epochs it was found at.
+        self._split: tuple[int, int, int, tuple[_InertIndex, np.ndarray, np.ndarray,
+                                                np.ndarray | None]] | None = None
 
     def sync(self, world: "PhysicsWorld") -> None:
         """Insert/remove/refit tree leaves to match the world's current bodies."""
@@ -363,12 +372,7 @@ class BroadPhase:
         n = world.body_count
         if n < 2:
             return []
-        inert = None
-        if n >= SPLIT_MIN:
-            inert = ((world.motion_type == 0) & (world.trigger_shape < 0)
-                     & (world.collider_shape >= 0))
-            if np.count_nonzero(inert) < SPLIT_MIN:
-                inert = None
+        inert = self._inert_bodies(world)
         if inert is None:
             self._inert = None
             pair_a, pair_b = _sweep(world, None)
@@ -381,8 +385,41 @@ class BroadPhase:
             return []
         return filtered_pairs(world, np.minimum(pair_a, pair_b), np.maximum(pair_a, pair_b))
 
+    def _inert_bodies(self, world: "PhysicsWorld") -> np.ndarray | None:
+        """The mask of the inert bodies, or None where there are too few to index apart.
+
+        A body's motion type, collider and trigger are given when it is added, so
+        the mask is found again only when a body is added or removed.
+        """
+        n = world.body_count
+        epoch = getattr(world, 'population_epoch', None)
+        kept = self._inert_mask
+        if kept is not None and epoch is not None and kept[0] == epoch and kept[1] == n:
+            return kept[2]
+        inert = None
+        if n >= SPLIT_MIN:
+            inert = ((world.motion_type == 0) & (world.trigger_shape < 0)
+                     & (world.collider_shape >= 0))
+            if np.count_nonzero(inert) < SPLIT_MIN:
+                inert = None
+        if epoch is not None:
+            self._inert_mask = (epoch, n, inert)
+        return inert
+
     def _index_for(self, world: "PhysicsWorld", inert: np.ndarray
                    ) -> tuple["_InertIndex", np.ndarray, np.ndarray, np.ndarray | None]:
+        """:meth:`_find_index`, kept while no body is added, removed or placed."""
+        epochs = (world.population_epoch, world.layout_epoch, world.body_count)
+        kept = self._split
+        if (kept is not None and kept[:3] == epochs and kept[3][0] is self._inert
+                and not world.check_statics):
+            return kept[3]
+        found = self._find_index(world, inert)
+        self._split = (*epochs, found)
+        return found
+
+    def _find_index(self, world: "PhysicsWorld", inert: np.ndarray
+                    ) -> tuple["_InertIndex", np.ndarray, np.ndarray, np.ndarray | None]:
         """The index, the inert set it answers for, the movers, and the loose bodies' mask.
 
         The index built before is kept while it still answers for the inert bodies

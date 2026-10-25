@@ -367,21 +367,11 @@ class SequentialImpulseSolver:
         return sorted(contacts, key=lambda c: (world.inv_mass[c.a] == 0.0
                                                or world.inv_mass[c.b] == 0.0))
 
-    def _inv_inertia_world_all(self, world: "PhysicsWorld",
-                               bodies: np.ndarray) -> np.ndarray:
-        """World inverse-inertia tensor ``R diag(I⁻¹) Rᵀ`` per body, batched.
-
-        Rows are indexed by body, as the kernel reads them; only the rows of
-        ``bodies`` are filled in and the rest are zero. The bodies in contact
-        are few beside the bodies in the world, and a rotation matrix for each
-        of ten thousand static trunks is most of a step.
-        """
-        out = np.zeros((world.body_count, 3, 3))
-        rows = np.unique(bodies)
+    def _inv_inertia_world_rows(self, world: "PhysicsWorld", rows: np.ndarray) -> np.ndarray:
+        """World inverse-inertia tensors ``R diag(I⁻¹) Rᵀ`` of ``rows``, ``(m, 3, 3)``."""
         R = mathutil.quat_to_matrix(world.orientation[rows])          # (m, 3, 3)
         scaled = R * world.inv_inertia[rows][:, None, :]              # scale columns
-        out[rows] = np.einsum('nij,nkj->nik', scaled, R)
-        return out
+        return np.einsum('nij,nkj->nik', scaled, R)
 
     def _seed_pair(self, c: "Contact") -> tuple[float, float, float] | None:
         """Nearest cached ``(nImpulse, t0, t1)`` for this contact's pair, or None."""
@@ -424,14 +414,26 @@ class SequentialImpulseSolver:
                                        strict=True):
             c.approach = closing
             c.slip = sliding
-        invIw = self._inv_inertia_world_all(world, np.concatenate((a_idx, b_idx)))
+        # The kernel is given the bodies in contact alone, renumbered, and what it
+        # changes is written back: they are few beside the bodies in the world.
+        rows, local = np.unique(np.concatenate((a_idx, b_idx)), return_inverse=True)
+        local = local.astype(np.intp)
+        position = np.ascontiguousarray(world.position[rows])
+        linear = np.ascontiguousarray(world.linear_velocity[rows])
+        angular = np.ascontiguousarray(world.angular_velocity[rows])
         _native.prepare_and_solve(
-            a_idx, b_idx, point, normal, depth,
-            world.position, world.linear_velocity, world.angular_velocity,
-            world.inv_mass, invIw, terms.restitution, terms.threshold,
+            np.ascontiguousarray(local[:K]), np.ascontiguousarray(local[K:]),
+            point, normal, depth, position, linear, angular,
+            np.ascontiguousarray(world.inv_mass[rows]), self._inv_inertia_world_rows(world, rows),
+            terms.restitution, terms.threshold,
             np.ascontiguousarray(terms.friction), terms.direction, terms.surface,
             terms.softness, terms.correction, nImp, tImp, first,
             self.velocity_iterations, warm, self.slop, self.max_correction)
+        moving = world.inv_mass[rows] > 0.0
+        moved = rows[moving]
+        world.position[moved] = position[moving]
+        world.linear_velocity[moved] = linear[moving]
+        world.angular_velocity[moved] = angular[moving]
         cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
         for i, c in enumerate(contacts):
             c.normal_impulse = float(nImp[i])

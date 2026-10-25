@@ -68,12 +68,14 @@ def test_the_box_of_an_arrival_is_where_it_was_fitted() -> None:
     assert world.aabb_max[arrived] == pytest.approx(np.array([7.5, 1.0, 4.5]) + 0.05)
 
 
-def test_a_static_body_whose_pose_is_written_directly_is_still_refitted(monkeypatch) -> None:
+def test_a_static_body_whose_pose_is_written_and_marked_has_its_box_there(monkeypatch) -> None:
     world, _, mover = world_with_statics()
     refits = Refits(world, monkeypatch)
     world.position[20] = (61.0, 0.5, 2.0)
+    world.moved([20])
     world.step(1 / 60)
-    assert sorted(refits.rows[0]) == sorted([20, mover])
+    assert refits.rows == [[mover]]
+    assert world.aabb_min[20] == pytest.approx(np.array([60.5, 0.0, 1.5]) - 0.05)
 
 
 class TestTheShapeTableOfTheRefit:
@@ -110,6 +112,7 @@ class TestTheShapeTableOfTheRefit:
         taken = world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box),
                                position=(8.0, 0.5, 8.0))
         world.position[taken] = (8.0, 0.5, 9.0)
+        world.moved([taken])
         world.step(1 / 60)
         assert world.aabb_min[taken] == pytest.approx(np.array([7.5, 0.0, 8.5]) - 0.05)
 

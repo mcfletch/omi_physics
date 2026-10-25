@@ -29,6 +29,16 @@ compatibility promise.
   spheres too far above a grid to touch it and finds the few left one at a time with numbers
   (`GridSurface.sphere_contact`): a capsule standing on a grid ground costs 4 times less to collide.
   The slide down the tangent planes for arrays is `sphere_contacts_by_sliding`.
+- A step reads only the static bodies recorded as added, removed or placed since the last one
+  (`layout_epoch`): the box refit, the broad phase's index of inert bodies, the copy of previous
+  poses, the sleep pass, the narrow phase's rotations and the solver's arrays no longer read or
+  allocate a row for every body. A world of 100,000 static posts and a ball steps in 0.4 ms, from
+  1.2 ms; the forest walker's frame is 2.2 ms, from 6.3 ms.
+- A pose written into `position` or `orientation` of a static body is taken by a step only after
+  `PhysicsWorld.moved(rows)`; `OMI_PHYSICS_CHECK_STATICS=1` (`PhysicsWorld.check_statics`) makes
+  a step raise for one that was not recorded. A static sensor's placement and removal are recorded
+  too.
+- A dynamic body asleep against a static body that is placed, added or removed is woken.
 - A character among height fields alone, with no dynamic body near, is collided with them with
   numbers (`collide.upright_capsule_heightfield_pushes`, `HeightSurface.column_contacts`): no
   capsule proxy, box test or contact object. On a grid, spheres higher than

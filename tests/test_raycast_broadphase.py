@@ -120,6 +120,7 @@ class TestItStillAnswersTheSameWay:
         the same rule collision follows."""
         world = _tiles(count=20)
         world.position[3] = (500.0, 0.0, 0.0)
+        world.moved([3])
         world.refit_aabbs()
         hit = raycast(world, (510.0, 5.0, 10.0), (0, -1, 0), max_distance=10.0)
         assert hit is not None and hit.body == 3
