@@ -25,6 +25,11 @@ compatibility promise.
 - A crouched character stands up on a slope: the capsule tested for room is raised by
   `CharacterController.STAND_CLEARANCE` (2 cm).
 
+- `GridSurface.lipschitz` is the steepest slope of the grid, and `sphere_contacts` leaves out the
+  spheres too far above a grid to touch it and finds the few left one at a time with numbers
+  (`GridSurface.sphere_contact`): a capsule standing on a grid ground costs 4 times less to collide.
+  The slide down the tangent planes for arrays is `sphere_contacts_by_sliding`.
+
 ### Fixed
 
 - A fixed body's world-space proxy is dropped when its slot is emptied, so a body added into

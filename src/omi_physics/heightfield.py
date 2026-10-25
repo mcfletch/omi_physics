@@ -17,6 +17,7 @@ there. The routines below work in the field's local frame and return arrays;
 :mod:`omi_physics.collide` turns them into contacts and
 :mod:`omi_physics.raycast` into hits.
 """
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -50,6 +51,10 @@ class HeightSurface:
     low: np.ndarray
     high: np.ndarray
     feature: float
+    #: The steepest the surface is anywhere, as a rise over a run, or None where that is not known.
+    #: A sphere further above the surface than its radius times the length of this slope's
+    #: normal cannot touch it, which :func:`sphere_contacts` uses to leave most spheres out.
+    lipschitz: float | None = None
 
     def heights(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
         """Surface height at each ``(x, z)``; ``-inf`` outside the extent."""
@@ -159,6 +164,67 @@ class GridSurface(HeightSurface):
                               self.origin[1] + grid.max(),
                               self.origin[2] + (rows - 1) * step[1]])
         self.feature = float(step.min())
+        # The slope of a bilinear patch is a blend of the slopes of its edges, so no patch is
+        # steeper in x or in z than the steepest edge.
+        across = float(np.abs(np.diff(grid, axis=1)).max() / step[0])
+        along = float(np.abs(np.diff(grid, axis=0)).max() / step[1])
+        self.lipschitz = math.hypot(across, along)
+        self._rows: list[list[float]] | None = None
+
+    def sphere_contact(self, cx: float, cy: float, cz: float, radius: float
+                       ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float], float]:
+        """The contact of one sphere with the surface, found as :func:`sphere_contacts_by_sliding`
+        finds it, with numbers and not arrays: for one sphere that is several times as fast.
+
+        Returns whether it touches, the contact point, the unit normal pointing out of the ground
+        and the penetration along it.
+        """
+        x, z = cx, cz
+        ground_x = ground_y = ground_z = 0.0
+        nx = nz = 0.0
+        ny = 1.0
+        distance = 0.0
+        inside = False
+        for _ in range(_SLIDES):
+            height, nx, ny, nz = self._sample_one(x, z)
+            inside = height != -math.inf
+            ground_x, ground_y, ground_z = x, (height if inside else 0.0), z
+            distance = (cx - ground_x) * nx + (cy - ground_y) * ny + (cz - ground_z) * nz
+            if inside:
+                foot_x, foot_z = cx - distance * nx, cz - distance * nz
+            else:
+                foot_x, foot_z = x, z
+            settled = max(abs(foot_x - x), abs(foot_z - z)) < _SETTLED
+            x, z = foot_x, foot_z
+            if settled:
+                break
+        depth = radius - distance
+        half = 0.5 * depth
+        return (inside and depth > 0.0,
+                (ground_x - nx * half, ground_y - ny * half, ground_z - nz * half),
+                (nx, ny, nz), depth)
+
+    def _sample_one(self, x: float, z: float) -> tuple[float, float, float, float]:
+        """The height and the unit normal ``(nx, ny, nz)`` at one point: ``-inf`` and up off the grid."""
+        grid = self._rows
+        if grid is None:
+            grid = self._rows = self.grid.tolist()
+        rows, columns = len(grid), len(grid[0])
+        gx = (x - float(self.origin[0])) / float(self.spacing[0])
+        gz = (z - float(self.origin[2])) / float(self.spacing[1])
+        if not (0.0 <= gx <= columns - 1 and 0.0 <= gz <= rows - 1):
+            return -math.inf, 0.0, 1.0, 0.0
+        i = min(int(gx), columns - 2)
+        j = min(int(gz), rows - 2)
+        u, v = gx - i, gz - j
+        h00, h10 = grid[j][i], grid[j][i + 1]
+        h01, h11 = grid[j + 1][i], grid[j + 1][i + 1]
+        height = (h00 * (1 - u) * (1 - v) + h10 * u * (1 - v) + h01 * (1 - u) * v
+                  + h11 * u * v) + float(self.origin[1])
+        slope_x = ((h10 - h00) * (1 - v) + (h11 - h01) * v) / float(self.spacing[0])
+        slope_z = ((h01 - h00) * (1 - u) + (h11 - h10) * u) / float(self.spacing[1])
+        length = math.sqrt(slope_x * slope_x + 1.0 + slope_z * slope_z)
+        return height, -slope_x / length, 1.0 / length, -slope_z / length
 
     def _cell(self, x: np.ndarray, z: np.ndarray
               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -295,8 +361,44 @@ class FunctionSurface(HeightSurface):
         return out / np.linalg.norm(out, axis=-1, keepdims=True)
 
 
+#: The most spheres a grid finds contacts for one at a time, with numbers; more are found together, as arrays.
+_ONE_BY_ONE = 3
+
+
 def sphere_contacts(surface: HeightSurface, centres: np.ndarray, radius: float
                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Spheres of ``radius`` at ``centres`` ``(K, 3)`` against the ground.
+
+    The answer is that of :func:`sphere_contacts_by_sliding`. Where the surface knows how steep it
+    can be (:attr:`HeightSurface.lipschitz`) one lookup of its height under each sphere leaves out
+    the spheres too far above it to touch, which for a capsule standing on the ground is all but
+    the lowest; a few left are found one at a time.
+    """
+    bound = surface.lipschitz
+    one = getattr(surface, 'sphere_contact', None)
+    if bound is None or one is None:
+        return sphere_contacts_by_sliding(surface, centres, radius)
+    count = len(centres)
+    heights = surface.heights(centres[:, 0], centres[:, 2])
+    reach = 2.0 * radius * math.sqrt(1.0 + bound * bound)
+    near = np.flatnonzero(centres[:, 1] - heights < reach)
+    touching = np.zeros(count, dtype=bool)
+    points = np.zeros((count, 3))
+    normals = np.zeros((count, 3))
+    normals[:, 1] = 1.0
+    depths = np.full(count, -np.inf)
+    if len(near) > _ONE_BY_ONE:
+        found = sphere_contacts_by_sliding(surface, centres[near], radius)
+        touching[near], points[near], normals[near], depths[near] = found
+        return touching, points, normals, depths
+    for k in near.tolist():
+        touching[k], points[k], normals[k], depths[k] = one(
+            float(centres[k, 0]), float(centres[k, 1]), float(centres[k, 2]), radius)
+    return touching, points, normals, depths
+
+
+def sphere_contacts_by_sliding(surface: HeightSurface, centres: np.ndarray, radius: float
+                               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Spheres of ``radius`` at ``centres`` ``(K, 3)`` against the ground.
 
     Returns, per sphere, whether it touches, the contact point, the unit normal
