@@ -341,26 +341,30 @@ class GridSurface(HeightSurface):
         near = [y for y in heights if y - ground < reach]
         nearer = near
         if near:
-            limit = self._local_clearance(x, z, radius, reach)
-            nearer = [y for y in near if y - ground < limit]
+            limit, top = self._local_clearance(x, z, radius)
+            nearer = [y for y in near if not limit <= y - ground < top]
         if len(nearer) > _ONE_BY_ONE or (nearer is near and len(near) > _ONE_BY_ONE):
             found = self._slide_together([[x, y, z] for y in nearer], radius)
         else:
             found = [self.sphere_contact(x, y, z, radius) for y in nearer]
         return [(point, normal, depth) for touching, point, normal, depth in found if touching]
 
-    def _local_clearance(self, x: float, z: float, radius: float, reach: float) -> float:
-        """How high above the ground at ``(x, z)`` a sphere of ``radius`` there cannot touch it.
+    def _local_clearance(self, x: float, z: float, radius: float) -> tuple[float, float]:
+        """The heights above the ground at ``(x, z)`` between which a sphere of ``radius`` there
+        cannot touch it, as ``(low, high)``; ``(inf, inf)`` where there are none.
 
-        The bound is :func:`local_clearance` of the steepest slope within ``reach``
-        of the point (:meth:`_steepest_near`). ``reach`` is the height under which
-        :func:`sphere_contacts` slides a sphere at all, and the slide down the
-        tangent planes of a sphere lower than that stays within ``reach`` of the
-        point while the slope is gentle enough for a bound to exist; where none
-        does, ``inf``.
+        The bound is :func:`local_clearance` of the steepest slope within
+        :data:`LOCAL_REACH` radii of the point (:meth:`_steepest_near`), and holds
+        for a sphere whose slide down the tangent planes stays within that reach
+        (:func:`clearance_spread`).
         """
+        reach = LOCAL_REACH * radius
         steepest = self._steepest_near(x, z, reach)
-        return local_clearance(steepest, radius) if clearance_spread(steepest) <= 1.0 else math.inf
+        spread = clearance_spread(steepest)
+        low = local_clearance(steepest, radius)
+        if not math.isfinite(low):
+            return math.inf, math.inf
+        return low, (reach / spread if spread > 0.0 else math.inf)
 
     def _steepest_near(self, x: float, z: float, reach: float) -> float:
         """The steepest slope of the cells within ``reach`` of ``(x, z)``, as a rise over a run."""
@@ -651,8 +655,12 @@ class FunctionSurface(HeightSurface):
         return out / np.linalg.norm(out, axis=-1, keepdims=True)
 
 
+#: How far from the point under a sphere, in its radii, :meth:`GridSurface.column_contacts`
+#: takes the steepest slope for :func:`local_clearance`.
+LOCAL_REACH = 4.0
+
 #: The steepest slope, as a rise over a run, under which :func:`local_clearance` has a bound.
-_GENTLE = 0.45
+_GENTLE = 0.55
 
 
 def clearance_spread(slope: float) -> float:
@@ -660,15 +668,16 @@ def clearance_spread(slope: float) -> float:
     planes can carry the point it samples from the point under the sphere, on ground no steeper than
     ``slope``; ``inf`` past :data:`_GENTLE`.
 
-    Each slide moves the sampled point to the foot of the perpendicular from the centre to the
-    tangent plane, at most the distance to the plane times ``slope / sqrt(1 + slope**2)`` from the
-    point under the centre, and that distance grows by at most ``1 + slope`` times the move.
-    Over the four moves of :data:`_SLIDES` slides that sums to the value returned.
+    At a sampled point ``e`` from the point under the centre, the distance to the tangent plane
+    is at most ``(H + 2 * slope * e) / n`` with ``n = sqrt(1 + s**2)`` for the plane's slope
+    ``s``, and the next point is that distance times ``s / n`` from the point under the centre:
+    at most ``(H + 2 * slope * e) * slope / (1 + slope**2)``. Over the four moves of
+    :data:`_SLIDES` slides that sums to the value returned.
     """
     if slope > _GENTLE:
         return math.inf
-    share = slope / math.sqrt(1.0 + slope * slope)
-    grow = share * (1.0 + slope)
+    share = slope / (1.0 + slope * slope)
+    grow = 2.0 * slope * share
     return share * (1.0 + grow + grow * grow + grow * grow * grow)
 
 

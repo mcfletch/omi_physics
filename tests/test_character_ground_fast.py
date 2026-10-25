@@ -89,7 +89,8 @@ FIELDS = {
 
 @pytest.mark.parametrize('name', sorted(FIELDS))
 @pytest.mark.parametrize('seed', range(4))
-def test_an_upright_capsule_pushes_out_of_a_height_field_as_collide_has_it_to_the_bit(name, seed):
+def test_an_upright_capsule_pushes_out_of_a_height_field_as_collide_has_it(name, seed):
+    """To a nanometre: a sphere left out by the local bound changes when the others stop sliding."""
     field = FIELDS[name]()
     rng = np.random.default_rng(seed)
     found = 0
@@ -105,8 +106,8 @@ def test_an_upright_capsule_pushes_out_of_a_height_field_as_collide_has_it_to_th
         got = collide.upright_capsule_heightfield_pushes(field, x, y, z, half, radius)
         assert len(got) == len(wanted)
         for (push, depth), (push_wanted, depth_wanted) in zip(got, wanted, strict=True):
-            assert push == pytest.approx(push_wanted, abs=1e-12)
-            assert depth == pytest.approx(depth_wanted, abs=1e-12)
+            assert push == pytest.approx(push_wanted, abs=1e-9)
+            assert depth == pytest.approx(depth_wanted, abs=1e-9)
         found += len(got)
     assert found
 
@@ -126,12 +127,11 @@ def test_a_sphere_above_its_local_clearance_never_touches_the_ground(seed):
     for _ in range(400):
         px, pz = rng.uniform(4.0, 25.0, 2)
         radius = float(rng.uniform(0.05, 0.5))
-        reach = 2.0 * radius * math.sqrt(1.0 + surface.lipschitz ** 2)
-        limit = surface._local_clearance(px, pz, radius, reach)  # noqa: SLF001 the bound under test
+        limit, top = surface._local_clearance(px, pz, radius)  # noqa: SLF001 the bound under test
         if not math.isfinite(limit):
             continue
         ground = surface.height_at(px, pz)
-        for height in np.linspace(limit, max(reach, limit) + 0.05, 7):
+        for height in np.linspace(limit, min(top, 10.0), 7):
             touching, *_ = surface.sphere_contact(px, ground + float(height), pz, radius)
             assert not touching
             checked += 1

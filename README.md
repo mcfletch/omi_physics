@@ -401,7 +401,7 @@ body in y for the broad phase, which an unbounded field cannot be.
   its axis (`collide.upright_capsule_heightfield_pushes`), and no capsule
   proxy or contact object is made. On a grid, a sphere is left out when it is
   higher above the ground than a bound taken from the steepest slope within
-  reach of it (`heightfield.local_clearance`), so on a gentle slope a
+  four radii of it (`heightfield.local_clearance`, `LOCAL_REACH`), so on a gentle slope a
   standing capsule slides one sphere and not five. The pose agrees with the
   contact solver's to 1e-9 m a step; `CharacterController.ground_fast_path =
   False` collides it through `collide.collide` instead.
