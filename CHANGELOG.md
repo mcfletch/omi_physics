@@ -25,6 +25,13 @@ compatibility promise.
 - A crouched character stands up on a slope: the capsule tested for room is raised by
   `CharacterController.STAND_CLEARANCE` (2 cm).
 
+### Fixed
+
+- A fixed body's world-space proxy is dropped when its slot is emptied, so a body added into
+  a slot a removed one held is collided with at its own shape and place, not the removed
+  body's. A character on a streamed ground fell through the chunk that took a removed
+  chunk's slot.
+
 ### Added
 
 - `CharacterController` integrates gravity exactly, so a jump reaches

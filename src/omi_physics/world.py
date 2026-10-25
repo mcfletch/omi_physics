@@ -1084,6 +1084,11 @@ class PhysicsWorld:
 
     def _forget_body(self, i: int) -> None:
         """Drop per-body caches other modules keep on the world."""
+        from .collisionquery import STATIC_PROXIES  # noqa: PLC0415 collisionquery imports this module
+
+        proxies = STATIC_PROXIES.get(self)
+        if proxies is not None:
+            proxies.pop(i, None)
         meshes = getattr(self, '_raycast_meshes', None)
         if meshes is not None:
             # A compound's meshes are kept under the body's index and the part's.
