@@ -829,11 +829,14 @@ def _hit_triangles_many(origins: np.ndarray, headings: np.ndarray,
         edge = cross(to_a, edge1[None])
         v = (edge * heading).sum(axis=2) * inverse
         distance = (edge2[None] * edge).sum(axis=2) * inverse
-    met = ((np.abs(determinant) >= _TINY)        # not parallel to the plane
-           & np.isfinite(distance)
-           & (u >= 0.0) & (u <= 1.0)
-           & (v >= 0.0) & (u + v <= 1.0)
-           & (distance >= 0.0) & (distance <= limits[:, None]))
+    # A ray parallel to the plane has infinite u and v of either sign, and their
+    # sum is not a number; those entries are masked by the determinant.
+    with np.errstate(invalid='ignore'):
+        met = ((np.abs(determinant) >= _TINY)        # not parallel to the plane
+               & np.isfinite(distance)
+               & (u >= 0.0) & (u <= 1.0)
+               & (v >= 0.0) & (u + v <= 1.0)
+               & (distance >= 0.0) & (distance <= limits[:, None]))
     nearest = np.where(met, distance, np.inf).argmin(axis=1)
     found: list[tuple[float, np.ndarray, int] | None] = []
     for ray, among in enumerate(nearest.tolist()):
