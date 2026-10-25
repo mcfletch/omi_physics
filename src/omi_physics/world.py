@@ -110,6 +110,8 @@ class PhysicsWorld:
             '1', 'true', 'yes', 'on')
         #: The rows of each motion type, as ``(population epoch, dynamic, kinematic, moving)``.
         self._motion_rows: tuple[int, np.ndarray, np.ndarray, np.ndarray] | None = None
+        #: Whether any body is a trigger or a sensor, with the population epoch it was found at.
+        self._sensing: tuple[int, bool] | None = None
         self.fixed_dt = fixed_dt
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
@@ -1446,6 +1448,11 @@ class PhysicsWorld:
         sensor in it is left out by the broad phase: such a pair makes no
         contact the solver acts on.
         """
+        if self._nothing_to_collide(stages):
+            stages.contacts = self.contacts = []
+            if self._pair_rule is not None:
+                self.pair_parameters = {}
+            return
         n = self._n
         kind = self._motion_type[:n]
         active = (((kind == _DYNAMIC) & self._awake[:n]) | (kind == _KINEMATIC)
@@ -1503,6 +1510,24 @@ class PhysicsWorld:
             self._log_triggers(fired)
             for event in fired:
                 self.dispatch_trigger(*event)
+
+    def _nothing_to_collide(self, stages: '_CollisionStages') -> bool:
+        """Whether a collision pass would find nothing to solve, sense, fire or end.
+
+        So when no dynamic body is awake, no body is a trigger or a sensor, and
+        no pair is touching from the step before: a kinematic body against a
+        fixed one makes no contact the solver acts on.
+        """
+        if self.contacts or len(self.awake_dynamic_rows()) or stages.triggers.overlaps:
+            return False
+        if self._reporting != 'off' and self._tracker.tracking:
+            return False
+        found = self._sensing
+        if found is None or found[0] != self._population_epoch:
+            n = self._n
+            found = self._sensing = (self._population_epoch, bool(
+                (self._trigger_shape[:n] >= 0).any() or self._sensor[:n].any()))
+        return not found[1]
 
     def writeback(self, alpha: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Interpolated poses for rendering: lerp prev→current by ``alpha``."""
