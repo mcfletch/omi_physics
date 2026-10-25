@@ -1516,11 +1516,15 @@ class PhysicsWorld:
     def _nothing_to_collide(self, stages: '_CollisionStages') -> bool:
         """Whether a collision pass would find nothing to solve, sense, fire or end.
 
-        So when no dynamic body is awake, no body is a trigger or a sensor, and
-        no pair is touching from the step before: a kinematic body against a
-        fixed one makes no contact the solver acts on.
+        So when no dynamic body is awake, none sleeps where a kinematic body can
+        wake it, no body is a trigger or a sensor, and no pair is touching from
+        the step before: a kinematic body against a fixed one makes no contact
+        the solver acts on.
         """
         if self.contacts or len(self.awake_dynamic_rows()) or stages.triggers.overlaps:
+            return False
+        dynamic, kinematic, _moving = self._rows_by_motion()
+        if len(dynamic) and len(kinematic):
             return False
         if self._reporting != 'off' and self._tracker.tracking:
             return False

@@ -206,7 +206,10 @@ def _world_with_movers(count: int) -> PhysicsWorld:
 @pytest.mark.serial
 class TestStepCost:
     @pytest.mark.parametrize('movers', [1, 40])
-    def test_ten_thousand_static_trunks_at_most_double_a_step(self, movers: int) -> None:
+    def test_ten_thousand_static_trunks_at_most_double_a_step(
+            self, movers: int, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The check of every static pose is a cost of its own, which this measures without.
+        monkeypatch.delenv('OMI_PHYSICS_CHECK_STATICS', raising=False)
         without = _world_with_movers(movers)
         baseline = _median_step(without)
         crowded = _world_with_movers(movers)

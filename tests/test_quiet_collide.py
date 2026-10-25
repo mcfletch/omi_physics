@@ -51,3 +51,14 @@ def test_a_dynamic_body_or_a_trigger_brings_the_broad_phase_back(monkeypatch):
         world.step(1 / 60)
     assert asked
     assert any(trigger in event for event in entered)
+
+
+def test_a_kinematic_body_wakes_a_sleeping_one_it_walks_into():
+    world = kinematic_over_ground()
+    crate = world.add_shape(model.Shape.box((0.8, 0.8, 0.8)))
+    box = world.add_body(model.Motion(type=model.DYNAMIC, mass=20.0),
+                         collider=model.Collider(shape=crate), position=(2.0, 0.4, 0.0))
+    world.awake[box] = False
+    for _ in range(150):
+        world.step(1 / 60)
+    assert float(world.position[box][0]) > 2.1
