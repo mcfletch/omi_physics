@@ -48,6 +48,10 @@ def _depth_of_contact(contact: Any) -> float:
 
 
 
+#: The gathers of static bodies an update keeps, the newest first.
+_GATHERS_KEPT = 4
+
+
 class _StaticBoxes:
     """The oriented boxes among some static bodies, as arrays a capsule is tested against at once."""
 
@@ -259,6 +263,9 @@ class CharacterController:
         # `_near_triangles`.
         self._near_cache: dict[int, tuple[np.ndarray, np.ndarray,
                                           np.ndarray]] = {}
+        #: The static bodies gathered during the update under way, as ``(low, high,
+        #: bodies, boxes)``; None outside an update. See :meth:`_keep_gathers`.
+        self._gathers: list[tuple[np.ndarray, np.ndarray, list[int], _StaticBoxes]] | None = None
         #: The character's body in the world, or None. A sensor
         #: (:meth:`~omi_physics.world.PhysicsWorld.is_sensor`): it enters
         #: trigger volumes and its touches with moving bodies are reported,
@@ -784,6 +791,33 @@ class CharacterController:
         self._near_cache[body] = (low, high, verts)
         return verts
 
+    def _keep_gathers(self) -> None:
+        """Keep the static bodies gathered by depenetration for the rest of the update.
+
+        The world does not change during an update, so a gather made for a box
+        that holds the capsule's box answers as a new one would: it may hold
+        more bodies, and those touch nothing the capsule's box does not reach.
+        """
+        self._gathers = []
+
+    def _gather_statics(self, lo: np.ndarray, hi: np.ndarray
+                        ) -> tuple[np.ndarray, np.ndarray, list[int], _StaticBoxes]:
+        """The static bodies near the box ``lo`` to ``hi``, from a gather this update kept if one holds it."""
+        kept = self._gathers
+        if kept is not None:
+            for gathered in kept:
+                low, high = gathered[0], gathered[1]
+                if (lo[0] >= low[0] and lo[1] >= low[1] and lo[2] >= low[2]
+                        and hi[0] <= high[0] and hi[1] <= high[1] and hi[2] <= high[2]):
+                    return gathered
+        low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
+        near = list(self._static_bodies(low, high))
+        gathered = (low, high, near, _StaticBoxes(near, self._static_proxy))
+        if kept is not None:
+            kept.insert(0, gathered)
+            del kept[_GATHERS_KEPT:]
+        return gathered
+
     def _push_out(self, position: Vec,
                   iterations: int = 3) -> tuple[np.ndarray, np.ndarray | None]:
         """Depenetrate the capsule from static colliders and obstacles; return (pos, ground_n).
@@ -805,12 +839,9 @@ class CharacterController:
             capsule = cast(CapsuleProxy, self._proxy(pos))
             lo, hi = capsule.aabb()
             # The static bodies near the capsule, asked for once and kept while
-            # the iterations' corrections leave it inside the box they were
-            # gathered for.
+            # the corrections leave it inside the box they were gathered for.
             if gathered is None or np.any(lo < gathered[0]) or np.any(hi > gathered[1]):
-                low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
-                near = list(self._static_bodies(low, high))
-                gathered = (low, high, near, _StaticBoxes(near, self._static_proxy))
+                gathered = self._gather_statics(lo, hi)
             boxed = gathered[3].pushes(capsule)
             for j in gathered[2]:
                 found = boxed.get(j)
@@ -894,22 +925,26 @@ class CharacterController:
         stands on carries it by the velocity it was found with.
         """
         self._gather_for(dt)
-        self._advance_pose(dt)
-        start = self.position.copy()
-        self._arrived = self.velocity.copy()
-        self.pushing = None
-        self._landing = None
-        for piece in self._substeps(dt):
-            was_grounded = self.grounded
-            self._step(piece)
-            self._carry(piece)
-            # After the step, so "left the ground" and "landed" are settled
-            # facts rather than predictions, and so every early return above is
-            # covered.
-            if self.grounded and not was_grounded and self._impact > 0.0:
-                self._landing = max(self._landing or 0.0, self._impact)
-            if not self.flying:
-                self._tick_jump_windows(piece, was_grounded)
+        self._keep_gathers()
+        try:
+            self._advance_pose(dt)
+            start = self.position.copy()
+            self._arrived = self.velocity.copy()
+            self.pushing = None
+            self._landing = None
+            for piece in self._substeps(dt):
+                was_grounded = self.grounded
+                self._step(piece)
+                self._carry(piece)
+                # After the step, so "left the ground" and "landed" are settled
+                # facts rather than predictions, and so every early return above is
+                # covered.
+                if self.grounded and not was_grounded and self._impact > 0.0:
+                    self._landing = max(self._landing or 0.0, self._impact)
+                if not self.flying:
+                    self._tick_jump_windows(piece, was_grounded)
+        finally:
+            self._gathers = None
         self.velocity = (self.position - start) / dt if dt > 0 else np.zeros(3)
         self._carry_body()
 

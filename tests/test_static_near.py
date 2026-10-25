@@ -244,3 +244,44 @@ class TestACharacterAmongManyBodies:
                 return []
 
         assert not isinstance(NoNear(), CollisionQuery)
+
+
+class TestOneGatherAnUpdate:
+    """An update asks the grid again only when the capsule leaves the box it gathered for."""
+
+    @staticmethod
+    def walk(world: PhysicsWorld, frames: int = 90) -> tuple[CharacterController, list]:
+        controller = CharacterController(world, CharacterCapabilities(), position=(0.0, 0.95, 37.0))
+        controller.set_move((0.3, 0.0, 1.0), 'run')
+        path = []
+        for _ in range(frames):
+            controller.update(DT)
+            path.append((controller.position.copy(), controller.grounded, controller.state))
+        return controller, path
+
+    def test_an_update_on_the_ground_asks_the_grid_once(self, monkeypatch) -> None:
+        world, _floor = world_with_floor()
+        posts_in_a_row(world, 50)
+        asked = []
+        original = WorldQuery.static_near
+        monkeypatch.setattr(WorldQuery, 'static_near',
+                            lambda self, lo, hi: asked.append(1) or original(self, lo, hi))
+        controller, _path = self.walk(world, 30)
+        asked.clear()
+        controller.update(DT)
+        assert len(controller._substeps(DT)) == 1
+        assert len(asked) == 1
+
+    def test_a_walk_goes_where_it_went_with_a_gather_for_every_depenetration(
+            self, monkeypatch) -> None:
+        world, _floor = world_with_floor()
+        posts_in_a_row(world, 50, spacing=1.2)
+        _controller, kept = self.walk(world)
+        monkeypatch.setattr(CharacterController, '_keep_gathers', lambda self: None)
+        world, _floor = world_with_floor()
+        posts_in_a_row(world, 50, spacing=1.2)
+        _controller, fresh = self.walk(world)
+        for (one, grounded, state), (other, grounded_too, state_too) in zip(kept, fresh,
+                                                                            strict=True):
+            assert np.array_equal(one, other) and grounded == grounded_too
+            assert state == state_too
