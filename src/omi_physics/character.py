@@ -765,13 +765,32 @@ class CharacterController:
             self.grounded = False
             return
 
-        self.vy = max(self.vy - self.gravity_mag * dt, -self.terminal_velocity())
-        vtarget = self.position + UP * (self.vy * dt)
+        vtarget = self.position + UP * self._fall(dt)
         vresolved, ground_n = self._push_out(vtarget)
         self.position = vresolved
         self._update_grounded(ground_n)
         if self.grounded:
             self._apply_slope_slide(ground_n, dt)
+
+    def _fall(self, dt: float) -> float:
+        """Advance :attr:`vy` by one step of gravity; return the height gained.
+
+        Constant acceleration is integrated exactly, ``v dt - g dt^2 / 2``, so a
+        jump or a fall covers the same distance in the same time at every frame
+        rate. Past :meth:`terminal_velocity` the capsule falls at that speed for
+        the rest of the step.
+        """
+        g = self.gravity_mag
+        v0 = self.vy
+        limit = self.terminal_velocity()
+        v1 = v0 - g * dt
+        if v1 >= -limit:
+            self.vy = v1
+            return v0 * dt - 0.5 * g * dt * dt
+        # The limit is reached part-way through the step.
+        reach = min(max((v0 + limit) / g, 0.0), dt) if g > 0.0 else 0.0
+        self.vy = -limit
+        return v0 * reach - 0.5 * g * reach * reach - limit * (dt - reach)
 
     def _snap_down(self, max_drop: float,
                    step: float = 0.04) -> tuple[np.ndarray, np.ndarray | None]:
