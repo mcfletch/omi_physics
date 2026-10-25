@@ -60,9 +60,17 @@ def _initial_tetra(pts: np.ndarray) -> list[tuple[int, int, int]] | None:
 
 def _incremental(pts: np.ndarray,
                  faces: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
-    """Add each point to the hull, replacing the faces it sees with new ones."""
+    """Add each point to the hull, replacing the faces it sees with new ones.
+
+    The seed corners are already on the hull and are not added again: a face
+    built nearly coplanar with a seed face can leave a corner within rounding
+    above it, and adding that corner a second time folds the surface.
+    """
     faces = list(faces)
+    seeds = {i for f in faces for i in f}
     for p in range(len(pts)):
+        if p in seeds:
+            continue
         point = pts[p]
         visible: list[tuple[int, int, int]] = []
         for f in faces:

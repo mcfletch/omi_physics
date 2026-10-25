@@ -101,6 +101,22 @@ class TestTheHullContainsWhatItWasBuiltFrom:
                 normal = -normal
             assert np.max((points - a) @ normal) <= tolerance
 
+    def test_a_seed_corner_beside_a_near_coplanar_face_is_not_added_twice(self):
+        """Found by the property above: the fourth point is 1e-9 off the plane of
+        a seed face, and a seed corner lies 2e-9 above the face built from it."""
+        points = np.array([[0, 0, 0], [0, 0, 1], [1, -1, 0],
+                           [-1, 1e-9, 1], [-2, 0, 0]], dtype='d')
+        verts, faces = hull.convex_hull(points)
+        assert len(faces) == 6
+        inside = verts.mean(axis=0)
+        for face in faces:
+            a, b, c = verts[face]
+            normal = np.cross(b - a, c - a)
+            normal /= np.linalg.norm(normal)
+            if float(np.dot(normal, inside - a)) > 0:
+                normal = -normal
+            assert np.max((points - a) @ normal) <= 1e-6
+
 
 class TestDegenerateCloudsAreAnswered:
     """None of these has a hull; what matters is that saying so is cheap and
