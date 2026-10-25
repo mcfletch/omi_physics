@@ -90,3 +90,64 @@ def test_tree_query_finds_containing_leaf():
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))
+
+
+# -- collision filters, tested together ----------------------------------------------
+
+SYSTEMS = ('a', 'b', 'c', 'd')
+
+
+def random_filter(rng) -> model.CollisionFilter:
+    """A filter of random systems, with an allow list or none and a random exclude list."""
+    def some():
+        return tuple(s for s in SYSTEMS if rng.random_sample() < 0.4)
+    allow = None if rng.random_sample() < 0.4 else some()
+    return model.CollisionFilter(collisionSystems=some(), collideWithSystems=allow,
+                                 notCollideWithSystems=some())
+
+
+def world_with_filters(seed, n=80):
+    """Overlapping bodies, some static, with random filter indices: none, real, and past the end."""
+    rng = np.random.RandomState(seed)
+    world = PhysicsWorld()
+    for _ in range(rng.randint(0, 5)):
+        world.add_filter(random_filter(rng))
+    shape = world.add_shape(model.Shape.sphere(0.6))
+    for _ in range(n):
+        kind = model.STATIC if rng.random_sample() < 0.3 else model.DYNAMIC
+        index = int(rng.randint(-1, len(world.filters) + 2))
+        world.add_body(model.Motion(type=kind),
+                       collider=model.Collider(shape=shape, collisionFilter=index),
+                       position=rng.uniform(-3.0, 3.0, 3))
+    world.refit_aabbs(margin=0.0)
+    return world
+
+
+@pytest.mark.parametrize('seed', range(60))
+def test_pairs_filtered_together_are_those_filtered_one_by_one(seed):
+    from omi_physics.broadphase import _filters_interact, filtered_pairs
+    world = world_with_filters(seed)
+    rng = np.random.RandomState(seed)
+    count = 400
+    lo = rng.randint(0, world.body_count, count)
+    hi = rng.randint(0, world.body_count, count)
+    one_by_one = [(p, q) for p, q in zip(lo.tolist(), hi.tolist(), strict=True)
+                  if _filters_interact(world, p, q)]
+    assert filtered_pairs(world, lo, hi) == one_by_one
+
+
+@pytest.mark.parametrize('seed', range(20))
+def test_pairs_with_random_filters_match_brute_force(seed):
+    world = world_with_filters(seed)
+    assert set(BroadPhase().pairs(world)) == set(brute_force_pairs(world))
+
+
+def test_a_world_with_no_filters_checks_no_pair_one_by_one(monkeypatch):
+    from omi_physics import broadphase
+    world = make_world(120, seed=1, spread=3.0)
+    asked = []
+    original = broadphase._filters_interact
+    monkeypatch.setattr(broadphase, '_filters_interact',
+                        lambda w, a, b: asked.append((a, b)) or original(w, a, b))
+    assert BroadPhase().pairs(world)
+    assert asked == []

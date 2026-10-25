@@ -324,9 +324,9 @@ class BroadPhase:
         Vectorized sweep-and-prune: sort AABBs by min-x, then pair each body with
         the run of later bodies whose min-x lies below its max-x (one
         ``searchsorted``), and complete the y/z overlap and the dynamic/static
-        test with numpy masks. Only the surviving real-overlap pairs pay the
-        per-pair collision-filter check, so the Python cost is the output size,
-        not a tree walk per body.
+        test with numpy masks. The surviving pairs are filtered together
+        (:func:`filtered_pairs`), so the Python cost is the output size, not a
+        tree walk per body.
 
         A world of many static bodies (a forest of trunks, a field of rocks) is
         swept without them. They pair with dynamic bodies only, so they are
@@ -350,16 +350,7 @@ class BroadPhase:
             pair_a, pair_b = self._pairs_split(world, inert)
         if not len(pair_a):
             return []
-        lo_idx = np.minimum(pair_a, pair_b).tolist()
-        hi_idx = np.maximum(pair_a, pair_b).tolist()
-        # Fast path: with no custom collision filters (the common case) every
-        # surviving pair collides, so skip the per-pair filter probe entirely.
-        cf = world.collider_filter[:n]
-        if n == 0 or (int(cf.max()) == 0 and int(cf.min()) == 0
-                      and world.filter_for(0).collides_with(world.filter_for(0))):
-            return list(zip(lo_idx, hi_idx, strict=True))
-        return [(p, q) for p, q in zip(lo_idx, hi_idx, strict=True)
-                if _filters_interact(world, p, q)]
+        return filtered_pairs(world, np.minimum(pair_a, pair_b), np.maximum(pair_a, pair_b))
 
     def _pairs_split(self, world: "PhysicsWorld", inert: np.ndarray
                      ) -> tuple[np.ndarray, np.ndarray]:
@@ -489,6 +480,33 @@ def _moves_against(world: "PhysicsWorld", a: np.ndarray, b: np.ndarray) -> np.nd
     trigger = world.trigger_shape >= 0
     return ((mt[a] == 2) | (mt[b] == 2)
             | ((mt[a] == 1) & trigger[b]) | ((mt[b] == 1) & trigger[a]))
+
+
+def filtered_pairs(world: "PhysicsWorld", first: np.ndarray, second: np.ndarray
+                   ) -> list[tuple[int, int]]:
+    """The pairs ``(first[k], second[k])`` whose bodies' collision filters admit contact, in order.
+
+    Each body's filter is the one :meth:`~omi_physics.world.PhysicsWorld.filter_for`
+    gives its index, so an index of no filter is the default filter. The
+    filters the pairs use are compared with each other once, in a table, and
+    the pairs are looked up in it together.
+    """
+    count = len(world.filters)
+    index = world.collider_filter[:world.body_count]
+    # Every index of no filter means the default one: they share the code ``count``.
+    code = np.where((index >= 0) & (index < count), index, count)
+    used, inverse = np.unique(code[np.concatenate((first, second))], return_inverse=True)
+    filters = [world.filter_for(int(c)) for c in used.tolist()]
+    pair_a, pair_b = first.tolist(), second.tolist()
+    if len(used) == 1:
+        if filters[0].collides_with(filters[0]):
+            return list(zip(pair_a, pair_b, strict=True))
+        return []
+    table = np.array([[one.collides_with(other) for other in filters] for one in filters],
+                     dtype=bool)
+    keep = table[inverse[:len(first)], inverse[len(first):]]
+    return [pair for pair, kept in zip(zip(pair_a, pair_b, strict=True), keep.tolist(), strict=True)
+            if kept]
 
 
 def _filters_interact(world: "PhysicsWorld", a: int, b: int) -> bool:
