@@ -1462,6 +1462,7 @@ class PhysicsWorld:
                        | (self._orientation[:n] != seen_orientation[:n]).any(axis=1))
             if margin != self._fitted_margin:
                 differs[:] = True
+            differs[movers] = True
             rows = np.flatnonzero(differs)
             seen_position[rows] = self._position[rows]
             seen_orientation[rows] = self._orientation[rows]
