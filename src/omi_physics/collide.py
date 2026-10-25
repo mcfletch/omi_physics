@@ -46,6 +46,7 @@ else:
         _native = None
 
 EPS = 1e-9
+_IDENTITY = np.eye(3)
 
 
 @dataclass
@@ -414,6 +415,18 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
         # A is the mesh: the normal already points A→B. B is the mesh: flip it.
         # Negated once for the batch rather than per contact, which is an array
         # allocated per contact in a list that is usually a dozen long.
+        if not mesh_is_a:
+            normals = -normals
+        return [Contact(a, b, points[i], normals[i], float(depths[i]))
+                for i in np.flatnonzero(hit)]
+    if other.kind == 'sphere':
+        # A sphere is a capsule of no length, and takes the capsule's batch.
+        sphere = cast(SphereProxy, other)
+        verts = mesh.candidate_vertices(lo, hi)
+        hit, points, normals, depths = capsule_triangle_batch(
+            CapsuleProxy(sphere.center, 0.0, sphere.radius, _IDENTITY), verts)
+        # Halfway between the triangle and the sphere's deepest point, where EPA puts it.
+        points = points - normals * (0.5 * depths)[:, None]
         if not mesh_is_a:
             normals = -normals
         return [Contact(a, b, points[i], normals[i], float(depths[i]))
