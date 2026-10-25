@@ -76,6 +76,68 @@ def test_the_same_after_inert_bodies_move_arrive_and_leave(monkeypatch) -> None:
     assert split.pairs(world) == full_sweep(world, monkeypatch)
 
 
+def step_and_check(world, split, monkeypatch) -> None:
+    """Move the dynamic bodies a little, then check the pairs against a sweep of every body."""
+    for body in np.flatnonzero(world.motion_type == 2)[:6].tolist():
+        world.place_body(body, position=world.position[body] + (0.7, 0.0, 0.4))
+    assert split.pairs(world) == full_sweep(world, monkeypatch)
+
+
+def test_bodies_that_come_and_go_a_few_at_a_time_leave_the_index_alone(monkeypatch) -> None:
+    """A streamed rock is a static body added or removed now and then; a rebuild for each
+    sorts every trunk in the world."""
+    world = build(9, True)
+    split = BroadPhase()
+    split.pairs(world)
+    built = split._inert                       # noqa: SLF001 the index is what is being exercised
+    box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+    rng = np.random.default_rng(4)
+    added = []
+    for round_ in range(12):
+        x, z = (float(v) for v in np.round(rng.uniform(-30.0, 30.0, 2)))
+        added.append(world.add_body(model.Motion(type=model.STATIC),
+                                    collider=model.Collider(shape=box),
+                                    position=(x, 0.5, z)))
+        if round_ % 3 == 2:
+            world.remove_body(added.pop(0))
+        if round_ % 4 == 3:
+            world.place_body(added[-1], position=(x + 2.0, 0.5, z))
+        step_and_check(world, split, monkeypatch)
+        assert split._inert is built           # noqa: SLF001 the index is what is being exercised
+
+
+def test_a_removed_body_leaves_no_pair_and_a_body_in_its_slot_is_found_where_it_stands(
+        monkeypatch) -> None:
+    world = build(10, True)
+    split = BroadPhase()
+    split.pairs(world)
+    built = split._inert                       # noqa: SLF001 the index is what is being exercised
+    ball = int(np.flatnonzero(world.motion_type == 2)[0])
+    gone = 100
+    world.remove_body(gone)
+    box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+    taken = world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box),
+                           position=tuple(world.position[ball] + (0.2, 0.0, 0.0)))
+    assert taken == gone
+    pairs = split.pairs(world)
+    assert pairs == full_sweep(world, monkeypatch)
+    assert any(taken in pair and ball in pair for pair in pairs)
+    assert split._inert is built               # noqa: SLF001 the index is what is being exercised
+
+
+def test_more_changes_than_the_index_reads_from_the_world_rebuild_it(monkeypatch) -> None:
+    world = build(11, True)
+    split = BroadPhase()
+    split.pairs(world)
+    built = split._inert                       # noqa: SLF001 the index is what is being exercised
+    box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+    for k in range(broadphase.LOOSE_LIMIT + 3):
+        world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box),
+                       position=(float(k % 80) - 40.0, 0.5, 60.0 + k // 80))
+    assert split.pairs(world) == full_sweep(world, monkeypatch)
+    assert split._inert is not built           # noqa: SLF001 the index is what is being exercised
+
+
 def test_a_dynamic_body_moving_does_not_rebuild_the_index() -> None:
     world = build(6, False)
     split = BroadPhase()

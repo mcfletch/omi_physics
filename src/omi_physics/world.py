@@ -866,6 +866,7 @@ class PhysicsWorld:
         while len(self.bodies) <= i:
             self.bodies.append(None)
         self.bodies[i] = handle
+        self._patch_refit_cache(i)
         self._fit_body(i)
         if motion.type != model.DYNAMIC and not sensor:
             self._layout_changed(i)
@@ -991,11 +992,16 @@ class PhysicsWorld:
         if shape_index < 0:
             self._aabb_min[i] = self._position[i]
             self._aabb_max[i] = self._position[i]
-            return
-        lo, hi = world_aabb(self.shapes[shape_index], self._position[i],
-                            self._orientation[i])
-        self._aabb_min[i] = lo - margin
-        self._aabb_max[i] = hi + margin
+        else:
+            lo, hi = world_aabb(self.shapes[shape_index], self._position[i],
+                                self._orientation[i])
+            self._aabb_min[i] = lo - margin
+            self._aabb_max[i] = hi + margin
+        # The box is fitted at this pose, so the next step has nothing to find out
+        # about the body: finding out compares every body's pose with its fitted one.
+        fitted_position, fitted_orientation = self._fitted_poses()
+        fitted_position[i] = self._position[i]
+        fitted_orientation[i] = self._orientation[i]
 
     def place_body(self, i: int, position: Vec | None = None,
                    orientation: Vec | None = None,
@@ -1137,8 +1143,8 @@ class PhysicsWorld:
             self._refit_pose[i] = np.nan
             self._refit_quat[i] = np.nan
         # The refit cache is keyed by body count and shape, and this slot's
-        # shape has changed; rebuilding it is what makes the emptiness stick.
-        self._refit_cache_n = -1
+        # shape has changed; its row is what makes the emptiness stick.
+        self._patch_refit_cache(i)
 
     def _set_mass_properties(self, i: int, motion: model.Motion,
                              shape: model.Shape | None) -> None:
@@ -1425,6 +1431,33 @@ class PhysicsWorld:
             self._build_refit_cache()
         return self._refit_kind, self._refit_half
 
+    def _patch_refit_cache(self, i: int) -> None:
+        """Give body ``i`` the row of the shape it has now, where the arrays are current.
+
+        A body that takes a freed slot or leaves one changes its own row; rebuilding the
+        arrays for it is a pass over every body in the world.
+        """
+        if getattr(self, '_refit_cache_n', -1) != self._n:
+            self._refit_cache_n = -1
+            return
+        shape_index = int(self._collider_shape[i])
+        if shape_index < 0:
+            shape_index = int(self._trigger_shape[i])
+        kind, half = self._refit_shape_row(shape_index)
+        self._refit_kind[i] = kind
+        self._refit_half[i] = half
+
+    def _refit_shape_row(self, shape_index: int) -> tuple[int, np.ndarray | float]:
+        """The refit kind and half-extents of shape ``shape_index``; no shape if it is negative."""
+        if shape_index < 0:
+            return self._RFIT_NONE, 0.0
+        shape = self.shapes[shape_index]
+        if shape.type == 'sphere':
+            return self._RFIT_SPHERE, float(shape.radius)
+        if shape.type == 'box':
+            return self._RFIT_BOX, 0.5 * np.asarray(shape.size, dtype='d')
+        return self._RFIT_OTHER, 0.0
+
     def _build_refit_cache(self) -> None:
         """Rebuild the arrays :meth:`_refit_shapes` answers.
 
@@ -1436,15 +1469,8 @@ class PhysicsWorld:
         shapes = len(self.shapes)
         kinds = np.zeros(shapes + 1, dtype=np.int8)
         halves = np.zeros((shapes + 1, 3), dtype='d')
-        for index, sh in enumerate(self.shapes):
-            if sh.type == 'sphere':
-                kinds[index] = self._RFIT_SPHERE
-                halves[index] = sh.radius
-            elif sh.type == 'box':
-                kinds[index] = self._RFIT_BOX
-                halves[index] = 0.5 * np.asarray(sh.size, dtype='d')
-            else:
-                kinds[index] = self._RFIT_OTHER
+        for index in range(shapes):
+            kinds[index], halves[index] = self._refit_shape_row(index)
         collider = self._collider_shape[:n]
         chosen = np.where(collider >= 0, collider, self._trigger_shape[:n])
         chosen = np.where(chosen >= 0, chosen, shapes)      # shapes: the row for no shape

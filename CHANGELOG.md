@@ -47,6 +47,14 @@ compatibility promise.
 - `raycast` and `raycast_many` cast at convex hulls, by clipping the ray against
   the planes of the hull's faces. `unsupported_shapes` names none of the shapes a
   world holds.
+- A world that adds, removes or places a few fixed bodies at a time, such as a
+  streamed rock among 230,000 trunks, keeps the broad phase's index of its fixed
+  bodies: up to `broadphase.LOOSE_LIMIT` changes since the build are swept with
+  the movers, and a step after one costs the world's ordinary step and not a
+  sort of every fixed body (about 50 ms at that size). A body added or placed
+  with `add_body` or `place_body` arrives with its box fitted at its pose and
+  is not refitted by the next step, and a body that takes a freed slot or leaves
+  one changes its own row of the refit's shape table.
 - `CollisionQuery.static_near(lo, hi)` lists the fixed bodies whose boxes overlap
   a box, from a grid over their footprints (`omi_physics.staticindex`) that
   `WorldQuery` shares between every query on a world. The grid reads up to 4096

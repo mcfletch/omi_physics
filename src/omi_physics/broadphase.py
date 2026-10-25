@@ -234,6 +234,10 @@ SPLIT_MIN = 256
 #: every dynamic body; the rest are found by a window of the sorted x order.
 _LARGE_EXTENT = 8.0
 
+#: How many static bodies added, removed or placed since the index was built are read from
+#: the world, as movers are, before the index is built again.
+LOOSE_LIMIT = 1024
+
 
 class _InertIndex:
     """The inert bodies of a world sorted by minimum x, kept while none of them changes.
@@ -244,10 +248,18 @@ class _InertIndex:
     remembers each one's rank in that order. :meth:`BroadPhase.pairs` rebuilds
     it when an inert body is added, removed or moved, which it finds by
     comparing the world's boxes with the ones the index was built from.
+
+    A static body added, removed or placed since the build is not a reason to
+    build it again: the broad phase sweeps up to :data:`LOOSE_LIMIT` of those with
+    the movers and keeps them out of what the index finds
+    (:meth:`BroadPhase._pairs_split`), so a world that streams a rock at a time
+    does not sort every trunk in it for each.
     """
 
     def __init__(self, world: "PhysicsWorld", inert: np.ndarray) -> None:
         count = world.body_count
+        #: The world's layout epoch the index was built at.
+        self.epoch = world.layout_epoch
         self.inert = inert.copy()
         self.lo = world.aabb_min[:count].copy()
         self.hi = world.aabb_max[:count].copy()
@@ -265,19 +277,29 @@ class _InertIndex:
         self.small_lo = self.lo[self.small, 0]
         self.reach = float(width[small].max()) if small.any() else 0.0
 
-    def current(self, world: "PhysicsWorld", inert: np.ndarray, movers: np.ndarray) -> bool:
-        """Whether the world's inert bodies and their boxes are still the ones indexed.
+    def current(self, world: "PhysicsWorld", inert: np.ndarray, movers: np.ndarray,
+                loose: np.ndarray) -> bool:
+        """Whether the index still answers for the bodies of ``inert`` that are not ``loose``.
 
-        The bodies that can move have their rows brought up to date first, so
-        that one comparison of whole arrays says whether an inert row changed.
+        ``inert`` is the world's inert set without the ``loose`` bodies, ``movers``
+        the rows it leaves out, and ``loose`` the rows (possibly none) changed since
+        the build. The boxes of the movers and the loose bodies are brought up to date
+        first, so that one comparison of whole arrays says whether any other inert
+        body changed.
         """
         count = world.body_count
-        if count != len(self.inert) or not np.array_equal(inert, self.inert):
+        built = len(self.inert)
+        if count < built:
+            return False
+        kept = np.ones(built, dtype=bool)
+        kept[loose[loose < built]] = False
+        if not np.array_equal(inert[:built], self.inert & kept) or inert[built:].any():
             return False
         low, high = world.aabb_min[:count], world.aabb_max[:count]
-        self.lo[movers] = low[movers]
-        self.hi[movers] = high[movers]
-        return bool(np.array_equal(low, self.lo) and np.array_equal(high, self.hi))
+        for rows in (movers[movers < built], loose[loose < built]):
+            self.lo[rows] = low[rows]
+            self.hi[rows] = high[rows]
+        return bool(np.array_equal(low[:built], self.lo) and np.array_equal(high[:built], self.hi))
 
 
 def _ranks_before(sorted_lo: np.ndarray, sorted_rows: np.ndarray, lo: np.ndarray,
@@ -359,18 +381,43 @@ class BroadPhase:
             return []
         return filtered_pairs(world, np.minimum(pair_a, pair_b), np.maximum(pair_a, pair_b))
 
+    def _index_for(self, world: "PhysicsWorld", inert: np.ndarray
+                   ) -> tuple["_InertIndex", np.ndarray, np.ndarray, np.ndarray | None]:
+        """The index, the inert set it answers for, the movers, and the loose bodies' mask.
+
+        The index built before is kept while it still answers for the inert bodies
+        that have not changed since. The ones that have, up to :data:`LOOSE_LIMIT`,
+        are left out of the inert set and so swept with the movers; the mask marks
+        them so the index's own answer can leave them out. Otherwise the index is
+        built again, with the mask None.
+        """
+        index = self._inert
+        if index is not None:
+            changed = world.layout_changes_since(index.epoch)
+            if changed is not None and len(changed) <= LOOSE_LIMIT:
+                loose = np.unique(np.asarray(changed, dtype=np.intp))
+                loose = loose[loose < len(inert)]
+                mask = None
+                settled = inert
+                if len(loose):
+                    mask = np.zeros(len(inert), dtype=bool)
+                    mask[loose] = True
+                    settled = inert & ~mask
+                movers = np.flatnonzero(~settled)
+                if index.current(world, settled, movers, loose):
+                    return index, settled, movers, mask
+        index = self._inert = _InertIndex(world, inert)
+        return index, inert, np.flatnonzero(~inert), None
+
     def _pairs_split(self, world: "PhysicsWorld", inert: np.ndarray
                      ) -> tuple[np.ndarray, np.ndarray]:
         """The pairs of a world with an indexed inert set, in the order of a full sweep."""
         n = world.body_count
-        movers = np.flatnonzero(~inert)
-        index = self._inert
-        if index is None or not index.current(world, inert, movers):
-            index = self._inert = _InertIndex(world, inert)
+        index, inert, movers, loose = self._index_for(world, inert)
         lo = world.aabb_min[:n]
         first_a, first_b = _sweep(world, movers)
         dynamic = movers[world.motion_type[movers] == 2]
-        second_a, second_b = self._dynamic_with_inert(world, index, dynamic)
+        second_a, second_b = self._dynamic_with_inert(world, index, dynamic, loose)
         pair_a = np.concatenate((first_a, second_a))
         pair_b = np.concatenate((first_b, second_b))
         if not len(pair_a):
@@ -389,10 +436,10 @@ class BroadPhase:
                 rows = body[fixed]
                 rank[fixed] = index.rank[rows] + _ranks_before(
                     sorted_mover_lo, sorted_movers, lo[rows, 0], rows)
-            loose = ~fixed
-            if loose.any():
-                rows = body[loose]
-                rank[loose] = mover_rank[np.searchsorted(movers, rows)] + _ranks_before(
+            loose_rows = ~fixed
+            if loose_rows.any():
+                rows = body[loose_rows]
+                rank[loose_rows] = mover_rank[np.searchsorted(movers, rows)] + _ranks_before(
                     index.sorted_lo, index.rows, lo[rows, 0], rows)
             ranks.append(rank)
         first, last = np.minimum(*ranks), np.maximum(*ranks)
@@ -400,9 +447,13 @@ class BroadPhase:
         return pair_a[sweep_order], pair_b[sweep_order]
 
     @staticmethod
-    def _dynamic_with_inert(world: "PhysicsWorld", index: _InertIndex,
-                            dynamic: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Pairs of a dynamic body and an inert one whose boxes overlap."""
+    def _dynamic_with_inert(world: "PhysicsWorld", index: _InertIndex, dynamic: np.ndarray,
+                            loose: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Pairs of a dynamic body and an inert one whose boxes overlap.
+
+        An inert body marked in ``loose`` is not looked for: it has changed since the index
+        was built, and the sweep of the movers finds it where it is.
+        """
         lo, hi = world.aabb_min, world.aabb_max
         found_a: list[np.ndarray] = []
         found_b: list[np.ndarray] = []
@@ -431,6 +482,8 @@ class BroadPhase:
         keep = ((hi[a, 0] >= lo[b, 0]) & (hi[b, 0] >= lo[a, 0])
                 & (hi[a, 1] >= lo[b, 1]) & (hi[b, 1] >= lo[a, 1])
                 & (hi[a, 2] >= lo[b, 2]) & (hi[b, 2] >= lo[a, 2]))
+        if loose is not None:
+            keep &= ~loose[b]
         return a[keep], b[keep]
 
 
