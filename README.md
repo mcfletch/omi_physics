@@ -256,7 +256,9 @@ wins.
   the input still moves the character, at the speed of its mode and not the
   crouch's. `extend_slide(duration)` gives a slide that long again from now, with
   the capsule low again, and returns whether there was a slide; `end_slide()`
-  ends one at once and stands, or crouches where there is no room.
+  ends one at once and stands, or crouches where there is no room. A slide that
+  is gone on with keeps `slide_progress` where the capsule is low, however long it
+  lasts, and goes through the rise over its end.
 - `jumpFollowsSlope` in `CharacterCapabilities` (default false) adds the vertical
   speed of the run along the ground to a jump's launch speed, so a jump off a
   falling slope rises `jumpHeight` above the ground and not above the point it

@@ -72,6 +72,8 @@ class _Slide:
     elapsed: float = 0.0
     #: Whether the input still steers the slide, at the speed of its mode.
     steer: bool = False
+    #: How long the slide was asked to last, which :meth:`CharacterController.extend_slide` does not change.
+    nominal: float = 0.0
 
 
 @dataclass(slots=True)
@@ -309,11 +311,21 @@ class CharacterController:
 
     @property
     def slide_progress(self) -> float:
-        """How far through the slide the character is, from 0 to 1; 0 when it is not sliding."""
+        """How far through the slide's own length the character is, from 0 to 1; 0 when it is not sliding.
+
+        A slide that was not extended is as far through as its time. One that was extended stays
+        where it is while the capsule is low, however long that goes on, and goes through the rise
+        over the end, as the slide asked for does.
+        """
         slide = self._slide
-        if slide is None or slide.duration <= 0.0:
+        if slide is None or slide.nominal <= 0.0:
             return 0.0
-        return min(slide.elapsed / slide.duration, 1.0)
+        remaining = slide.duration - slide.elapsed
+        if remaining > slide.rise:
+            held = min(slide.elapsed, slide.nominal - slide.rise)
+        else:
+            held = slide.nominal - remaining
+        return min(max(held / slide.nominal, 0.0), 1.0)
 
     @property
     def landing(self) -> float | None:
@@ -529,7 +541,7 @@ class CharacterController:
         if flat_length(momentum) < 1e-6:
             momentum = self._intent()
         self.push = np.zeros(3) if steer else momentum
-        self._slide = _Slide(duration, min(max(rise, 0.0), duration), steer=steer)
+        self._slide = _Slide(duration, min(max(rise, 0.0), duration), steer=steer, nominal=duration)
         self._resize(self.caps.crouchHeight)
         self.crouching = True
         return True

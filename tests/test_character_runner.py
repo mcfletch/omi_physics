@@ -114,13 +114,34 @@ class TestExtendingASlide:
         assert character.height == pytest.approx(1.7, abs=1e-9)
         assert character.state is CharacterState.STANDING
 
-    def test_the_progress_goes_on_from_where_it_was_and_is_a_share_of_the_new_length(self) -> None:
+    def test_the_progress_stays_in_the_low_part_of_the_slide_for_as_long_as_it_is_gone_on_with(
+            self) -> None:
+        character = runner()
+        character.slide(0.8, 0.3)
+        for _ in range(8):
+            step(character, 0.2)
+            character.extend_slide(0.8)
+            assert character.slide_progress <= 0.5 / 0.8 + 1e-9
+        step(character, 0.5)
+        assert character.slide_progress == pytest.approx(0.5 / 0.8, abs=0.01)
+
+    def test_a_slide_let_go_goes_through_the_rise_over_its_end(self) -> None:
         character = runner()
         character.slide(0.8, 0.3)
         step(character, 0.4)
         character.extend_slide(0.8)
-        step(character, 0.01)
-        assert character.slide_progress == pytest.approx(0.41 / 1.2, abs=0.01)
+        step(character, 0.6)
+        assert character.slide_progress == pytest.approx((0.8 - 0.2) / 0.8, abs=0.01)
+        step(character, 0.19)
+        assert character.slide_progress == pytest.approx(1.0, abs=0.02)
+
+    def test_a_slide_that_was_not_extended_is_as_far_through_as_its_time(self) -> None:
+        character = runner()
+        character.slide(0.8, 0.3)
+        step(character, 0.2)
+        assert character.slide_progress == pytest.approx(0.25, abs=0.01)
+        step(character, 0.4)
+        assert character.slide_progress == pytest.approx(0.75, abs=0.01)
 
     def test_a_character_that_is_not_sliding_has_nothing_to_extend(self) -> None:
         character = runner()
