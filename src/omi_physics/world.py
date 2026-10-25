@@ -7,12 +7,13 @@ awake bodies — fast on the CPU today and GPU-shaped for later (see
 ``docs/PIPELINE.md``).
 """
 import logging
+import math
 import os
 from collections import deque
 from collections.abc import Callable, Container, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -1006,9 +1007,16 @@ class PhysicsWorld:
         shape_index = int(self._collider_shape[i])
         if shape_index < 0:
             shape_index = int(self._trigger_shape[i])
+        derived = (self._derived_extent(i)
+                   if shape_index >= 0 and getattr(self, '_refit_cache_n', -1) == self._n else None)
         if shape_index < 0:
             self._aabb_min[i] = self._position[i]
             self._aabb_max[i] = self._position[i]
+        elif derived is not None:
+            px, py, pz = self._position[i].tolist()
+            hx, hy, hz = derived
+            self._aabb_min[i] = (px - hx - margin, py - hy - margin, pz - hz - margin)
+            self._aabb_max[i] = (px + hx + margin, py + hy + margin, pz + hz + margin)
         else:
             lo, hi = world_aabb(self.shapes[shape_index], self._position[i],
                                 self._orientation[i])
@@ -1655,10 +1663,57 @@ class PhysicsWorld:
             self._fitted_position, self._fitted_orientation = position, orientation
         return self._fitted_position, self._fitted_orientation
 
+    def _derived_extent(self, i: int) -> tuple[float, float, float] | None:
+        """Body ``i``'s world half-extents where its shape is a sphere, box or capsule, else None.
+
+        Worked out with numbers, as :meth:`_refit_rows` works them out for many:
+        a placed body or a step with a body or two moving asks this of each.
+        """
+        kind = int(self._refit_kind[i])
+        if kind == self._RFIT_SPHERE:
+            radius = float(self._refit_half[i][0])
+            return radius, radius, radius
+        if kind != self._RFIT_BOX and kind != self._RFIT_CAPSULE:
+            return None
+        x, y, z, w = self._orientation[i].tolist()
+        scale = math.sqrt(x * x + y * y + z * z + w * w)
+        x, y, z, w = x / scale, y / scale, z / scale, w / scale
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+        rows = ((abs(1 - 2 * (yy + zz)), abs(2 * (xy - wz)), abs(2 * (xz + wy))),
+                (abs(2 * (xy + wz)), abs(1 - 2 * (xx + zz)), abs(2 * (yz - wx))),
+                (abs(2 * (xz - wy)), abs(2 * (yz + wx)), abs(1 - 2 * (xx + yy))))
+        a, b, c = self._refit_half[i].tolist()
+        if kind == self._RFIT_CAPSULE:
+            return rows[0][1] * b + a, rows[1][1] * b + a, rows[2][1] * b + a
+        return (rows[0][0] * a + rows[0][1] * b + rows[0][2] * c,
+                rows[1][0] * a + rows[1][1] * b + rows[1][2] * c,
+                rows[2][0] * a + rows[2][1] * b + rows[2][2] * c)
+
+    #: The most rows :meth:`_refit_rows` fits one at a time with numbers; more are fitted as arrays.
+    _FEW_ROWS = 4
+
     def _refit_rows(self, rows: np.ndarray, kind: np.ndarray, half: np.ndarray,
                     margin: float) -> None:
         """Recompute the boxes of the bodies at ``rows``."""
         if not len(rows):
+            return
+        if len(rows) <= self._FEW_ROWS:
+            measured = []
+            for i in rows.tolist():
+                if kind[i] == self._RFIT_OTHER:
+                    measured.append(i)
+                elif kind[i] == self._RFIT_NONE:
+                    self._aabb_min[i] = self._position[i]
+                    self._aabb_max[i] = self._position[i]
+                else:
+                    hx, hy, hz = cast(tuple[float, float, float], self._derived_extent(i))
+                    px, py, pz = self._position[i].tolist()
+                    self._aabb_min[i] = (px - hx - margin, py - hy - margin, pz - hz - margin)
+                    self._aabb_max[i] = (px + hx + margin, py + hy + margin, pz + hz + margin)
+            if measured:
+                self._refit_measured(np.asarray(measured, dtype=np.intp), margin)
             return
         pos = self._position[rows]
         absR = np.abs(mathutil.quat_to_matrix(self._orientation[rows]))
