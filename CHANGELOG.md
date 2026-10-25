@@ -16,6 +16,15 @@ compatibility promise.
 - `SequentialImpulseSolver` no longer takes `position_iterations` or
   `baumgarte`, which nothing read.
 
+- A box against a triangle of a mesh makes a contact at each corner that stands on the
+  triangle's face (`box_face_contacts`), so a box rests on a static mesh on four points
+  and friction holds it on a slope as it does on a box. A box over an edge or a
+  triangle under the middle of a face keeps the single contact it had.
+- A world stepped with a static body moved since the last step refits the boxes of the
+  bodies that move as well as the moved body's. A body above a floor no longer falls through it.
+- A crouched character stands up on a slope: the capsule tested for room is raised by
+  `CharacterController.STAND_CLEARANCE` (2 cm).
+
 ### Added
 
 - `CharacterController` integrates gravity exactly, so a jump reaches

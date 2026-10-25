@@ -427,8 +427,16 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
             cast(BoxProxy, other), verts)
         if not mesh_is_a:
             normals = -normals
-        return [Contact(a, b, points[i], normals[i], float(depths[i]))
-                for i in np.flatnonzero(hit)]
+        contacts = []
+        for i in np.flatnonzero(hit):
+            feet = box_face_contacts(cast(BoxProxy, other), verts[i], normals[i],
+                                     mesh_is_a)
+            if feet:
+                contacts.extend(Contact(a, b, point, normals[i], depth)
+                                for point, depth in feet)
+            else:
+                contacts.append(Contact(a, b, points[i], normals[i], float(depths[i])))
+        return contacts
     contacts = []
     for tri in mesh.triangles_overlapping(lo, hi):
         if mesh_is_a:
@@ -572,6 +580,62 @@ def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
     pushes, found = normals[where], depths[where]
     order = np.argsort(-found, kind='stable')
     return pushes[order], found[order]
+
+
+#: How far outside a triangle's edges a corner of a box may lie and still
+#: stand on it, as a fraction of the triangle's own size; a corner on the edge
+#: two triangles share is on both.
+_EDGE_SLACK = 1e-6
+
+
+def box_face_contacts(box: BoxProxy, triangle: np.ndarray, normal: np.ndarray,
+                      mesh_is_first: bool) -> list[tuple[np.ndarray, float]]:
+    """The corners of ``box`` that stand on one triangle, as ``(point, depth)``.
+
+    A box resting on the ground is held by the corners of its lowest face, not by
+    one point under its centre: a single point has no restoring torque, so the
+    box tips and rolls under any friction on a slope. This answers the corners
+    that are below the triangle's plane and over the triangle, with the point on
+    the plane under each and how far below it the corner is. ``normal`` is the
+    contact normal the triangle's contact has (pointing from the triangle toward
+    the box, or the other way where the mesh is the second body, ``toward_a``
+    false). An empty list means the box does not rest on the triangle's face: it
+    meets an edge, or the triangle lies under the middle of a face with no corner
+    over it, and the single contact of :func:`box_triangle_batch` stands.
+    """
+    v0, v1, v2 = triangle
+    face = cross(v1 - v0, v2 - v0)
+    length = float(np.linalg.norm(face))
+    if length <= EPS:
+        return []
+    face = face / length
+    toward_box = normal if mesh_is_first else -normal
+    if abs(float(np.dot(face, toward_box))) < 0.999:
+        return []
+    up = face if float(np.dot(face, toward_box)) > 0.0 else -face
+    local = np.array([(sx, sy, sz) for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)
+                      for sz in (-1.0, 1.0)]) * box.half
+    corners = box.center + local @ box.R.T
+    height = (corners - v0) @ up
+    below = np.flatnonzero(height < 0.0)
+    if not len(below):
+        return []
+    edge0, edge1 = v1 - v0, v2 - v0
+    d00, d01, d11 = float(edge0 @ edge0), float(edge0 @ edge1), float(edge1 @ edge1)
+    corner_of = d00 * d11 - d01 * d01
+    if corner_of <= EPS:
+        return []
+    found = []
+    slack = _EDGE_SLACK
+    for k in below:
+        onto = corners[k] - height[k] * up
+        rel = onto - v0
+        d20, d21 = float(rel @ edge0), float(rel @ edge1)
+        v = (d11 * d20 - d01 * d21) / corner_of
+        w = (d00 * d21 - d01 * d20) / corner_of
+        if v >= -slack and w >= -slack and v + w <= 1.0 + slack:
+            found.append((onto, float(-height[k])))
+    return found
 
 
 def box_triangle_batch(box: BoxProxy, verts: np.ndarray
