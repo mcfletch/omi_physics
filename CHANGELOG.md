@@ -35,6 +35,15 @@ compatibility promise.
   `block_when_idle=False` control it. `with_world()` wakes it on leaving.
 - `PhysicsWorld.add_step_hook(before, after)` and `omi_physics.Step`: hooks
   around every fixed step, inline or threaded.
+- `PhysicsWorld.add_bodies(shape, positions, ...)`: many static bodies sharing
+  one shape, filled by slice.
+- A world of many static bodies steps in time that follows the bodies that
+  move: the broad phase indexes static bodies with a collider and no trigger
+  apart from the rest once there are 256 of them, boxes of static bodies are
+  refitted only when a static body has moved, and the sleep pass, the force
+  integration, the narrow phase and the contact solver gather the bodies they
+  need instead of walking every row. The pairs reach the narrow phase in the
+  order a sweep of every body gives them.
 - `Shape.heightfield`: a static ground from a grid of heights (bilinear, exact
   cell normal) or from a function `sample(x, z)`, collided with spheres,
   capsules, cylinders, boxes and convex hulls and cast at by rays

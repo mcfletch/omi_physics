@@ -93,7 +93,12 @@ class NarrowPhase:
         n = world.body_count
         kind, half = world._refit_shapes()  # noqa: SLF001 the world's refit cache is the dispatch table
         pos = world.position
-        rot = quat_to_matrix(world.orientation[:n])       # (n, 3, 3), batched
+        # Rotation matrices, batched, for the bodies in a pair: a world of ten
+        # thousand static trunks has a handful of those in a step.
+        rot = np.zeros((n, 3, 3))
+        if pairs:
+            involved = np.unique(np.array(pairs, dtype=np.intp))
+            rot[involved] = quat_to_matrix(world.orientation[involved])
         box_box = _native.box_box
         sph_sph = _native.sphere_sphere
         sph_box = _native.sphere_box

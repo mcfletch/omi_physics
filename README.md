@@ -390,6 +390,35 @@ body in y for the broad phase, which an unbounded field cannot be.
 - The shape holds no mass: a dynamic or kinematic body cannot hold one
   (`add_body` raises `ValueError`).
 
+### Many static bodies
+
+`add_bodies` makes one static body per row of an `(N, 3)` array, all with one
+shape: a forest of trunks, a field of rocks.
+
+```python
+trunk = world.add_shape(model.Shape.cylinder(height=6.0, radius=0.3))
+trunks = world.add_bodies(trunk, positions, collider=model.Collider(physicsMaterial=bark))
+```
+
+It returns the new bodies' indices in the order of `positions`. The columns are
+filled by slice and the shape's bounds are measured once, so 10,000 bodies
+arrive in about 3 ms, where a loop of `add_body` calls takes about 0.1 s. `motion`
+must be static (None is a plain static `Motion`), `collider` supplies the
+`physicsMaterial` and `collisionFilter` indices and its `shape` is ignored,
+and `orientation` is one quaternion for all of them. The slots of removed
+bodies are used first. A body with a handle, a sensor or a trigger is made
+with `add_body`.
+
+A step costs next to nothing for static bodies that are not near anything.
+Static bodies with a collider and no trigger pair with dynamic bodies only,
+so past 256 of them the broad phase keeps them sorted and each dynamic body
+asks for the few within its x range; a floor or a landscape far wider than
+the median body is tested against every dynamic body instead. The index is
+rebuilt when one of them is added, removed or moved. The refit of boxes,
+the sleep pass and the contact solver work on the bodies that move or touch.
+10,000 trunks beside 1 or 40 moving balls cost a step 1.2 to 1.5 times what
+it costs without them.
+
 ### Hinges, sliders and wheels
 
 `omi_physics.joints` holds two bodies together in the ways a machine does.

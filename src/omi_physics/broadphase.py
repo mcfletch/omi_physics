@@ -225,12 +225,84 @@ def _real_overlap(world: "PhysicsWorld", i: int, j: int) -> bool:
                 jmin[0] <= imax[0] and jmin[1] <= imax[1] and jmin[2] <= imax[2])
 
 
+#: The fewest inert bodies (static, no trigger, with a collider) for which
+#: :meth:`BroadPhase.pairs` indexes them apart from the bodies that can move.
+SPLIT_MIN = 256
+
+#: A body is "large" when its x extent exceeds this many times the median
+#: inert extent. Large inert bodies (a floor, a landscape) are tested against
+#: every dynamic body; the rest are found by a window of the sorted x order.
+_LARGE_EXTENT = 8.0
+
+
+class _InertIndex:
+    """The inert bodies of a world sorted by minimum x, kept while none of them changes.
+
+    An inert body is static, has a collider and no trigger, so it pairs with
+    dynamic bodies only. The index lists them in the broad phase's own order
+    (minimum x, then body index), the small ones apart from the large, and
+    remembers each one's rank in that order. :meth:`BroadPhase.pairs` rebuilds
+    it when an inert body is added, removed or moved, which it finds by
+    comparing the world's boxes with the ones the index was built from.
+    """
+
+    def __init__(self, world: "PhysicsWorld", inert: np.ndarray) -> None:
+        count = world.body_count
+        self.inert = inert.copy()
+        self.lo = world.aabb_min[:count].copy()
+        self.hi = world.aabb_max[:count].copy()
+        rows = np.flatnonzero(inert)
+        order = np.argsort(self.lo[rows, 0], kind='stable')
+        self.rows = rows[order]                   # inert bodies by (min x, index)
+        self.sorted_lo = self.lo[self.rows, 0]
+        self.rank = np.zeros(count, dtype=np.intp)
+        self.rank[self.rows] = np.arange(len(self.rows))
+        width = self.hi[self.rows, 0] - self.lo[self.rows, 0]
+        cutoff = _LARGE_EXTENT * max(float(np.median(width)), 1e-6)
+        small = width <= cutoff
+        self.large = self.rows[~small]            # tested against every dynamic body
+        self.small = self.rows[small]
+        self.small_lo = self.lo[self.small, 0]
+        self.reach = float(width[small].max()) if small.any() else 0.0
+
+    def current(self, world: "PhysicsWorld", inert: np.ndarray, movers: np.ndarray) -> bool:
+        """Whether the world's inert bodies and their boxes are still the ones indexed.
+
+        The bodies that can move have their rows brought up to date first, so
+        that one comparison of whole arrays says whether an inert row changed.
+        """
+        count = world.body_count
+        if count != len(self.inert) or not np.array_equal(inert, self.inert):
+            return False
+        low, high = world.aabb_min[:count], world.aabb_max[:count]
+        self.lo[movers] = low[movers]
+        self.hi[movers] = high[movers]
+        return bool(np.array_equal(low, self.lo) and np.array_equal(high, self.hi))
+
+
+def _ranks_before(sorted_lo: np.ndarray, sorted_rows: np.ndarray, lo: np.ndarray,
+                  rows: np.ndarray) -> np.ndarray:
+    """How many of ``sorted_rows`` come before each of ``rows`` in the order (min x, index).
+
+    ``sorted_lo`` holds the minimum x of ``sorted_rows``, which are in that
+    order. Bodies of equal minimum x are ordered by index, which takes a
+    second search within the run of equals.
+    """
+    left = np.searchsorted(sorted_lo, lo, side='left')
+    right = np.searchsorted(sorted_lo, lo, side='right')
+    before = left.copy()
+    for k in np.flatnonzero(right > left):
+        before[k] += np.searchsorted(sorted_rows[left[k]:right[k]], rows[k], side='left')
+    return before
+
+
 class BroadPhase:
     """Owns the tree, keeps it in sync with the world, yields filtered pairs."""
 
     def __init__(self, fatten: float = 0.1) -> None:
         self.tree = DynamicAABBTree(fatten=fatten)
         self._known: set[int] = set()
+        self._inert: _InertIndex | None = None
 
     def sync(self, world: "PhysicsWorld") -> None:
         """Insert/remove/refit tree leaves to match the world's current bodies."""
@@ -255,38 +327,31 @@ class BroadPhase:
         test with numpy masks. Only the surviving real-overlap pairs pay the
         per-pair collision-filter check, so the Python cost is the output size,
         not a tree walk per body.
+
+        A world of many static bodies (a forest of trunks, a field of rocks) is
+        swept without them. They pair with dynamic bodies only, so they are
+        sorted once and kept (:class:`_InertIndex`), and each dynamic body asks
+        for the few that lie within its x range. The pairs come back in the
+        order the sweep of every body would have given them.
         """
         n = world.body_count
         if n < 2:
             return []
-        lo = world.aabb_min[:n]
-        hi = world.aabb_max[:n]
-        order = np.argsort(lo[:, 0], kind='stable')
-        lo_sx = lo[order, 0]
-        hi_sx = hi[order, 0]
-        # For sorted body k, [k+1, ends[k]) is the run of later bodies whose
-        # min-x is within k's max-x -- exactly the x-overlapping candidates.
-        ends = np.searchsorted(lo_sx, hi_sx, side='right')
-        k = np.arange(n)
-        counts = ends - k - 1
-        np.clip(counts, 0, None, out=counts)
-        total = int(counts.sum())
-        if total == 0:
+        inert = None
+        if n >= SPLIT_MIN:
+            inert = ((world.motion_type == 0) & (world.trigger_shape < 0)
+                     & (world.collider_shape >= 0))
+            if np.count_nonzero(inert) < SPLIT_MIN:
+                inert = None
+        if inert is None:
+            self._inert = None
+            pair_a, pair_b = _sweep(world, None)
+        else:
+            pair_a, pair_b = self._pairs_split(world, inert)
+        if not len(pair_a):
             return []
-        # Expand each k into its candidate window as flat (ki, kj) index arrays.
-        ki = np.repeat(k, counts)
-        within = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
-        kj = ki + 1 + within
-        a = order[ki]
-        b = order[kj]
-        # x already overlaps by construction; finish y/z and require a body
-        # that moves on one side of it.
-        keep = ((hi[a, 1] >= lo[b, 1]) & (hi[b, 1] >= lo[a, 1]) &
-                (hi[a, 2] >= lo[b, 2]) & (hi[b, 2] >= lo[a, 2]))
-        keep &= _moves_against(world, a, b)
-        a, b = a[keep], b[keep]
-        lo_idx = np.minimum(a, b).tolist()
-        hi_idx = np.maximum(a, b).tolist()
+        lo_idx = np.minimum(pair_a, pair_b).tolist()
+        hi_idx = np.maximum(pair_a, pair_b).tolist()
         # Fast path: with no custom collision filters (the common case) every
         # surviving pair collides, so skip the per-pair filter probe entirely.
         cf = world.collider_filter[:n]
@@ -295,6 +360,127 @@ class BroadPhase:
             return list(zip(lo_idx, hi_idx, strict=True))
         return [(p, q) for p, q in zip(lo_idx, hi_idx, strict=True)
                 if _filters_interact(world, p, q)]
+
+    def _pairs_split(self, world: "PhysicsWorld", inert: np.ndarray
+                     ) -> tuple[np.ndarray, np.ndarray]:
+        """The pairs of a world with an indexed inert set, in the order of a full sweep."""
+        n = world.body_count
+        movers = np.flatnonzero(~inert)
+        index = self._inert
+        if index is None or not index.current(world, inert, movers):
+            index = self._inert = _InertIndex(world, inert)
+        lo = world.aabb_min[:n]
+        first_a, first_b = _sweep(world, movers)
+        dynamic = movers[world.motion_type[movers] == 2]
+        second_a, second_b = self._dynamic_with_inert(world, index, dynamic)
+        pair_a = np.concatenate((first_a, second_a))
+        pair_b = np.concatenate((first_b, second_b))
+        if not len(pair_a):
+            return pair_a, pair_b
+        # Order by where each pair's bodies would have been in a sweep of all of them.
+        order_movers = np.argsort(lo[movers, 0], kind='stable')
+        sorted_movers = movers[order_movers]
+        mover_rank = np.empty(len(movers), dtype=np.intp)
+        mover_rank[order_movers] = np.arange(len(movers))
+        sorted_mover_lo = lo[sorted_movers, 0]
+        ranks = []
+        for body in (pair_a, pair_b):
+            rank = np.empty(len(body), dtype=np.intp)
+            fixed = inert[body]
+            if fixed.any():
+                rows = body[fixed]
+                rank[fixed] = index.rank[rows] + _ranks_before(
+                    sorted_mover_lo, sorted_movers, lo[rows, 0], rows)
+            loose = ~fixed
+            if loose.any():
+                rows = body[loose]
+                rank[loose] = mover_rank[np.searchsorted(movers, rows)] + _ranks_before(
+                    index.sorted_lo, index.rows, lo[rows, 0], rows)
+            ranks.append(rank)
+        first, last = np.minimum(*ranks), np.maximum(*ranks)
+        sweep_order = np.lexsort((last, first))
+        return pair_a[sweep_order], pair_b[sweep_order]
+
+    @staticmethod
+    def _dynamic_with_inert(world: "PhysicsWorld", index: _InertIndex,
+                            dynamic: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Pairs of a dynamic body and an inert one whose boxes overlap."""
+        lo, hi = world.aabb_min, world.aabb_max
+        found_a: list[np.ndarray] = []
+        found_b: list[np.ndarray] = []
+        if len(dynamic) and len(index.small):
+            # An inert body overlapping in x starts no further left than the
+            # widest of them and no further right than the dynamic body ends.
+            start = np.searchsorted(index.small_lo, lo[dynamic, 0] - index.reach, side='left')
+            stop = np.searchsorted(index.small_lo, hi[dynamic, 0], side='right')
+            counts = np.clip(stop - start, 0, None)
+            total = int(counts.sum())
+            if total:
+                owner = np.repeat(dynamic, counts)
+                within = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
+                other = index.small[np.repeat(start, counts) + within]
+                found_a.append(owner)
+                found_b.append(other)
+        for big in index.large:
+            if len(dynamic):
+                found_a.append(dynamic)
+                found_b.append(np.full(len(dynamic), big, dtype=np.intp))
+        if not found_a:
+            empty = np.zeros(0, dtype=np.intp)
+            return empty, empty
+        a = np.concatenate(found_a)
+        b = np.concatenate(found_b)
+        keep = ((hi[a, 0] >= lo[b, 0]) & (hi[b, 0] >= lo[a, 0])
+                & (hi[a, 1] >= lo[b, 1]) & (hi[b, 1] >= lo[a, 1])
+                & (hi[a, 2] >= lo[b, 2]) & (hi[b, 2] >= lo[a, 2]))
+        return a[keep], b[keep]
+
+
+def _sweep(world: "PhysicsWorld", rows: np.ndarray | None
+           ) -> tuple[np.ndarray, np.ndarray]:
+    """Overlapping pairs among bodies ``rows`` (all when None) with something to report.
+
+    Sorted by minimum x, each body is paired with the run of later ones whose
+    minimum x is within its maximum x, then y, z and the dynamic test are
+    applied as masks. The pairs come out in the order of that sweep.
+    """
+    n = world.body_count
+    if rows is None:
+        lo = world.aabb_min[:n]
+        hi = world.aabb_max[:n]
+    else:
+        n = len(rows)
+        lo = world.aabb_min[rows]
+        hi = world.aabb_max[rows]
+    empty = np.zeros(0, dtype=np.intp)
+    if n < 2:
+        return empty, empty
+    order = np.argsort(lo[:, 0], kind='stable')
+    lo_sx = lo[order, 0]
+    hi_sx = hi[order, 0]
+    # For sorted body k, [k+1, ends[k]) is the run of later bodies whose
+    # min-x is within k's max-x -- exactly the x-overlapping candidates.
+    ends = np.searchsorted(lo_sx, hi_sx, side='right')
+    k = np.arange(n)
+    counts = ends - k - 1
+    np.clip(counts, 0, None, out=counts)
+    total = int(counts.sum())
+    if total == 0:
+        return empty, empty
+    # Expand each k into its candidate window as flat (ki, kj) index arrays.
+    ki = np.repeat(k, counts)
+    within = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
+    kj = ki + 1 + within
+    a = order[ki]
+    b = order[kj]
+    # x already overlaps by construction; finish y/z and require a body
+    # that moves on one side of it.
+    keep = ((hi[a, 1] >= lo[b, 1]) & (hi[b, 1] >= lo[a, 1]) &
+            (hi[a, 2] >= lo[b, 2]) & (hi[b, 2] >= lo[a, 2]))
+    if rows is not None:
+        a, b = rows[a], rows[b]
+    keep &= _moves_against(world, a, b)
+    return a[keep], b[keep]
 
 
 def _moves_against(world: "PhysicsWorld", a: np.ndarray, b: np.ndarray) -> np.ndarray:

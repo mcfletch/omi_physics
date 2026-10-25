@@ -28,28 +28,28 @@ class NumpyBackend:
 
     def integrate_forces(self, world: "PhysicsWorld", dt: float) -> None:
         """Apply gravity, damping, and quadratic drag to dynamic bodies over ``dt`` seconds."""
-        dyn = world.dynamic_mask()
-        if not dyn.any():
+        rows = np.flatnonzero(world.dynamic_mask())
+        if not len(rows):
             return
-        g = world.resolve_gravity()
-        accel = g * world.gravity_factor[:, None]
-        v = world.linear_velocity
-        lin_damp = world.linear_damping[dyn, None] + world.default_linear_damping
-        ang_damp = world.angular_damping[dyn, None] + world.default_angular_damping
-        v[dyn] += accel[dyn] * dt
-        v[dyn] *= np.maximum(1.0 - lin_damp * dt, 0.0)
-        speed = np.linalg.norm(v[dyn], axis=1, keepdims=True)
-        v[dyn] -= world.quadratic_drag[dyn, None] * speed * v[dyn] * dt
-        world.angular_velocity[dyn] *= np.maximum(1.0 - ang_damp * dt, 0.0)
+        accel = world.resolve_gravity(rows) * world.gravity_factor[rows, None]
+        lin_damp = world.linear_damping[rows, None] + world.default_linear_damping
+        ang_damp = world.angular_damping[rows, None] + world.default_angular_damping
+        v = world.linear_velocity[rows]
+        v += accel * dt
+        v *= np.maximum(1.0 - lin_damp * dt, 0.0)
+        speed = np.linalg.norm(v, axis=1, keepdims=True)
+        v -= world.quadratic_drag[rows, None] * speed * v * dt
+        world.linear_velocity[rows] = v
+        world.angular_velocity[rows] *= np.maximum(1.0 - ang_damp * dt, 0.0)
 
     def integrate_positions(self, world: "PhysicsWorld", dt: float) -> None:
         """Advance position and orientation of moving bodies over ``dt`` seconds."""
-        moving = world.moving_mask()
-        if not moving.any():
+        rows = np.flatnonzero(world.moving_mask())
+        if not len(rows):
             return
-        world.position[moving] += world.linear_velocity[moving] * dt
-        world.orientation[moving] = mathutil.quat_integrate(
-            world.orientation[moving], world.angular_velocity[moving], dt)
+        world.position[rows] += world.linear_velocity[rows] * dt
+        world.orientation[rows] = mathutil.quat_integrate(
+            world.orientation[rows], world.angular_velocity[rows], dt)
 
     def refit_aabbs(self, world: "PhysicsWorld") -> None:
         """Recompute each body's world-space AABB after integration."""

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from . import jointrows, mathutil, model
 from .backend import NumpyBackend, select_backend
@@ -90,6 +91,11 @@ class PhysicsWorld:
         self._refit_hi: np.ndarray = np.zeros((0, 3), dtype='d')
         self._refit_pose: np.ndarray = np.zeros((0, 3), dtype='d')
         self._refit_quat: np.ndarray = np.zeros((0, 4), dtype='d')
+        #: The pose each body's box was last fitted at, and the margin it was
+        #: fitted with (:meth:`refit_aabbs`).
+        self._fitted_position: np.ndarray = np.zeros((0, 3), dtype='d')
+        self._fitted_orientation: np.ndarray = np.zeros((0, 4), dtype='d')
+        self._fitted_margin = 0.05
         self.fixed_dt = fixed_dt
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
@@ -242,10 +248,10 @@ class PhysicsWorld:
         self._orientation[:, 3] = 1.0
         self._prev_orientation[:, 3] = 1.0
 
-    def _grow(self) -> None:
-        """Double the array capacity, preserving existing body state."""
+    def _grow(self, minimum: int = 0) -> None:
+        """Double the array capacity, or reach ``minimum`` if that is more, keeping body state."""
         old = self._cap
-        new = max(8, old * 2)
+        new = max(8, old * 2, minimum)
         for name in self._VEC + self._SCALAR_F + self._SCALAR_I + self._SLOT:
             arr = getattr(self, '_' + name)
             grown = np.zeros((new,) + arr.shape[1:], dtype=arr.dtype)
@@ -719,12 +725,12 @@ class PhysicsWorld:
     def _apply_steady_forces(self, dt: float) -> None:
         """Add a step of each dynamic body's steady force and torque to its velocities."""
         n = self._n
-        pushed = (np.any(self._force[:n] != 0.0, axis=1)
-                  | np.any(self._torque[:n] != 0.0, axis=1))
-        pushed &= self._motion_type[:n] == _DYNAMIC
+        dynamic = np.flatnonzero(self._motion_type[:n] == _DYNAMIC)
+        pushed = (np.any(self._force[dynamic] != 0.0, axis=1)
+                  | np.any(self._torque[dynamic] != 0.0, axis=1))
         if not pushed.any():
             return
-        rows = np.nonzero(pushed)[0]
+        rows = dynamic[pushed]
         self._awake[rows] = True
         self._sleep_timer[rows] = 0.0
         self._linear_velocity[rows] += (self._inv_mass[rows, None] * self._force[rows]) * dt
@@ -817,6 +823,109 @@ class PhysicsWorld:
         self.bodies[i] = handle
         self._fit_body(i)
         return i
+
+    def add_bodies(self, shape_index: int, positions: ArrayLike,
+                   motion: model.Motion | None = None,
+                   collider: model.Collider | None = None,
+                   orientation: Vec = (0, 0, 0, 1)) -> np.ndarray:
+        """Create one static body per row of ``positions``, all with the same shape.
+
+        shape_index -- the shape (:meth:`add_shape`) every body gets; the
+            ``shape`` of ``collider`` is ignored
+        positions -- ``(N, 3)`` body positions
+        motion -- a static :class:`~omi_physics.model.Motion`; None is a plain one
+        collider -- supplies the ``physicsMaterial`` and ``collisionFilter``
+            indices every body shares
+        orientation -- one unit quaternion ``(x, y, z, w)`` for every body
+
+        Returns the new bodies' indices, in the order of ``positions``. The
+        columns are filled by slice and the shape's bounds are measured once
+        and offset by each position, so 10,000 bodies arrive in a few
+        milliseconds and the first step has no bounds left to measure. The
+        slots of removed bodies are used first, as :meth:`add_body` does.
+        Nothing is added when an argument is refused. A body with a handle,
+        a sensor or a trigger is made with :meth:`add_body`.
+        """
+        points = np.asarray(positions, dtype='d')
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError('positions are an (N, 3) array, got shape %r' % (points.shape,))
+        if not 0 <= shape_index < len(self.shapes):
+            raise IndexError('no shape %r: the world holds %d' % (shape_index, len(self.shapes)))
+        if motion is None:
+            motion = model.Motion(type=model.STATIC)
+        if motion.type != model.STATIC:
+            raise ValueError('add_bodies makes static bodies, not %s ones' % motion.type)
+        count = len(points)
+        if not count:
+            return np.zeros(0, dtype=np.intp)
+        collider = collider or model.Collider()
+        shape = self.shapes[shape_index]
+        turn = np.asarray(orientation, dtype='d')
+        reused = [self._free.pop() for _ in range(min(count, len(self._free)))]
+        fresh = count - len(reused)
+        if self._n + fresh > self._cap:
+            self._grow(self._n + fresh)
+        indices = np.concatenate((np.asarray(reused, dtype=np.intp),
+                                  np.arange(self._n, self._n + fresh, dtype=np.intp)))
+        self._n += fresh
+        for i in reused:
+            self._aabb_cache.pop(i, None)
+        self._fill_static(indices, points, motion, turn)
+        self._collider_shape[indices] = shape_index
+        self._collider_material[indices] = collider.physicsMaterial
+        self._collider_filter[indices] = collider.collisionFilter
+        self._collision = self._collision or _CollisionStages()
+        if len(self.bodies) < self._n:
+            self.bodies.extend([None] * (self._n - len(self.bodies)))
+        low, high = world_aabb(shape, np.zeros(3), turn)
+        self._aabb_min[indices] = points + (low - 0.05)
+        self._aabb_max[indices] = points + (high + 0.05)
+        # The exact bounds of a shape that has to be measured, and the pose they
+        # were measured at, are the ones just worked out: the first refit finds
+        # nothing to measure.
+        if len(self._refit_pose) < len(self._position):
+            self._grow_refit_bounds()
+        self._refit_lo[indices] = points + low
+        self._refit_hi[indices] = points + high
+        self._refit_pose[indices] = points
+        self._refit_quat[indices] = turn
+        fitted_position, fitted_orientation = self._fitted_poses()
+        fitted_position[indices] = points
+        fitted_orientation[indices] = turn
+        self._refit_cache_n = -1
+        return indices
+
+    def _fill_static(self, indices: np.ndarray, points: np.ndarray, motion: model.Motion,
+                     turn: np.ndarray) -> None:
+        """Write the columns of the static bodies at ``indices``, as :meth:`add_body` does one."""
+        self._position[indices] = points
+        self._prev_position[indices] = points
+        self._orientation[indices] = turn
+        self._prev_orientation[indices] = turn
+        self._linear_velocity[indices] = motion.linearVelocity
+        self._angular_velocity[indices] = motion.angularVelocity
+        self._motion_type[indices] = _TYPE_INT[motion.type]
+        self._gravity_factor[indices] = motion.gravityFactor
+        self._linear_damping[indices] = motion.linearDamping
+        self._angular_damping[indices] = motion.angularDamping
+        self._quadratic_drag[indices] = motion.quadraticDrag
+        self._awake[indices] = True
+        self._vacant[indices] = False
+        self._sleep_timer[indices] = 0.0
+        self._report[indices] = False
+        self._sensor[indices] = False
+        self._force[indices] = 0.0
+        self._torque[indices] = 0.0
+        self._exact_rotation[indices] = False
+        self._sleep_linear[indices] = -1.0
+        self._sleep_angular[indices] = -1.0
+        self._sleep_after[indices] = -1.0
+        self._trigger_shape[indices] = -1
+        self._trigger_filter[indices] = -1
+        self._island[indices] = -1
+        self._inv_mass[indices] = 0.0
+        self._mass[indices] = 0.0
+        self._inv_inertia[indices] = 0.0
 
     def _fit_body(self, i: int, margin: float = 0.05) -> None:
         """Give one body its world AABB, without refitting the rest.
@@ -1061,15 +1170,19 @@ class PhysicsWorld:
         t = self._motion_type[i]
         return (t == _DYNAMIC and self._awake[i]) or t == _KINEMATIC
 
-    def resolve_gravity(self) -> np.ndarray:
-        """Per-body gravity acceleration ``(N, 3)``, including any gravity volumes."""
+    def resolve_gravity(self, rows: np.ndarray | None = None) -> np.ndarray:
+        """Gravity acceleration ``(N, 3)``, including any gravity volumes.
+
+        One row per body, or one per index in ``rows`` when given.
+        """
         base = np.asarray(self.gravity.direction, dtype='d')
         norm = np.linalg.norm(base)
         base = base / norm if norm else base
         g = base * self.gravity.gravity
-        out = np.tile(g, (self._n, 1))
+        positions = self.position if rows is None else self.position[rows]
+        out = np.tile(g, (len(positions), 1))
         if self.gravity_volumes:
-            apply_volumes(self.gravity_volumes, self.position, out)
+            apply_volumes(self.gravity_volumes, positions, out)
         return out
 
     # -- the step --------------------------------------------------------
@@ -1244,31 +1357,41 @@ class PhysicsWorld:
         return self._refit_kind, self._refit_half
 
     def _build_refit_cache(self) -> None:
-        """Rebuild the arrays :meth:`_refit_shapes` answers."""
+        """Rebuild the arrays :meth:`_refit_shapes` answers.
+
+        The kind and half-extents are worked out once per shape and looked up
+        by each body's shape index, so the cost follows the shapes and not the
+        bodies.
+        """
         n = self._n
-        kind = np.zeros(n, dtype=np.int8)
-        half = np.zeros((n, 3), dtype='d')
-        for i in range(n):
-            si = int(self._collider_shape[i])
-            ti = int(self._trigger_shape[i])
-            idx = si if si >= 0 else ti
-            if idx < 0:
-                continue
-            sh = self.shapes[idx]
+        shapes = len(self.shapes)
+        kinds = np.zeros(shapes + 1, dtype=np.int8)
+        halves = np.zeros((shapes + 1, 3), dtype='d')
+        for index, sh in enumerate(self.shapes):
             if sh.type == 'sphere':
-                kind[i] = self._RFIT_SPHERE
-                half[i] = sh.radius
+                kinds[index] = self._RFIT_SPHERE
+                halves[index] = sh.radius
             elif sh.type == 'box':
-                kind[i] = self._RFIT_BOX
-                half[i] = 0.5 * np.asarray(sh.size, dtype='d')
+                kinds[index] = self._RFIT_BOX
+                halves[index] = 0.5 * np.asarray(sh.size, dtype='d')
             else:
-                kind[i] = self._RFIT_OTHER
-        self._refit_kind = kind
-        self._refit_half = half
+                kinds[index] = self._RFIT_OTHER
+        collider = self._collider_shape[:n]
+        chosen = np.where(collider >= 0, collider, self._trigger_shape[:n])
+        chosen = np.where(chosen >= 0, chosen, shapes)      # shapes: the row for no shape
+        self._refit_kind = kinds[chosen]
+        self._refit_half = halves[chosen]
         self._refit_cache_n = n
 
     def refit_aabbs(self, margin: float = 0.05) -> None:
         """Recompute each body's world AABB from its shape and pose, expanded by ``margin``.
+
+        Only the boxes that can have changed are recomputed: those of bodies
+        that move, and those of static bodies found at a pose other than the one
+        their box was fitted at (the pose is remembered per body, and one
+        comparison of whole arrays says whether any static body has been
+        moved). A world of ten thousand static trunks and a ball refits the
+        ball.
 
         Boxes and spheres -- the overwhelming majority -- are batched: a box's
         world half-extent is ``|R| @ half`` (equivalent to the min/max over its
@@ -1280,19 +1403,57 @@ class PhysicsWorld:
         if n == 0:
             return
         kind, half = self._refit_shapes()
-        pos = self._position[:n]
-        absR = np.abs(mathutil.quat_to_matrix(self._orientation[:n]))
-        hw = np.einsum('nij,nj->ni', absR, half)      # rotated box half-extents
-        sph = kind == self._RFIT_SPHERE
+        seen_position, seen_orientation = self._fitted_poses()
+        movers = np.flatnonzero(self._motion_type[:n] != _STATIC)
+        seen_position[movers] = self._position[movers]
+        seen_orientation[movers] = self._orientation[movers]
+        if (margin == self._fitted_margin
+                and np.array_equal(self._position[:n], seen_position[:n])
+                and np.array_equal(self._orientation[:n], seen_orientation[:n])):
+            rows = movers
+        else:
+            differs = ((self._position[:n] != seen_position[:n]).any(axis=1)
+                       | (self._orientation[:n] != seen_orientation[:n]).any(axis=1))
+            if margin != self._fitted_margin:
+                differs[:] = True
+            rows = np.flatnonzero(differs)
+            seen_position[rows] = self._position[rows]
+            seen_orientation[rows] = self._orientation[rows]
+            self._fitted_margin = margin
+        self._refit_rows(rows, kind, half, margin)
+
+    def _fitted_poses(self) -> tuple[np.ndarray, np.ndarray]:
+        """The poses the bodies' boxes were last fitted at, one row per body slot."""
+        if len(self._fitted_position) < len(self._position):
+            count = len(self._position)
+            kept = len(self._fitted_position)
+            position = np.full((count, 3), np.nan)
+            orientation = np.full((count, 4), np.nan)
+            position[:kept] = self._fitted_position
+            orientation[:kept] = self._fitted_orientation
+            self._fitted_position, self._fitted_orientation = position, orientation
+        return self._fitted_position, self._fitted_orientation
+
+    def _refit_rows(self, rows: np.ndarray, kind: np.ndarray, half: np.ndarray,
+                    margin: float) -> None:
+        """Recompute the boxes of the bodies at ``rows``."""
+        if not len(rows):
+            return
+        pos = self._position[rows]
+        absR = np.abs(mathutil.quat_to_matrix(self._orientation[rows]))
+        kinds = kind[rows]
+        halves = half[rows]
+        hw = np.einsum('nij,nj->ni', absR, halves)      # rotated box half-extents
+        sph = kinds == self._RFIT_SPHERE
         if sph.any():
-            hw[sph] = half[sph]                        # sphere: isotropic, unrotated
-        self._aabb_min[:n] = pos - hw - margin
-        self._aabb_max[:n] = pos + hw + margin
-        none = np.where(kind == self._RFIT_NONE)[0]
-        if len(none):                                  # point AABB, no margin
+            hw[sph] = halves[sph]                       # sphere: isotropic, unrotated
+        self._aabb_min[rows] = pos - hw - margin
+        self._aabb_max[rows] = pos + hw + margin
+        none = rows[kinds == self._RFIT_NONE]
+        if len(none):                                   # point AABB, no margin
             self._aabb_min[none] = self._position[none]
             self._aabb_max[none] = self._position[none]
-        other = np.where(kind == self._RFIT_OTHER)[0]
+        other = rows[kinds == self._RFIT_OTHER]
         if len(other):
             self._refit_measured(other, margin)
 
@@ -1353,33 +1514,39 @@ class PhysicsWorld:
         and the world's otherwise."""
         n = self._n
         dyn = self.motion_type == _DYNAMIC
-        lin_thresh = np.where(self._sleep_linear[:n] < 0.0, self.sleep_linear_speed,
-                              self._sleep_linear[:n])
-        ang_thresh = np.where(self._sleep_angular[:n] < 0.0, self.sleep_angular_speed,
-                              self._sleep_angular[:n])
-        t_sleep = np.where(self._sleep_after[:n] < 0.0, self.sleep_time, self._sleep_after[:n])
-        speed2 = np.sum(self.linear_velocity ** 2, axis=1)
-        spin2 = np.sum(self.angular_velocity ** 2, axis=1)
-        slow = dyn & (speed2 < lin_thresh ** 2) & (spin2 < ang_thresh ** 2)
-        self._sleep_timer[:n][slow] += dt
-        self._sleep_timer[:n][~slow] = 0.0
-        ready = slow & (self.sleep_timer > t_sleep)
+        rows = np.flatnonzero(dyn)
+        if not len(rows):
+            return
+        lin_thresh = np.where(self._sleep_linear[rows] < 0.0, self.sleep_linear_speed,
+                              self._sleep_linear[rows])
+        ang_thresh = np.where(self._sleep_angular[rows] < 0.0, self.sleep_angular_speed,
+                              self._sleep_angular[rows])
+        t_sleep = np.where(self._sleep_after[rows] < 0.0, self.sleep_time, self._sleep_after[rows])
+        speed2 = np.sum(self._linear_velocity[rows] ** 2, axis=1)
+        spin2 = np.sum(self._angular_velocity[rows] ** 2, axis=1)
+        slow = (speed2 < lin_thresh ** 2) & (spin2 < ang_thresh ** 2)
+        timer = self._sleep_timer
+        timer[rows[slow]] += dt
+        timer[rows[~slow]] = 0.0
+        settled = slow & (timer[rows] > t_sleep)
+        ready = np.zeros(n, dtype=bool)
+        ready[rows[settled]] = True
 
-        to_sleep = np.zeros(self._n, dtype=bool)
+        to_sleep = np.zeros(n, dtype=bool)
         islands, contacted = self._contact_islands(dyn)
         for members in islands:
             if all(ready[m] for m in members):
                 for m in members:
                     to_sleep[m] = True
-        loners = np.where(dyn & ready)[0]
-        for i in loners:
+        for i in rows[settled]:
             if i not in contacted:
                 to_sleep[i] = True
 
-        self._awake[:self._n][to_sleep] = False
-        self._awake[:self._n][dyn & ~slow] = True   # anything moving is awake
-        self._linear_velocity[:self._n][~self.awake & dyn] = 0.0
-        self._angular_velocity[:self._n][~self.awake & dyn] = 0.0
+        self._awake[:n][to_sleep] = False
+        self._awake[rows[~slow]] = True             # anything moving is awake
+        resting = rows[~self._awake[rows]]
+        self._linear_velocity[resting] = 0.0
+        self._angular_velocity[resting] = 0.0
 
     def _contact_islands(self, dyn: np.ndarray) -> tuple[list[list[int]], set[int]]:
         """Union-find the touching dynamic bodies into islands.

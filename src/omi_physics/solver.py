@@ -367,12 +367,21 @@ class SequentialImpulseSolver:
         return sorted(contacts, key=lambda c: (world.inv_mass[c.a] == 0.0
                                                or world.inv_mass[c.b] == 0.0))
 
-    def _inv_inertia_world_all(self, world: "PhysicsWorld") -> np.ndarray:
-        """World inverse-inertia tensor ``R diag(I⁻¹) Rᵀ`` for every body, batched."""
-        n = world.body_count
-        R = mathutil.quat_to_matrix(world.orientation[:n])          # (n, 3, 3)
-        scaled = R * world.inv_inertia[:n][:, None, :]              # scale columns
-        return np.ascontiguousarray(np.einsum('nij,nkj->nik', scaled, R))
+    def _inv_inertia_world_all(self, world: "PhysicsWorld",
+                               bodies: np.ndarray) -> np.ndarray:
+        """World inverse-inertia tensor ``R diag(I⁻¹) Rᵀ`` per body, batched.
+
+        Rows are indexed by body, as the kernel reads them; only the rows of
+        ``bodies`` are filled in and the rest are zero. The bodies in contact
+        are few beside the bodies in the world, and a rotation matrix for each
+        of ten thousand static trunks is most of a step.
+        """
+        out = np.zeros((world.body_count, 3, 3))
+        rows = np.unique(bodies)
+        R = mathutil.quat_to_matrix(world.orientation[rows])          # (m, 3, 3)
+        scaled = R * world.inv_inertia[rows][:, None, :]              # scale columns
+        out[rows] = np.einsum('nij,nkj->nik', scaled, R)
+        return out
 
     def _seed_pair(self, c: "Contact") -> tuple[float, float, float] | None:
         """Nearest cached ``(nImpulse, t0, t1)`` for this contact's pair, or None."""
@@ -415,7 +424,7 @@ class SequentialImpulseSolver:
                                        strict=True):
             c.approach = closing
             c.slip = sliding
-        invIw = self._inv_inertia_world_all(world)
+        invIw = self._inv_inertia_world_all(world, np.concatenate((a_idx, b_idx)))
         _native.prepare_and_solve(
             a_idx, b_idx, point, normal, depth,
             world.position, world.linear_velocity, world.angular_velocity,
@@ -443,13 +452,12 @@ class SequentialImpulseSolver:
         """A body wakes a sleeping neighbour only on a real impact (relative speed
         above ``wake_speed``) — a body merely resting against a sleeper leaves it
         asleep, so settled piles stay settled.  Kinematic movers always wake."""
-        v2 = np.sum(world.linear_velocity ** 2, axis=1)
-
         def wakes(i: int) -> bool:
             t = world.motion_type[i]
             if t == 1:
                 return True
-            return t == 2 and world.awake[i] and v2[i] > wake_speed ** 2
+            return (t == 2 and world.awake[i]
+                    and np.sum(world.linear_velocity[i] ** 2) > wake_speed ** 2)
         for c in contacts:
             if not world.awake[c.b] and wakes(c.a):
                 world.wake(c.b)
