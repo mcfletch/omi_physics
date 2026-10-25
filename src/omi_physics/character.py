@@ -604,10 +604,19 @@ class CharacterController:
         return not self._overlaps(stand)
 
     # -- world queries ---------------------------------------------------
-    def _static_bodies(self) -> Iterator[int]:
-        """Yield the id of each solid body that does not move under the solver."""
+    def _static_bodies(self, lo: np.ndarray | None = None,
+                       hi: np.ndarray | None = None) -> Iterator[int]:
+        """Yield the id of each solid body that does not move under the solver.
+
+        With a box, ``lo`` to ``hi``, only the bodies whose bounding boxes overlap it:
+        a capsule is tested against what is near it and not against a world.
+        """
         ignore = self.ignore
-        for j in self.query.static_bodies():
+        if lo is None or hi is None:
+            found = self.query.static_bodies()
+        else:
+            found = self.query.static_near(lo, hi)
+        for j in found:
             if j not in ignore:
                 yield j
 
@@ -649,7 +658,8 @@ class CharacterController:
 
     def _overlaps(self, proxy: Proxy) -> bool:
         """True if ``proxy`` intersects any static collider or dynamic obstacle."""
-        for j in self._static_bodies():
+        lo, hi = proxy.aabb()
+        for j in self._static_bodies(lo, hi):
             if collide.collide(0, 1, proxy, self._static_proxy(j)):
                 return True
         return any(collide.collide(0, 1, proxy, obstacle.proxy)
@@ -705,28 +715,36 @@ class CharacterController:
         pos = np.asarray(position, dtype='d').copy()
         ground_n: np.ndarray | None = None
         ground_source: int | None = None
+        gathered: tuple[np.ndarray, np.ndarray, list[int]] | None = None
         for _ in range(iterations):
             contacts: list[tuple[np.ndarray, float]] = []
-            for j in self._static_bodies():
+            capsule = cast(CapsuleProxy, self._proxy(pos))
+            lo, hi = capsule.aabb()
+            # The static bodies near the capsule, asked for once and kept while
+            # the iterations' corrections leave it inside the box they were
+            # gathered for.
+            if gathered is None or np.any(lo < gathered[0]) or np.any(hi > gathered[1]):
+                low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
+                gathered = (low, high, list(self._static_bodies(low, high)))
+            for j in gathered[2]:
                 Pj = self._static_proxy(j)
                 if isinstance(Pj, TriangleMeshProxy):
                     # The level, which is nearly always every contact there is.
                     # Straight to the two numbers this loop reads, so a frame
                     # does not build twenty thousand contact objects to look at
                     # a normal and a depth and drop them.
-                    capsule = cast(CapsuleProxy, self._proxy(pos))
                     pushes, depths = collide.capsule_mesh_pushes(
                         capsule, Pj, self._near_triangles(j, Pj, capsule))
                     contacts.extend(zip(pushes, depths, strict=True))
                     continue
-                for c in collide.collide(0, 1, self._proxy(pos), Pj):
+                for c in collide.collide(0, 1, capsule, Pj):
                     contacts.append((-c.normal, c.depth))   # from world into char
             # Dynamic bodies come after the static world, so a contact tie goes
             # to the body that can carry the capsule.
             first_dynamic = len(contacts)
             owners: list[int] = []
             for obstacle in self._obstacles:
-                for c in collide.collide(0, 1, self._proxy(pos), obstacle.proxy):
+                for c in collide.collide(0, 1, capsule, obstacle.proxy):
                     contacts.append((-c.normal, c.depth))
                     owners.append(obstacle.body)
             # Ground is a surface this capsule could stand on, which is what
@@ -891,7 +909,8 @@ class CharacterController:
         skin = model.Shape.capsule(height=middle, radius=self.caps.radius + self.TOUCH_SKIN)
         capsule = make_proxy(skin, self.position, IDENT)
         found: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        for j in self._static_bodies():
+        lo, hi = capsule.aabb()
+        for j in self._static_bodies(lo, hi):
             other = self._static_proxy(j)
             if isinstance(other, TriangleMeshProxy):
                 pushes, depths = collide.capsule_mesh_pushes(
@@ -1179,7 +1198,10 @@ class CharacterController:
         origins = ((base[0], base[2]), (base[0] + r, base[2]),
                    (base[0] - r, base[2]), (base[0], base[2] + r),
                    (base[0], base[2] - r))
-        aabbs = [self._static_proxy(j).aabb() for j in self._static_bodies()]
+        # Below the feet, over the whole column: the box has no bottom.
+        under = self._static_bodies(np.array([base[0] - r, -np.inf, base[2] - r]),
+                                    np.array([base[0] + r, oy, base[2] + r]))
+        aabbs = [self._static_proxy(j).aabb() for j in under]
         for ox, oz in origins:
             for lo, hi in aabbs:
                 if lo[0] <= ox <= hi[0] and lo[2] <= oz <= hi[2] and lo[1] <= oy:

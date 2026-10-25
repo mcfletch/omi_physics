@@ -47,6 +47,10 @@ class FrozenQuery:
     def static_bodies(self) -> Sequence[int]:
         return list(self.statics)
 
+    def static_near(self, lo: np.ndarray, hi: np.ndarray) -> Sequence[int]:
+        return [body for body, proxy in self.statics.items()
+                if np.all(proxy.aabb()[1] >= lo) and np.all(proxy.aabb()[0] <= hi)]
+
     def static_proxy(self, body: int) -> Proxy:
         return self.statics[body]
 

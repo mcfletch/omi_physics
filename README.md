@@ -264,7 +264,8 @@ wins.
   frame rate.
 
 The controller reads the world through the `CollisionQuery` protocol
-(`omi_physics.collisionquery`): `static_bodies()`, `static_proxy(body)`,
+(`omi_physics.collisionquery`): `static_bodies()`, `static_near(lo, hi)` (the
+fixed bodies whose boxes overlap a box), `static_proxy(body)`,
 `dynamic_near(lo, hi)` (a list of `DynamicBody` with shape, pose, velocity and
 mass) and `raycast(...)`. `WorldQuery(world)` answers it from a live
 `PhysicsWorld`, which `CharacterController(world, ...)` builds itself; an
@@ -661,6 +662,7 @@ src/omi_physics/        the engine (importable as omi_physics)
   massprops.py          volume, centroid and inertia of every shape
   character.py          kinematic character controller
   collisionquery.py     what the controller asks of a world: CollisionQuery, WorldQuery
+  staticindex.py        a grid over the fixed bodies' footprints: the bodies near a box
   kinematic.py          kinematic bodies driven along a pose, or to a target
   vehicle.py            raycast vehicle: suspension, drive, steering
   heightfield.py        height-field surfaces: grid and function, contacts, ray march

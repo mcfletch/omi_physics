@@ -2,10 +2,11 @@
 
 :class:`CollisionQuery` is the set of questions :class:`~omi_physics.character
 .CharacterController` puts to the world it walks in: which bodies are solid and
-fixed, where their collision shapes are in world space, which moving bodies are
-near a box, and what a ray meets. Any object that answers them can stand in for
-the world, among them an immutable copy of the colliders published by a physics
-thread, so a controller can step on a thread that does not own the world.
+fixed, where their collision shapes are in world space, which of them are
+near a box, which moving bodies are near a box, and what a ray meets. Any
+object that answers them can stand in for the world, among them an immutable
+copy of the colliders published by a physics thread, so a controller can step
+on a thread that does not own the world.
 
 :class:`WorldQuery` answers them from a live
 :class:`~omi_physics.world.PhysicsWorld`. A controller given a world builds one.
@@ -21,6 +22,7 @@ from . import model
 from .body import Proxy, make_proxy
 from .mathutil import Vec
 from .raycast import DEFAULT_RANGE, RayHit, raycast
+from .staticindex import StaticGrid
 
 if TYPE_CHECKING:
     from .world import PhysicsWorld
@@ -33,6 +35,18 @@ __all__ = ['CollisionQuery', 'DynamicBody', 'WorldQuery']
 #: it, so one per controller is one copy of the level per character in it;
 #: sharing is correct because these bodies never move.
 STATIC_PROXIES: "WeakKeyDictionary[Any, dict[int, Proxy]]" = WeakKeyDictionary()
+
+
+#: The grid over each world's fixed bodies, rebuilt when the world's layout changes.
+STATIC_GRIDS: "WeakKeyDictionary[Any, StaticGrid]" = WeakKeyDictionary()
+
+
+def static_grid(world: "PhysicsWorld") -> StaticGrid:
+    """The grid over ``world``'s fixed bodies, as they are now."""
+    grid = STATIC_GRIDS.get(world)
+    if grid is None or grid.epoch != world.layout_epoch:
+        grid = STATIC_GRIDS[world] = StaticGrid(world)
+    return grid
 
 
 def static_proxies(world: "PhysicsWorld") -> dict[int, Proxy]:
@@ -69,6 +83,14 @@ class CollisionQuery(Protocol):
         """Ids of the solid bodies that do not move under the solver."""
         ...
 
+    def static_near(self, lo: np.ndarray, hi: np.ndarray) -> Sequence[int]:
+        """Ids of the solid fixed bodies whose bounding boxes overlap ``lo`` to ``hi``.
+
+        Ascending, and a subset of :meth:`static_bodies`. A coordinate of ``lo``
+        or ``hi`` may be infinite.
+        """
+        ...
+
     def static_proxy(self, body: int) -> Proxy:
         """The collision proxy of static body ``body``, in world space."""
         ...
@@ -97,9 +119,15 @@ class WorldQuery:
     def static_bodies(self) -> list[int]:
         """Ids of the solid bodies that are not dynamic and not sensors."""
         world = self.world
-        shapes, motion = world.collider_shape, world.motion_type
-        return [j for j in range(world.body_count)
-                if shapes[j] >= 0 and motion[j] != 2 and not world.is_sensor(j)]
+        solid = (world.collider_shape >= 0) & (world.motion_type != 2) & ~world.sensor
+        return np.flatnonzero(solid).tolist()
+
+    def static_near(self, lo: np.ndarray, hi: np.ndarray) -> list[int]:
+        """The solid fixed bodies whose boxes overlap ``lo`` to ``hi``.
+
+        Answered from a grid that every query on the world shares.
+        """
+        return static_grid(self.world).near(lo, hi)
 
     def static_proxy(self, body: int) -> Proxy:
         """The cached world-space proxy of static body ``body``."""
