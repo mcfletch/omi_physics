@@ -169,7 +169,7 @@ class GridSurface(HeightSurface):
         across = float(np.abs(np.diff(grid, axis=1)).max() / step[0])
         along = float(np.abs(np.diff(grid, axis=0)).max() / step[1])
         self.lipschitz = math.hypot(across, along)
-        self._rows: list[list[float]] | None = None
+        self._numbers: tuple[list[list[float]], int, int, float, float, float, float, float] | None = None
 
     def sphere_contact(self, cx: float, cy: float, cz: float, radius: float
                        ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float], float]:
@@ -204,14 +204,36 @@ class GridSurface(HeightSurface):
                 (ground_x - nx * half, ground_y - ny * half, ground_z - nz * half),
                 (nx, ny, nz), depth)
 
+    def _frame(self) -> tuple[list[list[float]], int, int, float, float, float, float, float]:
+        """The grid as nested lists, its size, origin and spacing, as numbers, for the one-point lookups."""
+        frame = self._numbers
+        if frame is None:
+            rows = self.grid.tolist()
+            frame = self._numbers = (rows, len(rows), len(rows[0]), float(self.origin[0]),
+                                     float(self.origin[1]), float(self.origin[2]),
+                                     float(self.spacing[0]), float(self.spacing[1]))
+        return frame
+
+    def height_at(self, x: float, z: float) -> float:
+        """The height at one point, as :meth:`heights` finds it; ``-inf`` off the grid."""
+        grid, rows, columns, ox, oy, oz, sx, sz = self._frame()
+        gx = (x - ox) / sx
+        gz = (z - oz) / sz
+        if not (0.0 <= gx <= columns - 1 and 0.0 <= gz <= rows - 1):
+            return -math.inf
+        i = min(int(gx), columns - 2)
+        j = min(int(gz), rows - 2)
+        u, v = gx - i, gz - j
+        h00, h10 = grid[j][i], grid[j][i + 1]
+        h01, h11 = grid[j + 1][i], grid[j + 1][i + 1]
+        return (h00 * (1 - u) * (1 - v) + h10 * u * (1 - v) + h01 * (1 - u) * v
+                + h11 * u * v) + oy
+
     def _sample_one(self, x: float, z: float) -> tuple[float, float, float, float]:
         """The height and the unit normal ``(nx, ny, nz)`` at one point: ``-inf`` and up off the grid."""
-        grid = self._rows
-        if grid is None:
-            grid = self._rows = self.grid.tolist()
-        rows, columns = len(grid), len(grid[0])
-        gx = (x - float(self.origin[0])) / float(self.spacing[0])
-        gz = (z - float(self.origin[2])) / float(self.spacing[1])
+        grid, rows, columns, ox, oy, oz, sx, sz = self._frame()
+        gx = (x - ox) / sx
+        gz = (z - oz) / sz
         if not (0.0 <= gx <= columns - 1 and 0.0 <= gz <= rows - 1):
             return -math.inf, 0.0, 1.0, 0.0
         i = min(int(gx), columns - 2)
@@ -220,11 +242,56 @@ class GridSurface(HeightSurface):
         h00, h10 = grid[j][i], grid[j][i + 1]
         h01, h11 = grid[j + 1][i], grid[j + 1][i + 1]
         height = (h00 * (1 - u) * (1 - v) + h10 * u * (1 - v) + h01 * (1 - u) * v
-                  + h11 * u * v) + float(self.origin[1])
-        slope_x = ((h10 - h00) * (1 - v) + (h11 - h01) * v) / float(self.spacing[0])
-        slope_z = ((h01 - h00) * (1 - u) + (h11 - h10) * u) / float(self.spacing[1])
+                  + h11 * u * v) + oy
+        slope_x = ((h10 - h00) * (1 - v) + (h11 - h01) * v) / sx
+        slope_z = ((h01 - h00) * (1 - u) + (h11 - h10) * u) / sz
         length = math.sqrt(slope_x * slope_x + 1.0 + slope_z * slope_z)
         return height, -slope_x / length, 1.0 / length, -slope_z / length
+
+    def sphere_contacts_together(self, centres: np.ndarray, radius: float
+                                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """:func:`sphere_contacts_by_sliding` for a few spheres, with numbers and not arrays.
+
+        The same arithmetic in the same order, and the spheres slide together
+        until the last has settled, so the answer is the same to the bit; for
+        a capsule's few spheres it is several times as fast.
+        """
+        points = centres.tolist()
+        xs = [point[0] for point in points]
+        zs = [point[2] for point in points]
+        found: list[tuple[bool, float, float, float, float, float, float, float]] = []
+        for _ in range(_SLIDES):
+            found = []
+            moved = 0.0
+            for (cx, cy, cz), x, z in zip(points, xs, zs, strict=True):
+                height, nx, ny, nz = self._sample_one(x, z)
+                inside = height != -math.inf
+                ground_y = height if inside else 0.0
+                distance = (cx - x) * nx + (cy - ground_y) * ny + (cz - z) * nz
+                found.append((inside, x, ground_y, z, nx, ny, nz, distance))
+            xs, zs = [], []
+            for (cx, _cy, cz), (inside, x, _y, z, nx, _ny, nz, distance) in zip(
+                    points, found, strict=True):
+                foot_x = cx - distance * nx if inside else x
+                foot_z = cz - distance * nz if inside else z
+                moved = max(moved, abs(foot_x - x), abs(foot_z - z))
+                xs.append(foot_x)
+                zs.append(foot_z)
+            if moved < _SETTLED:
+                break
+        count = len(points)
+        touching = np.zeros(count, dtype=bool)
+        contact = np.zeros((count, 3))
+        normals = np.zeros((count, 3))
+        depths = np.zeros(count)
+        for k, (inside, x, y, z, nx, ny, nz, distance) in enumerate(found):
+            depth = radius - distance
+            half = 0.5 * depth
+            touching[k] = inside and depth > 0.0
+            contact[k] = (x - nx * half, y - ny * half, z - nz * half)
+            normals[k] = (nx, ny, nz)
+            depths[k] = depth
+        return touching, contact, normals, depths
 
     def _cell(self, x: np.ndarray, z: np.ndarray
               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -361,8 +428,10 @@ class FunctionSurface(HeightSurface):
         return out / np.linalg.norm(out, axis=-1, keepdims=True)
 
 
-#: The most spheres a grid finds contacts for one at a time, with numbers; more are found together, as arrays.
+#: The most spheres a grid finds contacts for one at a time, with numbers; more are found together.
 _ONE_BY_ONE = 3
+#: The most spheres a grid finds contacts for together with numbers; more are found as arrays.
+_WITH_NUMBERS = 16
 
 
 def sphere_contacts(surface: HeightSurface, centres: np.ndarray, radius: float
@@ -379,16 +448,25 @@ def sphere_contacts(surface: HeightSurface, centres: np.ndarray, radius: float
     if bound is None or one is None:
         return sphere_contacts_by_sliding(surface, centres, radius)
     count = len(centres)
-    heights = surface.heights(centres[:, 0], centres[:, 2])
     reach = 2.0 * radius * math.sqrt(1.0 + bound * bound)
-    near = np.flatnonzero(centres[:, 1] - heights < reach)
+    height_at = getattr(surface, 'height_at', None)
+    if height_at is not None and count <= _WITH_NUMBERS:
+        near = np.array([k for k, (x, y, z) in enumerate(centres.tolist())
+                         if y - height_at(x, z) < reach], dtype=np.intp)
+    else:
+        heights = surface.heights(centres[:, 0], centres[:, 2])
+        near = np.flatnonzero(centres[:, 1] - heights < reach)
     touching = np.zeros(count, dtype=bool)
     points = np.zeros((count, 3))
     normals = np.zeros((count, 3))
     normals[:, 1] = 1.0
     depths = np.full(count, -np.inf)
     if len(near) > _ONE_BY_ONE:
-        found = sphere_contacts_by_sliding(surface, centres[near], radius)
+        together = getattr(surface, 'sphere_contacts_together', None)
+        if together is not None and len(near) <= _WITH_NUMBERS:
+            found = together(centres[near], radius)
+        else:
+            found = sphere_contacts_by_sliding(surface, centres[near], radius)
         touching[near], points[near], normals[near], depths[near] = found
         return touching, points, normals, depths
     for k in near.tolist():
@@ -413,7 +491,11 @@ def sphere_contacts_by_sliding(surface: HeightSurface, centres: np.ndarray, radi
         height, normal = surface.sample(x, z)
         inside = np.isfinite(height)
         ground = np.stack((x, np.where(inside, height, 0.0), z), axis=-1)
-        distance = np.einsum('ij,ij->i', centres - ground, normal)
+        # Written out, not as einsum, whose inner loop may fuse the multiply and
+        # the add: written so it rounds as GridSurface.sphere_contacts_together does.
+        offset = centres - ground
+        distance = (offset[:, 0] * normal[:, 0] + offset[:, 1] * normal[:, 1]
+                    + offset[:, 2] * normal[:, 2])
         # The perpendicular foot of the centre on the tangent plane is the next guess.
         foot_x = np.where(inside, centres[:, 0] - distance * normal[:, 0], x)
         foot_z = np.where(inside, centres[:, 2] - distance * normal[:, 2], z)

@@ -84,7 +84,7 @@ def test_a_standing_capsule_costs_a_height_for_each_sphere_and_no_slide():
     touching, *_ = heightfield.sphere_contacts(surface, axis_spheres(foot), 0.15)
     assert touching.any() and touching.sum() <= 2
     assert surface.samples == 0
-    assert surface.heights_asked == 1
+    assert surface.heights_asked == 0          # each sphere's height is read with numbers
 
 
 def test_spheres_all_through_the_ground_are_all_found_touching():
@@ -95,3 +95,65 @@ def test_spheres_all_through_the_ground_are_all_found_touching():
     slow = heightfield.sphere_contacts_by_sliding(surface, centres, 0.15)
     assert np.array_equal(fast[0], slow[0])
     assert math.isclose(float(fast[3][0]), float(slow[3][0]), abs_tol=1e-12)
+
+
+# -- a few spheres, with numbers --------------------------------------------------
+
+def random_centres(rng, surface: GridSurface, count: int) -> np.ndarray:
+    """Centres over the grid, near its surface, under it, above it and off its edges."""
+    x = rng.uniform(-1.0, 21.0, count)
+    z = rng.uniform(-1.0, 21.0, count)
+    ground = surface.heights(np.clip(x, 0.0, 19.5), np.clip(z, 0.0, 19.5))
+    return np.stack([x, ground + rng.uniform(-0.5, 0.8, count), z], axis=1)
+
+
+@pytest.mark.parametrize('seed', range(10))
+def test_a_height_with_numbers_is_the_height_with_arrays_to_the_bit(seed):
+    rng = np.random.default_rng(seed)
+    surface = bumpy_grid()
+    x = np.concatenate([rng.uniform(-1.0, 21.0, 200), [0.0, 19.5, 19.5, 0.0]])
+    z = np.concatenate([rng.uniform(-1.0, 21.0, 200), [0.0, 19.5, 0.0, 19.5]])
+    wanted = surface.heights(x, z)
+    got = [surface.height_at(float(a), float(b)) for a, b in zip(x, z, strict=True)]
+    assert np.array_equal(np.array(got), wanted)
+
+
+@pytest.mark.parametrize('count', [1, 2, 4, 5, 9, 12])
+@pytest.mark.parametrize('seed', range(12))
+def test_a_few_spheres_slid_together_with_numbers_are_those_slid_with_arrays_to_the_bit(seed, count):
+    rng = np.random.default_rng(1000 * count + seed)
+    surface = bumpy_grid()
+    for _ in range(10):
+        centres = random_centres(rng, surface, count)
+        radius = float(rng.uniform(0.05, 0.5))
+        wanted = heightfield.sphere_contacts_by_sliding(surface, centres, radius)
+        got = surface.sphere_contacts_together(centres, radius)
+        for one, other in zip(got, wanted, strict=True):
+            assert np.array_equal(one, other)
+
+
+@pytest.mark.parametrize('seed', range(8))
+def test_the_spheres_of_a_capsule_are_found_as_with_arrays_to_the_bit(seed):
+    rng = np.random.default_rng(seed)
+    surface = bumpy_grid()
+    for _ in range(25):
+        foot = random_centres(rng, surface, 1)[0]
+        centres = axis_spheres(foot)
+        got = heightfield.sphere_contacts(surface, centres, 0.15)
+        heights = surface.heights(centres[:, 0], centres[:, 2])
+        reach = 2.0 * 0.15 * math.sqrt(1.0 + surface.lipschitz ** 2)
+        near = np.flatnonzero(centres[:, 1] - heights < reach)
+        if len(near) > heightfield._ONE_BY_ONE:
+            wanted = heightfield.sphere_contacts_by_sliding(surface, centres[near], 0.15)
+            for one, other in zip(got, wanted, strict=True):
+                assert np.array_equal(one[near], other)
+
+
+def test_a_capsule_lying_on_the_ground_is_found_with_no_array_lookup():
+    surface = as_a_spy(bumpy_grid())
+    centres = np.array([[4.0 + 0.1 * k, 0.0, 6.0] for k in range(9)])
+    centres[:, 1] = [surface.height_at(x, 6.0) + 0.1 for x in centres[:, 0]]
+    surface.heights_asked = surface.samples = 0
+    touching, *_ = heightfield.sphere_contacts(surface, centres, 0.15)
+    assert touching.sum() > heightfield._ONE_BY_ONE
+    assert surface.samples == 0 and surface.heights_asked == 0
