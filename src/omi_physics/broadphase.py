@@ -375,7 +375,11 @@ class BroadPhase:
         inert = self._inert_bodies(world)
         if inert is None:
             self._inert = None
-            pair_a, pair_b = _sweep(world, None)
+            movers = world._rows_by_motion()[2]  # noqa: SLF001 the world's cache of its moving rows
+            if len(movers) <= FEW_MOVERS:
+                pair_a, pair_b = _sweep_from(world, movers)
+            else:
+                pair_a, pair_b = _sweep(world, None)
         else:
             pair_a, pair_b = self._pairs_split(world, inert)
         if active is not None:
@@ -569,6 +573,50 @@ def _sweep(world: "PhysicsWorld", rows: np.ndarray | None
         a, b = rows[a], rows[b]
     keep &= _moves_against(world, a, b)
     return a[keep], b[keep]
+
+
+#: The most moving bodies whose pairs :func:`_sweep_from` finds from the movers outward.
+FEW_MOVERS = 8
+
+
+def _sweep_from(world: "PhysicsWorld", movers: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`_sweep` of every body, found from the few ``movers`` outward.
+
+    A pair with something to report has a moving body in it, so each mover's
+    box is tested against every body's, and the pairs are put in the order of
+    the sweep: by where each body falls in the order of minimum x, then index.
+    """
+    n = world.body_count
+    empty = np.zeros(0, dtype=np.intp)
+    if n < 2 or not len(movers):
+        return empty, empty
+    lo, hi = world.aabb_min[:n], world.aabb_max[:n]
+    found_a, found_b = [], []
+    for m in movers.tolist():
+        near = np.flatnonzero(np.all(hi >= lo[m], axis=1) & np.all(lo <= hi[m], axis=1))
+        near = near[near != m]
+        found_a.append(np.full(len(near), m, dtype=np.intp))
+        found_b.append(near)
+    a = np.concatenate(found_a)
+    b = np.concatenate(found_b)
+    if not len(a):
+        return empty, empty
+    # The sweep names a pair once, earlier body first, in the order (minimum x, index).
+    x = lo[:, 0]
+    swap = (x[b] < x[a]) | ((x[b] == x[a]) & (b < a))
+    a, b = np.where(swap, b, a), np.where(swap, a, b)
+    unique = np.unique(a * n + b)
+    a, b = unique // n, unique % n
+    keep = _moves_against(world, a, b)
+    a, b = a[keep], b[keep]
+    if not len(a):
+        return empty, empty
+    involved = np.unique(np.concatenate((a, b)))
+    rank = {int(body): int(np.count_nonzero((x < x[body]) | ((x == x[body])
+                                                             & (np.arange(n) < body))))
+            for body in involved.tolist()}
+    order = sorted(range(len(a)), key=lambda k: (rank[int(a[k])], rank[int(b[k])]))
+    return a[order], b[order]
 
 
 def _moves_against(world: "PhysicsWorld", a: np.ndarray, b: np.ndarray) -> np.ndarray:
