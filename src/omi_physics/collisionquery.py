@@ -44,7 +44,7 @@ STATIC_GRIDS: "WeakKeyDictionary[Any, StaticGrid]" = WeakKeyDictionary()
 def static_grid(world: "PhysicsWorld") -> StaticGrid:
     """The grid over ``world``'s fixed bodies, as they are now."""
     grid = STATIC_GRIDS.get(world)
-    if grid is None or grid.epoch != world.layout_epoch:
+    if grid is None or not grid.current():
         grid = STATIC_GRIDS[world] = StaticGrid(world)
     return grid
 
@@ -142,15 +142,18 @@ class WorldQuery:
     def dynamic_near(self, lo: np.ndarray, hi: np.ndarray) -> list[DynamicBody]:
         """The dynamic bodies with a collider whose box overlaps ``lo`` to ``hi``."""
         world = self.world
-        near = ((world.motion_type == 2) & (world.collider_shape >= 0)
-                & np.all(world.aabb_max >= lo, axis=1)
-                & np.all(world.aabb_min <= hi, axis=1))
+        # The moving bodies are found first, a comparison of one column, so the
+        # boxes are read for those and not for every body in the world.
+        rows = np.flatnonzero(world.motion_type == 2)
+        rows = rows[world.collider_shape[rows] >= 0]
+        near = (np.all(world.aabb_max[rows] >= lo, axis=1)
+                & np.all(world.aabb_min[rows] <= hi, axis=1))
         return [DynamicBody(body=j, shape=world.shapes[world.collider_shape[j]],
                             position=world.position[j].copy(),
                             orientation=world.orientation[j].copy(),
                             velocity=world.linear_velocity[j].copy(),
                             mass=float(world.mass[j]))
-                for j in np.flatnonzero(near).tolist() if not world.is_sensor(j)]
+                for j in rows[near].tolist() if not world.is_sensor(j)]
 
     def raycast(self, origin: Vec, direction: Vec, max_distance: float = DEFAULT_RANGE,
                 skip: Iterable[int] = ()) -> RayHit | None:

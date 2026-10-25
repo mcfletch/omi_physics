@@ -10,8 +10,12 @@ footprints.
 The grid holds the bodies of motion type static. Three kinds are kept apart and
 tested against every box instead, because a cell cannot hold them:
 
-* bodies whose footprint spans many cells (a ground, a level's floor), and
-* bodies of kinematic motion, which move without the world's layout changing.
+* bodies whose footprint spans many cells (a ground, a level's floor),
+* bodies of kinematic motion, which move without the world's layout changing, and
+* the bodies added, removed or placed since the grid was built, up to
+  :attr:`StaticGrid.LOOSE_LIMIT` of them, read from the world as they are now.
+  A streaming world adds and removes a rock at a time, and a rebuild for each
+  would cost a pass over every trunk in it.
 """
 import weakref
 from typing import TYPE_CHECKING
@@ -35,11 +39,14 @@ _STRIDE = 1 << 24
 #: A box edge past this many metres is clamped to it, so an infinite edge has cells.
 _HUGE = 1.0e12
 
-_STATIC, _KINEMATIC = 0, 1
+_STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
 
 
 class StaticGrid:
     """The fixed, solid bodies of ``world`` as they were at ``world.layout_epoch``."""
+
+    #: How many changes since the build are read from the world before the grid is rebuilt.
+    LOOSE_LIMIT = 4096
 
     def __init__(self, world: 'PhysicsWorld') -> None:
         # Weak: a grid is kept in a table keyed weakly by its world, and a
@@ -66,6 +73,26 @@ class StaticGrid:
         self._ids = fixed[gridded]
         self._lo, self._hi = lo[gridded], hi[gridded]
         self._fill_cells()
+        self._loose = np.zeros(0, dtype=np.intp)
+        self._loose_epoch = self.epoch
+
+    def current(self) -> bool:
+        """Whether the grid, with the bodies it reads from the world, answers for the world.
+
+        False once a bulk addition, or more than :attr:`LOOSE_LIMIT` changes, has
+        been made since the grid was built.
+        """
+        world = self._world()
+        if world is None:
+            return False
+        if world.layout_epoch == self._loose_epoch:
+            return True
+        changed = world.layout_changes_since(self.epoch)
+        if changed is None or len(changed) > self.LOOSE_LIMIT:
+            return False
+        self._loose = np.unique(np.asarray(changed, dtype=np.intp))
+        self._loose_epoch = world.layout_epoch
+        return True
 
     def _cells(self, low: np.ndarray, high: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """The first and last cell of each ``(x, z)`` range, as ``(n, 2)`` integers."""
@@ -107,7 +134,10 @@ class StaticGrid:
         """
         lo = np.asarray(lo, dtype='d')
         hi = np.asarray(hi, dtype='d')
-        found = [self._gridded(lo, hi), self._others(lo, hi)]
+        gridded = self._gridded(lo, hi)
+        if len(self._loose):
+            gridded = gridded[~np.isin(gridded, self._loose)]
+        found = [gridded, self._others(lo, hi), self._changed(lo, hi)]
         return sorted(set(np.concatenate(found).tolist()))
 
     def _gridded(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
@@ -131,6 +161,18 @@ class StaticGrid:
         keep = (np.all(self._hi[candidates] >= lo, axis=1)
                 & np.all(self._lo[candidates] <= hi, axis=1))
         return self._ids[candidates[keep]]
+
+    def _changed(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        """The bodies changed since the build that are fixed and solid now and overlap the box."""
+        world = self._world()
+        if world is None or not len(self._loose):
+            return np.zeros(0, dtype=np.intp)
+        rows = self._loose
+        solid = ((world.collider_shape[rows] >= 0) & ~world.sensor[rows]
+                 & (world.motion_type[rows] != _DYNAMIC))
+        rows = rows[solid]
+        return rows[np.all(world.aabb_max[rows] >= lo, axis=1)
+                    & np.all(world.aabb_min[rows] <= hi, axis=1)]
 
     def _others(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
         """The large bodies and the kinematic ones that overlap the box."""

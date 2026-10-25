@@ -25,8 +25,11 @@ compatibility promise.
   `CharacterCapabilities` gains `mass`, `pushMass` and `pushSpeed`.
 - `CollisionQuery.static_near(lo, hi)` lists the fixed bodies whose boxes overlap
   a box, from a grid over their footprints (`omi_physics.staticindex`) that
-  `WorldQuery` shares between every query on a world and rebuilds when
-  `PhysicsWorld.layout_epoch` changes. `CharacterController` collides with the
+  `WorldQuery` shares between every query on a world. The grid reads up to 4096
+  bodies added, removed or placed since it was built from the world
+  (`PhysicsWorld.layout_epoch`, `layout_changes_since`) and is rebuilt past that or
+  after `add_bodies`. `WorldQuery.dynamic_near` reads the boxes of the dynamic
+  bodies only. `CharacterController` collides with the
   bodies near its capsule, so a step costs the same in a world of 200,000 posts as
   in one of 200. `PhysicsWorld.sensor` is the column of sensor flags.
 - `omi_physics.collisionquery`: the `CollisionQuery` protocol and `WorldQuery`.

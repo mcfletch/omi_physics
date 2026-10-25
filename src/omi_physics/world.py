@@ -49,6 +49,10 @@ log = logging.getLogger(__name__)
 _TYPE_INT = {model.STATIC: 0, model.KINEMATIC: 1, model.DYNAMIC: 2}
 _STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
 
+#: How many single changes to the fixed bodies a world remembers
+#: (:meth:`PhysicsWorld.layout_changes_since`).
+_LAYOUT_CHANGES_KEPT = 8192
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +140,7 @@ class PhysicsWorld:
         #: runs, and without reuse the arrays only ever grow.
         self._free: list[int] = []
         self._layout_epoch = 0
+        self._layout_changes: deque[tuple[int, int]] = deque(maxlen=_LAYOUT_CHANGES_KEPT)
         self._accumulator = 0.0
         self.time = 0.0
         self.bodies: list[Any] = []            # optional per-index user handle
@@ -304,13 +309,32 @@ class PhysicsWorld:
     def layout_epoch(self) -> int:
         """A number that changes when a fixed body is added, removed or placed.
 
-        A fixed body is one that is not dynamic and not a sensor.
-
-        An index over the fixed bodies (:class:`~omi_physics.staticindex.StaticGrid`)
-        is as current as the epoch it was built at. Moving a dynamic body, which
-        a step does to many bodies each tick, does not change it.
+        A fixed body is one that is not dynamic and not a sensor. An index over
+        the fixed bodies (:class:`~omi_physics.staticindex.StaticGrid`) is as
+        current as the epoch it was built at, and :meth:`layout_changes_since`
+        says what it has missed. Moving a dynamic body, which a step does to many
+        bodies each tick, does not change it.
         """
         return self._layout_epoch
+
+    def layout_changes_since(self, epoch: int) -> list[int] | None:
+        """The bodies added, removed or placed since ``epoch``, as indices, oldest first.
+
+        None where the world cannot say: more changes have been made since than
+        it keeps, or :meth:`add_bodies` made some at once.
+        """
+        if epoch >= self._layout_epoch:
+            return []
+        changes = self._layout_changes
+        if not changes or changes[0][0] > epoch + 1:
+            return None
+        found = [index for number, index in changes if number > epoch]
+        return None if -1 in found else found
+
+    def _layout_changed(self, index: int = -1) -> None:
+        """Note that fixed body ``index`` was added, removed or placed; -1 for a number of them."""
+        self._layout_epoch += 1
+        self._layout_changes.append((self._layout_epoch, index))
 
     @property
     def body_count(self) -> int:
@@ -838,7 +862,7 @@ class PhysicsWorld:
         self.bodies[i] = handle
         self._fit_body(i)
         if motion.type != model.DYNAMIC and not sensor:
-            self._layout_epoch += 1
+            self._layout_changed(i)
         return i
 
     def add_bodies(self, shape_index: int, positions: ArrayLike,
@@ -910,7 +934,7 @@ class PhysicsWorld:
         fitted_position[indices] = points
         fitted_orientation[indices] = turn
         self._refit_cache_n = -1
-        self._layout_epoch += 1
+        self._layout_changed()
         return indices
 
     def _fill_static(self, indices: np.ndarray, points: np.ndarray, motion: model.Motion,
@@ -998,7 +1022,7 @@ class PhysicsWorld:
             self._prev_orientation[i] = self._orientation[i]
         self._fit_body(i, margin)
         if self._motion_type[i] == _STATIC and not self._sensor[i]:
-            self._layout_epoch += 1
+            self._layout_changed(i)
 
     def remove_body(self, i: int) -> None:
         """Take body ``i`` out of the world, freeing its slot for the next one.
@@ -1025,7 +1049,7 @@ class PhysicsWorld:
         if self._vacant[i]:
             return
         if self._motion_type[i] != _DYNAMIC and not self._sensor[i]:
-            self._layout_epoch += 1
+            self._layout_changed(i)
         with self._listener_errors_raised_after():
             self._retire(i)
             self._generation[i] += 1

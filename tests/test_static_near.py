@@ -13,7 +13,8 @@ import numpy as np
 
 from omi_physics import model
 from omi_physics.character import CharacterCapabilities, CharacterController
-from omi_physics.collisionquery import CollisionQuery, WorldQuery
+from omi_physics.collisionquery import CollisionQuery, WorldQuery, static_grid
+from omi_physics.staticindex import StaticGrid
 from omi_physics.world import PhysicsWorld
 
 DT = 1.0 / 60.0
@@ -107,6 +108,71 @@ class TestTheIndexFollowsTheWorld:
         assert post in set(query.static_near(np.array([499.0, 0.0, 499.0]),
                                              np.array([501.0, 3.0, 501.0])))
 
+    def test_a_few_changes_are_read_from_the_world_and_do_not_rebuild_the_grid(self) -> None:
+        world, _ = world_with_floor()
+        posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        grid = static_grid(world)
+        crate = world.add_shape(model.Shape.box((0.5, 0.5, 0.5)))
+        solid = model.Collider(shape=crate)
+        added = world.add_body(model.Motion(type=model.STATIC), collider=solid,
+                               position=(1.0, 0.25, 40.0))
+        removed = world.add_body(model.Motion(type=model.STATIC), collider=solid,
+                                 position=(2.0, 0.25, 40.0))
+        world.remove_body(removed)
+        found = set(query.static_near(BOX_LO, BOX_HI))
+        assert added in found and removed not in found
+        assert static_grid(world) is grid
+
+    def test_a_body_that_is_removed_from_the_grid_is_not_listed_where_it_was(self) -> None:
+        world, _ = world_with_floor()
+        posts = posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        grid = static_grid(world)
+        world.remove_body(int(posts[0]))
+        assert int(posts[0]) not in set(query.static_near(BOX_LO, BOX_HI))
+        assert static_grid(world) is grid
+
+    def test_a_body_that_takes_a_removed_ones_place_is_listed_where_it_stands(self) -> None:
+        world, _ = world_with_floor()
+        posts = posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        world.remove_body(int(posts[0]))
+        crate = world.add_shape(model.Shape.box((0.5, 0.5, 0.5)))
+        reused = world.add_body(model.Motion(type=model.STATIC),
+                                collider=model.Collider(shape=crate), position=(300.0, 0.25, 0.0))
+        assert reused == int(posts[0])
+        assert reused not in set(query.static_near(BOX_LO, BOX_HI))
+        assert reused in set(query.static_near(np.array([299.0, 0.0, -1.0]),
+                                               np.array([301.0, 1.0, 1.0])))
+
+    def test_a_bulk_addition_rebuilds_the_grid(self) -> None:
+        world, _ = world_with_floor()
+        posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        grid = static_grid(world)
+        add_posts(world, [(1.0, 2.0, 40.0)])
+        query.static_near(BOX_LO, BOX_HI)
+        assert static_grid(world) is not grid
+
+    def test_more_changes_than_it_reads_from_the_world_rebuild_the_grid(self) -> None:
+        world, _ = world_with_floor()
+        posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        grid = static_grid(world)
+        crate = world.add_shape(model.Shape.box((0.5, 0.5, 0.5)))
+        for k in range(StaticGrid.LOOSE_LIMIT + 5):
+            world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=crate),
+                           position=(0.0, 0.25, 100.0 + k))
+        found = set(query.static_near(BOX_LO, BOX_HI))
+        assert static_grid(world) is not grid
+        assert len(found) == 3
+
     def test_moving_a_dynamic_body_does_not_rebuild_it(self) -> None:
         world, _ = world_with_floor()
         crate = world.add_shape(model.Shape.box((0.5, 0.5, 0.5)))
@@ -115,6 +181,7 @@ class TestTheIndexFollowsTheWorld:
         before = world.layout_epoch
         world.place_body(mover, (1.0, 0.25, 0.0))
         assert world.layout_epoch == before
+        assert world.layout_changes_since(before) == []
 
 
 def test_the_grid_does_not_keep_its_world_alive() -> None:
