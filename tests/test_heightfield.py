@@ -168,6 +168,27 @@ class TestFunctionSurface:
         got = shape.surface.normals(np.array([x]), np.array([z]))[0]
         assert got == pytest.approx(expected, abs=1e-5)
 
+    @pytest.mark.parametrize('vectorized', [True, False])
+    def test_a_sample_asks_for_its_heights_and_slopes_in_one_call(self, vectorized) -> None:
+        calls = []
+
+        def sample(x, z):
+            calls.append(np.shape(x))
+            return np.sin(0.7 * x) * np.cos(0.4 * z) + 0.1 * x if vectorized else (
+                math.sin(0.7 * x) * math.cos(0.4 * z) + 0.1 * x)
+
+        surface = model.Shape.heightfield(sample=sample, vectorized=vectorized,
+                                          extent=((-5.0, -5.0), (5.0, 5.0))).surface
+        x = np.array([0.3, -2.0, 4.9995, 7.0, -5.0])
+        z = np.array([1.1, 0.4, 0.0, 0.0, 2.0])
+        heights, normals = surface.heights(x, z), surface.normals(x, z)
+        calls.clear()
+        sampled = surface.sample(x, z)
+        assert np.array_equal(sampled[0], heights) and np.array_equal(sampled[1], normals)
+        if vectorized:
+            # The five points of each stencil that lie inside the extent, together.
+            assert calls == [(18,)]
+
     def test_a_given_normal_is_used(self) -> None:
         shape = model.Shape.heightfield(sample=lambda x, z: 0.0,
                                         normal=lambda x, z: (0.0, 0.0, 2.0))

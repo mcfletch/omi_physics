@@ -418,9 +418,31 @@ class FunctionSurface(HeightSurface):
             out = self._call(self._normal, x, z, 3)
             return out / np.linalg.norm(out, axis=-1, keepdims=True)
         d = self.delta
-        slope_x = (self.heights(x + d, z) - self.heights(x - d, z)) / (2 * d)
-        slope_z = (self.heights(x, z + d) - self.heights(x, z - d)) / (2 * d)
+        return self._differenced(self.heights(x + d, z), self.heights(x - d, z),
+                                 self.heights(x, z + d), self.heights(x, z - d))
+
+    def sample(self, x: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """:meth:`heights` and :meth:`normals` together.
+
+        Without a normal function, the height and the four heights of its
+        central difference are asked for in one call.
+        """
+        x = np.asarray(x, dtype='d')
+        z = np.asarray(z, dtype='d')
+        if self._normal is not None:
+            return self.heights(x, z), self.normals(x, z)
+        d = self.delta
+        stencil = self.heights(np.stack((x, x + d, x - d, x, x)), np.stack((z, z, z, z + d, z - d)))
+        return stencil[0], self._differenced(*stencil[1:])
+
+    def _differenced(self, east: np.ndarray, west: np.ndarray, north: np.ndarray,
+                     south: np.ndarray) -> np.ndarray:
+        """The unit normal from the heights :attr:`delta` either side along x and along z."""
+        d = self.delta
         # A difference taken across the edge of the extent is not a slope.
+        with np.errstate(invalid='ignore'):
+            slope_x = (east - west) / (2 * d)
+            slope_z = (north - south) / (2 * d)
         flat = ~(np.isfinite(slope_x) & np.isfinite(slope_z))
         slope_x = np.where(flat, 0.0, slope_x)
         slope_z = np.where(flat, 0.0, slope_z)
