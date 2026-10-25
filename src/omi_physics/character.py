@@ -72,14 +72,43 @@ class _StaticBoxes:
         self._centers = np.array([proxy.center for _, proxy in boxes]).reshape(-1, 3)
         self._halves = np.array([proxy.half for _, proxy in boxes]).reshape(-1, 3)
         self._rotations = np.array([proxy.R for _, proxy in boxes]).reshape(-1, 3, 3)
+        #: Each box as numbers, for :func:`~omi_physics.collide.capsule_box_push`.
+        self._numbers = [(j, tuple(proxy.center.tolist()), tuple(proxy.half.tolist()),
+                          tuple(tuple(row) for row in proxy.R.tolist())) for j, proxy in boxes]
+        #: Each box's bounds, as ``(x0, y0, z0, x1, y1, z1)``.
+        self._bounds = [(*low.tolist(), *high.tolist())
+                        for low, high in (proxy.aabb() for _, proxy in boxes)]
 
-    def pushes(self, capsule: CapsuleProxy) -> dict[int, tuple[np.ndarray, float]]:
+    #: The most boxes a capsule is tested against one at a time with numbers.
+    FEW = 6
+
+    def pushes(self, capsule: CapsuleProxy) -> dict[int, tuple[Any, float]]:
         """The push out of each box ``capsule`` overlaps, and its depth, by body."""
         if not self.rows:
             return {}
+        if len(self.rows) <= self.FEW:
+            return self._few_pushes(capsule)
         hit, pushes, depths = collide.capsule_box_pushes(capsule, self._centers, self._halves,
                                                          self._rotations)
         return {self.rows[k]: (pushes[k], float(depths[k])) for k in np.flatnonzero(hit).tolist()}
+
+    def _few_pushes(self, capsule: CapsuleProxy) -> dict[int, tuple[Any, float]]:
+        """:meth:`pushes` box by box with numbers, leaving out boxes the capsule's box misses."""
+        p0 = tuple(capsule.p0.tolist())
+        p1 = tuple(capsule.p1.tolist())
+        radius = capsule.radius
+        lo = [min(p0[i], p1[i]) - radius for i in range(3)]
+        hi = [max(p0[i], p1[i]) + radius for i in range(3)]
+        found: dict[int, tuple[Any, float]] = {}
+        for (j, center, half, rotation), (x0, y0, z0, x1, y1, z1) in zip(
+                self._numbers, self._bounds, strict=True):
+            if (lo[0] > x1 or lo[1] > y1 or lo[2] > z1 or hi[0] < x0 or hi[1] < y0
+                    or hi[2] < z0):
+                continue
+            pushed = collide.capsule_box_push(p0, p1, radius, center, half, rotation)
+            if pushed is not None:
+                found[j] = pushed
+        return found
 
 
 class _Gather:
@@ -444,7 +473,11 @@ class CharacterController:
                height: float | None = None) -> Proxy:
         """World-space collision proxy for the capsule at ``position`` and ``height``."""
         pos = self.position if position is None else position
-        return make_proxy(self._shape(height), pos, IDENT)
+        h = self.height if height is None else height
+        # The proxy make_proxy builds for an upright capsule, without the shape it is built from.
+        mid = max(h - 2 * self.caps.radius, 1e-3)
+        return CapsuleProxy(np.asarray(pos, dtype='d'), 0.5 * float(mid),
+                            float(self.caps.radius), IDENTITY)
 
     def base(self) -> np.ndarray:
         """World position of the capsule's feet (the point below the centre)."""
@@ -1149,7 +1182,8 @@ class CharacterController:
             other = self._static_proxy(j)
             if isinstance(other, BoxProxy):
                 if j in boxed:
-                    found[j] = (boxed[j][0], self._surface_point(boxed[j][0]))
+                    normal = np.asarray(boxed[j][0], dtype='d')
+                    found[j] = (normal, self._surface_point(normal))
                 continue
             if isinstance(other, TriangleMeshProxy):
                 pushes, depths = collide.capsule_mesh_pushes(

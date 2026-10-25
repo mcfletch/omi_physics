@@ -14,6 +14,7 @@ drives the pair further together instead of apart.  :func:`capsule_triangle` is
 where that matters most, because a character landing hard is the common way to
 get deeply inside anything.
 """
+import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -706,6 +707,67 @@ def capsule_box_pushes(cap: CapsuleProxy, centers: np.ndarray, halves: np.ndarra
                                                           rotations[deep])
         depths[deep] += radius
     return hit, pushes, depths
+
+
+def capsule_box_push(p0: tuple[float, float, float], p1: tuple[float, float, float], radius: float,
+                     center: tuple[float, float, float], half: tuple[float, float, float],
+                     rotation: tuple[tuple[float, float, float], ...]
+                     ) -> tuple[tuple[float, float, float], float] | None:
+    """:func:`capsule_box_pushes` for one box, with numbers: ``(push, depth)``, or None apart.
+
+    The capsule's axis runs from ``p0`` to ``p1``; the box is ``center``,
+    ``half`` and ``rotation``, rows of a matrix whose columns are its axes.
+    The same arithmetic, so the answer agrees with the arrays' to rounding; a
+    character asks it of the few boxes near it several times a step.
+    """
+    r = rotation
+    d0 = (p0[0] - center[0], p0[1] - center[1], p0[2] - center[2])
+    d1 = (p1[0] - center[0], p1[1] - center[1], p1[2] - center[2])
+    start = [r[0][i] * d0[0] + r[1][i] * d0[1] + r[2][i] * d0[2] for i in range(3)]
+    end = [r[0][i] * d1[0] + r[1][i] * d1[1] + r[2][i] * d1[2] for i in range(3)]
+    run = [end[i] - start[i] for i in range(3)]
+    knots = [0.0, 1.0]
+    for limit in (half, (-half[0], -half[1], -half[2])):
+        for i in range(3):
+            t = (limit[i] - start[i]) / run[i] if run[i] != 0.0 else math.nan
+            knots.append(min(max(t, 0.0), 1.0) if math.isfinite(t) else 0.0)
+    knots.sort()
+    best_squared = math.inf
+    along = 0.0
+    for low, high in itertools.pairwise(knots):
+        mid = 0.5 * (low + high)
+        offset = [0.0, 0.0, 0.0]
+        slope = [0.0, 0.0, 0.0]
+        for i in range(3):
+            middle = start[i] + mid * run[i]
+            if middle > half[i]:
+                offset[i], slope[i] = start[i] - half[i], run[i]
+            elif middle < -half[i]:
+                offset[i], slope[i] = start[i] + half[i], run[i]
+        curvature = slope[0] * slope[0] + slope[1] * slope[1] + slope[2] * slope[2]
+        if curvature > 0.0:
+            best = -(offset[0] * slope[0] + offset[1] * slope[1] + offset[2] * slope[2]) / curvature
+        else:
+            best = low
+        best = min(max(best, low), high)
+        gap = [offset[i] + best * slope[i] for i in range(3)]
+        squared = gap[0] * gap[0] + gap[1] * gap[1] + gap[2] * gap[2]
+        if squared < best_squared:
+            best_squared, along = squared, best
+    distance = math.sqrt(best_squared)
+    if not radius - distance > _TOUCHING:
+        return None
+    if distance <= _TOUCHING:
+        pushes, depths = _segment_box_overlap(np.array([start]), np.array([end]),
+                                              np.array([half]), np.array([rotation]))
+        x, y, z = pushes[0].tolist()
+        return (x, y, z), float(depths[0]) + radius
+    point = [start[i] + along * run[i] for i in range(3)]
+    local = [(point[i] - min(max(point[i], -half[i]), half[i])) / distance for i in range(3)]
+    push = (r[0][0] * local[0] + r[0][1] * local[1] + r[0][2] * local[2],
+            r[1][0] * local[0] + r[1][1] * local[1] + r[1][2] * local[2],
+            r[2][0] * local[0] + r[2][1] * local[1] + r[2][2] * local[2])
+    return push, radius - distance
 
 
 def _segment_box_overlap(start: np.ndarray, end: np.ndarray, halves: np.ndarray,
