@@ -27,7 +27,7 @@ from .staticindex import StaticGrid
 if TYPE_CHECKING:
     from .world import PhysicsWorld
 
-__all__ = ['CollisionQuery', 'DynamicBody', 'WorldQuery']
+__all__ = ['CollisionQuery', 'DynamicBody', 'WorldQuery', 'dynamic_rows']
 
 #: World-space proxies for each world's static colliders, keyed by world and
 #: then by body index. Weak, so an unloaded level takes its collision copy with
@@ -47,6 +47,21 @@ def static_grid(world: "PhysicsWorld") -> StaticGrid:
     if grid is None or not grid.current():
         grid = STATIC_GRIDS[world] = StaticGrid(world)
     return grid
+
+
+#: The moving bodies with a collider of each world, with the population epoch they were found at.
+DYNAMIC_ROWS: "WeakKeyDictionary[Any, tuple[int, np.ndarray]]" = WeakKeyDictionary()
+
+
+def dynamic_rows(world: "PhysicsWorld") -> np.ndarray:
+    """The indices of ``world``'s dynamic bodies that have a collider, found again when a body
+    is added or removed."""
+    epoch = world.population_epoch
+    found = DYNAMIC_ROWS.get(world)
+    if found is None or found[0] != epoch:
+        rows = np.flatnonzero(world.motion_type == 2)
+        found = DYNAMIC_ROWS[world] = (epoch, rows[world.collider_shape[rows] >= 0])
+    return found[1]
 
 
 def static_proxies(world: "PhysicsWorld") -> dict[int, Proxy]:
@@ -142,10 +157,8 @@ class WorldQuery:
     def dynamic_near(self, lo: np.ndarray, hi: np.ndarray) -> list[DynamicBody]:
         """The dynamic bodies with a collider whose box overlaps ``lo`` to ``hi``."""
         world = self.world
-        # The moving bodies are found first, a comparison of one column, so the
-        # boxes are read for those and not for every body in the world.
-        rows = np.flatnonzero(world.motion_type == 2)
-        rows = rows[world.collider_shape[rows] >= 0]
+        # The boxes are read for the moving bodies and not for every body in the world.
+        rows = dynamic_rows(world)
         near = (np.all(world.aabb_max[rows] >= lo, axis=1)
                 & np.all(world.aabb_min[rows] <= hi, axis=1))
         return [DynamicBody(body=j, shape=world.shapes[world.collider_shape[j]],

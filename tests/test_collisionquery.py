@@ -165,3 +165,27 @@ def test_a_proxy_for_a_dynamic_body_is_made_from_its_pose() -> None:
     lo, hi = make_proxy(crate.shape, crate.position, crate.orientation).aabb()
     assert lo == pytest.approx([1.75, 0.0, -0.25])
     assert hi == pytest.approx([2.25, 0.5, 0.25])
+
+
+# -- the moving bodies a query keeps ------------------------------------------------
+
+def test_the_moving_bodies_of_a_world_are_found_once_while_none_is_added_or_removed():
+    from omi_physics.collisionquery import dynamic_rows
+    world, ids = level()
+    first = dynamic_rows(world)
+    world.step(DT)
+    assert dynamic_rows(world) is first
+    assert sorted(first.tolist()) == sorted([ids['near'], ids['far']])
+
+
+def test_the_moving_bodies_follow_a_body_added_and_one_removed():
+    from omi_physics.collisionquery import dynamic_rows
+    world, ids = level()
+    dynamic_rows(world)
+    crate = world.add_shape(model.Shape.box((0.5, 0.5, 0.5)))
+    added = world.add_body(model.Motion(type=model.DYNAMIC, mass=1.0),
+                           collider=model.Collider(shape=crate), position=(2.0, 0.25, 1.0))
+    world.remove_body(ids['far'])
+    assert sorted(dynamic_rows(world).tolist()) == sorted([ids['near'], added])
+    found = WorldQuery(world).dynamic_near(np.array([1.0, -1.0, -1.0]), np.array([3.0, 1.0, 2.0]))
+    assert sorted(body.body for body in found) == sorted([ids['near'], added])

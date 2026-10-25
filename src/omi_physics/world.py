@@ -140,6 +140,7 @@ class PhysicsWorld:
         #: runs, and without reuse the arrays only ever grow.
         self._free: list[int] = []
         self._layout_epoch = 0
+        self._population_epoch = 0
         self._layout_changes: deque[tuple[int, int]] = deque(maxlen=_LAYOUT_CHANGES_KEPT)
         self._accumulator = 0.0
         self.time = 0.0
@@ -330,6 +331,11 @@ class PhysicsWorld:
             return None
         found = [index for number, index in changes if number > epoch]
         return None if -1 in found else found
+
+    @property
+    def population_epoch(self) -> int:
+        """A number that changes when any body is added or removed."""
+        return self._population_epoch
 
     def _layout_changed(self, index: int = -1) -> None:
         """Note that fixed body ``index`` was added, removed or placed; -1 for a number of them."""
@@ -863,6 +869,7 @@ class PhysicsWorld:
         self._fit_body(i)
         if motion.type != model.DYNAMIC and not sensor:
             self._layout_changed(i)
+        self._population_epoch += 1
         return i
 
     def add_bodies(self, shape_index: int, positions: ArrayLike,
@@ -935,6 +942,7 @@ class PhysicsWorld:
         fitted_orientation[indices] = turn
         self._refit_cache_n = -1
         self._layout_changed()
+        self._population_epoch += 1
         return indices
 
     def _fill_static(self, indices: np.ndarray, points: np.ndarray, motion: model.Motion,
@@ -1050,6 +1058,7 @@ class PhysicsWorld:
             return
         if self._motion_type[i] != _DYNAMIC and not self._sensor[i]:
             self._layout_changed(i)
+        self._population_epoch += 1
         with self._listener_errors_raised_after():
             self._retire(i)
             self._generation[i] += 1
