@@ -9,6 +9,8 @@ compatibility promise.
 
 ### Changed
 
+- `ThreadedSimulation.start()` is safe against concurrent calls. `with_world()` answers an
+  object that wraps the lock; its block receives the world.
 - A `cylinder` is a flat-ended cylinder rather than a capsule of its height.
 - A triangle mesh against a triangle mesh makes no contacts.
 - `SequentialImpulseSolver` no longer takes `position_iterations` or
@@ -16,6 +18,15 @@ compatibility promise.
 
 ### Added
 
+- `ThreadedSimulation.post(fn)` and `call(fn)`: a command inbox any thread
+  writes to, run on the simulation thread at the start of the next tick.
+  `call` answers a `concurrent.futures.Future`. `wait_steps(n, timeout)` waits
+  for the tick count.
+- `ThreadedSimulation` blocks while no dynamic body is awake, no kinematic
+  body moves, the world holds no joint and the inbox is empty; `wake()` and
+  `block_when_idle=False` control it. `with_world()` wakes it on leaving.
+- `PhysicsWorld.add_step_hook(before, after)` and `omi_physics.Step`: hooks
+  around every fixed step, inline or threaded.
 - Compound shapes: `Shape.compound` and `ShapePart`, shapes placed at offsets
   in one body's frame, collided, cast at and weighed part by part.
 - Cylinders with flat ends, narrowing to a cone (`radiusTop` 0), collided,

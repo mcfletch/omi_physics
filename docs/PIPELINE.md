@@ -3,6 +3,9 @@
 `PhysicsWorld.step(dt)` advances the whole world by one **fixed** timestep. A
 real-time caller drives it through `advance(real_dt)`, which runs an accumulator
 so the simulation always steps in equal `dt` slices regardless of frame rate.
+Hooks registered with `add_step_hook(before, after)` run around each of those
+steps, with a `Step` record of its `dt`, `index` and start `time`; `before`
+runs ahead of the first stage below and `after` once the last has finished.
 
 ```mermaid
 flowchart TB

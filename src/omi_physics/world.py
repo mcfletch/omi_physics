@@ -11,6 +11,7 @@ import os
 from collections import deque
 from collections.abc import Callable, Container, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -47,6 +48,21 @@ log = logging.getLogger(__name__)
 _TYPE_INT = {model.STATIC: 0, model.KINEMATIC: 1, model.DYNAMIC: 2}
 _STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
 
+
+
+@dataclass(frozen=True, slots=True)
+class Step:
+    """One fixed step of a world, as the step hooks receive it.
+
+    ``dt`` is the step's length in seconds. ``index`` is the world's
+    :attr:`~PhysicsWorld.step_count` when the step begins, which is the ``step``
+    every contact and trigger event made by this step carries. ``time`` is the
+    simulation time in seconds at the step's start, the ``time`` those events
+    carry.
+    """
+    dt: float
+    index: int
+    time: float
 
 
 def _column(name: str) -> property:
@@ -149,6 +165,8 @@ class PhysicsWorld:
         #: The joints of :attr:`joint_constraints` built from rows.
         self.row_joints: list[RowJoint] = []
         self.joint_iterations = 10
+        self._before_step: list[Callable[[Step], None]] = []
+        self._after_step: list[Callable[[Step], None]] = []
 
     # -- storage ---------------------------------------------------------
     _VEC = ('position', 'prev_position', 'orientation', 'prev_orientation',
@@ -1069,7 +1087,42 @@ class PhysicsWorld:
         the end, and the first exception is raised from here once it has.
         """
         with self._listener_errors_raised_after():
-            self._step(dt)
+            if self._before_step or self._after_step:
+                record = Step(dt, self.step_count, self.time)
+                self._call_listeners(self._before_step, record)
+                self._step(dt)
+                self._call_listeners(self._after_step, record)
+            else:
+                self._step(dt)
+
+    def add_step_hook(self, before: Callable[[Step], None] | None = None,
+                      after: Callable[[Step], None] | None = None
+                      ) -> Callable[[], None]:
+        """Call ``before(step)`` ahead of every fixed step and ``after(step)`` behind it.
+
+        ``step`` is a :class:`Step` with the step's ``dt``, ``index`` and
+        ``time``; the same record goes to both. The hooks run inside
+        :meth:`step`, so :meth:`advance` calls them once per fixed step, on
+        whichever thread steps the world. A ``before`` hook that applies a force
+        or moves a body acts in the step that follows it, and an ``after`` hook
+        reads that step's contacts and poses.
+
+        Hooks of one kind run in the order they were added. One that raises does
+        not stop the step or the other hooks, and the first exception is raised
+        from :meth:`step` once the step has finished, as for a contact listener.
+        Returns a function that removes the hooks; calling it again does nothing.
+        """
+        if before is not None:
+            self._before_step.append(before)
+        if after is not None:
+            self._after_step.append(after)
+
+        def remove() -> None:
+            if before is not None and before in self._before_step:
+                self._before_step.remove(before)
+            if after is not None and after in self._after_step:
+                self._after_step.remove(after)
+        return remove
 
     def _step(self, dt: float) -> None:
         """The body of :meth:`step`."""

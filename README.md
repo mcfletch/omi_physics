@@ -78,6 +78,28 @@ snapshot, version = sim.latest()           # (position, axis_angle, awake, dynam
 sim.stop()
 ```
 
+Any thread talks to the world through the thread's command inbox. A command is
+a function of the world; it runs on the simulation thread at the start of the
+next tick, before that tick's step, in the order it was queued:
+
+```python
+sim.post(lambda world: world.apply_impulse(ball, (0, 5, 0)))   # no answer
+future = sim.call(lambda world: world.live_body_count)          # a concurrent.futures.Future
+```
+
+While no dynamic body is awake, no kinematic body is moving, the world holds no
+joint and the inbox is empty, the thread blocks instead of ticking, so a scene
+at rest costs no CPU. `post`, `call`, leaving `with_world()` and `wake()` end
+the wait; `stop()` interrupts it. A change made any other way to a world at
+rest, such as `place_body` on a kinematic body, needs a `wake()`. No steps run
+while idle, so step hooks and `world.time` stand still too;
+`ThreadedSimulation(world, block_when_idle=False)` ticks regardless.
+
+`PhysicsWorld.add_step_hook(before=None, after=None)` calls `before(step)` ahead
+of every fixed step and `after(step)` behind it, on whichever thread steps the
+world. `step` is a `Step` of `dt`, `index` (the `step` its contact events
+carry) and `time`. The call returns a function that removes the hooks.
+
 ## How it works
 
 One `world.step(dt)` runs this fixed-timestep pipeline over the world's

@@ -20,13 +20,14 @@ never touches GL unless you explicitly select the GPU backend.
 """
 from . import mathutil, model
 from .backend import NumpyBackend, select_backend
-from .world import PhysicsWorld
+from .world import PhysicsWorld, Step
 
 __version__ = "0.4.0"
 
 __all__ = [
     "NumpyBackend",
     "PhysicsWorld",
+    "Step",
     "__version__",
     "mathutil",
     "model",

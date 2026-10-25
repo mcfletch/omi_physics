@@ -124,7 +124,8 @@ class TestDroppedTicks:
                 return super().step(dt)
 
         sim = ThreadedSimulation(
-            SlowWorld(gravity=model.Gravity(gravity=0.0)), sim_hz=400.0)
+            SlowWorld(gravity=model.Gravity(gravity=0.0)), sim_hz=400.0,
+            block_when_idle=False)
         sim.start()
         try:
             deadline = time.time() + 2.0
@@ -146,7 +147,7 @@ class TestDroppedTicks:
         drop is counted; this pins that the loop is the thing doing the
         counting.
         """
-        sim = ThreadedSimulation(_world(), sim_hz=60.0)
+        sim = ThreadedSimulation(_world(), sim_hz=60.0, block_when_idle=False)
         sim.start()
         try:
             deadline = time.time() + 2.0
@@ -160,7 +161,7 @@ class TestDroppedTicks:
 
 class TestOnARunningThread:
     def test_the_reported_rate_tracks_the_rate_asked_for(self):
-        sim = ThreadedSimulation(_world(), sim_hz=100.0)
+        sim = ThreadedSimulation(_world(), sim_hz=100.0, block_when_idle=False)
         sim.start()
         try:
             deadline = time.time() + 3.0
