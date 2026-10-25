@@ -14,6 +14,7 @@ drives the pair further together instead of apart.  :func:`capsule_triangle` is
 where that matters most, because a character landing hard is the common way to
 get deeply inside anything.
 """
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import cast
@@ -316,6 +317,9 @@ _RIM_POINTS = 24
 #: The most spheres a capsule's axis is sampled with against a height field.
 _AXIS_SPHERES = 9
 
+#: The most contacts a height field keeps with one mover (:func:`_reduce_manifold`).
+_MANIFOLD_POINTS = 4
+
 
 def _collide_heightfield(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     """A mover against a height field, which is the ground and never moves.
@@ -371,6 +375,45 @@ def _collide_heightfield(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     contacts = [Contact(a, b, world_points[i], world_normals[i], float(depth))
                 for i, depth in enumerate(depths[touching])]
     return _reduce_manifold(contacts)
+
+
+#: ``np.linspace(0, 1, count)`` as numbers, by count: where the spheres of a capsule sit along it.
+_ALONG = {count: tuple(np.linspace(0.0, 1.0, count).tolist())
+          for count in range(2, _AXIS_SPHERES + 1)}
+
+
+def upright_capsule_heightfield_pushes(field: HeightFieldProxy, x: float, y: float, z: float,
+                                       half_height: float, radius: float
+                                       ) -> list[tuple[tuple[float, float, float], float]]:
+    """The pushes out of a height field of an upright capsule centred at ``(x, y, z)``.
+
+    Returns ``(push, depth)`` for each contact :func:`collide` makes between the
+    capsule (``half_height`` from its centre to the centre of each end) and
+    ``field``, in the same order: ``push`` is the unit normal out of the ground,
+    the negated contact normal. A character asks this several times a step, so
+    the spheres are placed and the contacts kept with numbers, and the capsule
+    proxy and the contact objects are not made.
+    """
+    if not field.upright:
+        capsule = CapsuleProxy(np.array([x, y, z], dtype='d'), half_height, radius, _IDENTITY)
+        return [((float(-c.normal[0]), float(-c.normal[1]), float(-c.normal[2])), c.depth)
+                for c in _collide_heightfield(0, 1, capsule, field)]
+    # The spheres as _collide_heightfield places them, operation for operation, so each
+    # height is the one it finds to the bit.
+    bottom, top = y - half_height, y + half_height
+    span = top - bottom
+    count = int(min(max(math.ceil(math.sqrt(span * span) / max(radius, 1e-9)) + 1, 2),
+                    _AXIS_SPHERES))
+    cx, cy, cz = field.center.tolist()
+    heights = [(bottom + span * along) - cy for along in _ALONG[count]]
+    found = field.surface.column_contacts(x - cx, z - cz, heights, radius)
+    if len(found) <= _MANIFOLD_POINTS:
+        return [(normal, depth) for _point, normal, depth in found]
+    contacts = [Contact(0, 1, np.array(point) + field.center,
+                        -np.array(normal, dtype='d'), float(depth))
+                for point, normal, depth in found]
+    return [((float(-c.normal[0]), float(-c.normal[1]), float(-c.normal[2])), c.depth)
+            for c in _reduce_manifold(contacts, _MANIFOLD_POINTS)]
 
 
 def _vertices_of(proxy: Proxy) -> np.ndarray:

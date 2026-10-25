@@ -26,7 +26,15 @@ from typing import Any, cast
 import numpy as np
 
 from . import collide, model
-from .body import BoxProxy, CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy, pose_key
+from .body import (
+    BoxProxy,
+    CapsuleProxy,
+    HeightFieldProxy,
+    Proxy,
+    TriangleMeshProxy,
+    make_proxy,
+    pose_key,
+)
 from .collisionquery import CollisionQuery, DynamicBody, WorldQuery
 from .contactevents import ContactEvent
 from .mathutil import Vec, flat_length, length
@@ -39,6 +47,7 @@ UP = np.array([0.0, 1.0, 0.0])
 #: per comparison.
 _depth_of = operator.itemgetter(1)
 IDENT = np.array([0.0, 0.0, 0.0, 1.0])
+IDENTITY = np.eye(3)
 FLAT = np.array([1.0, 0.0, 1.0])
 
 
@@ -71,6 +80,33 @@ class _StaticBoxes:
         hit, pushes, depths = collide.capsule_box_pushes(capsule, self._centers, self._halves,
                                                          self._rotations)
         return {self.rows[k]: (pushes[k], float(depths[k])) for k in np.flatnonzero(hit).tolist()}
+
+
+class _Gather:
+    """The static bodies near a box, gathered once for the depenetrations that fit in it.
+
+    ``grounds`` is the height field of each body when every one of them is a
+    height field, else None.
+    """
+
+    __slots__ = ('_bounds', 'bodies', 'boxes', 'grounds', 'high', 'low')
+
+    def __init__(self, low: np.ndarray, high: np.ndarray, bodies: list[int], proxy_of: Any) -> None:
+        self.low, self.high = low, high
+        self._bounds = (*low.tolist(), *high.tolist())
+        self.bodies = bodies
+        self.boxes = _StaticBoxes(bodies, proxy_of)
+        proxies = [proxy_of(j) for j in bodies]
+        self.grounds: list[HeightFieldProxy] | None = [
+            proxy for proxy in proxies if isinstance(proxy, HeightFieldProxy)]
+        if len(self.grounds) != len(bodies):
+            self.grounds = None
+
+    def holds(self, lo: tuple[float, float, float], hi: tuple[float, float, float]) -> bool:
+        """Whether the box ``lo`` to ``hi`` lies inside the box the bodies were gathered for."""
+        x0, y0, z0, x1, y1, z1 = self._bounds
+        return (lo[0] >= x0 and lo[1] >= y0 and lo[2] >= z0
+                and hi[0] <= x1 and hi[1] <= y1 and hi[2] <= z1)
 
 class CharacterState(enum.Enum):
     """What a character is doing, as :attr:`CharacterController.state` reports it.
@@ -263,9 +299,13 @@ class CharacterController:
         # `_near_triangles`.
         self._near_cache: dict[int, tuple[np.ndarray, np.ndarray,
                                           np.ndarray]] = {}
-        #: The static bodies gathered during the update under way, as ``(low, high,
-        #: bodies, boxes)``; None outside an update. See :meth:`_keep_gathers`.
-        self._gathers: list[tuple[np.ndarray, np.ndarray, list[int], _StaticBoxes]] | None = None
+        #: The static bodies gathered during the update under way; None outside an
+        #: update. See :meth:`_keep_gathers`.
+        self._gathers: list[_Gather] | None = None
+        #: Whether a capsule among height fields alone is collided with them with
+        #: numbers (:meth:`_push_out`). False collides it through
+        #: :func:`~omi_physics.collide.collide`, with the same answer, for comparison.
+        self.ground_fast_path = True
         #: The character's body in the world, or None. A sensor
         #: (:meth:`~omi_physics.world.PhysicsWorld.is_sensor`): it enters
         #: trigger volumes and its touches with moving bodies are reported,
@@ -751,7 +791,14 @@ class CharacterController:
                 return True
             near = [j for j in near if j not in boxes.rows]
         for j in near:
-            if collide.collide(0, 1, proxy, self._static_proxy(j)):
+            other = self._static_proxy(j)
+            if (self.ground_fast_path and isinstance(other, HeightFieldProxy)
+                    and isinstance(proxy, CapsuleProxy) and np.array_equal(proxy.R, IDENTITY)):
+                x, y, z = proxy.center.tolist()
+                if collide.upright_capsule_heightfield_pushes(other, x, y, z, proxy.half_height,
+                                                              proxy.radius):
+                    return True
+            elif collide.collide(0, 1, proxy, other):
                 return True
         return any(collide.collide(0, 1, proxy, obstacle.proxy)
                    for obstacle in self._obstacles)
@@ -800,19 +847,17 @@ class CharacterController:
         """
         self._gathers = []
 
-    def _gather_statics(self, lo: np.ndarray, hi: np.ndarray
-                        ) -> tuple[np.ndarray, np.ndarray, list[int], _StaticBoxes]:
+    def _gather_statics(self, lo: np.ndarray, hi: np.ndarray) -> '_Gather':
         """The static bodies near the box ``lo`` to ``hi``, from a gather this update kept if one holds it."""
         kept = self._gathers
         if kept is not None:
             for gathered in kept:
-                low, high = gathered[0], gathered[1]
+                low, high = gathered.low, gathered.high
                 if (lo[0] >= low[0] and lo[1] >= low[1] and lo[2] >= low[2]
                         and hi[0] <= high[0] and hi[1] <= high[1] and hi[2] <= high[2]):
                     return gathered
         low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
-        near = list(self._static_bodies(low, high))
-        gathered = (low, high, near, _StaticBoxes(near, self._static_proxy))
+        gathered = _Gather(low, high, list(self._static_bodies(low, high)), self._static_proxy)
         if kept is not None:
             kept.insert(0, gathered)
             del kept[_GATHERS_KEPT:]
@@ -829,54 +874,47 @@ class CharacterController:
         without the over-push that summing many near-parallel contacts on a curved
         surface would cause — which otherwise springs the capsule back out and
         makes it bounce off columns instead of sliding/stopping.
+
+        Where the static bodies near the capsule are all height fields and no
+        dynamic body is near, the contacts are those of the spheres down the
+        capsule's axis against each ground, found with numbers
+        (:func:`~omi_physics.collide.upright_capsule_heightfield_pushes`): no
+        capsule proxy, box test or contact object is made.
         """
-        pos = np.asarray(position, dtype='d').copy()
-        ground_n: np.ndarray | None = None
+        px, py, pz = (float(v) for v in np.asarray(position, dtype='d'))
+        radius = self.caps.radius
+        half = 0.5 * max(self.height - 2 * radius, 1e-3)
+        fast = self.ground_fast_path
+        slope_cosine = self._slope_cos()
+        ground_n: tuple[float, float, float] | np.ndarray | None = None
         ground_source: int | None = None
-        gathered: tuple[np.ndarray, np.ndarray, list[int], _StaticBoxes] | None = None
+        gathered: _Gather | None = None
         for _ in range(iterations):
-            contacts: list[tuple[np.ndarray, float]] = []
-            capsule = cast(CapsuleProxy, self._proxy(pos))
-            lo, hi = capsule.aabb()
+            # The capsule's box, as CapsuleProxy.aabb finds it.
+            lo = (px - radius, (py - half) - radius, pz - radius)
+            hi = (px + radius, (py + half) + radius, pz + radius)
             # The static bodies near the capsule, asked for once and kept while
             # the corrections leave it inside the box they were gathered for.
-            if gathered is None or np.any(lo < gathered[0]) or np.any(hi > gathered[1]):
-                gathered = self._gather_statics(lo, hi)
-            boxed = gathered[3].pushes(capsule)
-            for j in gathered[2]:
-                found = boxed.get(j)
-                if found is not None:
-                    contacts.append(found)
-                    continue
-                Pj = self._static_proxy(j)
-                if isinstance(Pj, BoxProxy):
-                    continue
-                if isinstance(Pj, TriangleMeshProxy):
-                    # The level, which is nearly always every contact there is.
-                    # Straight to the two numbers this loop reads, so a frame
-                    # does not build twenty thousand contact objects to look at
-                    # a normal and a depth and drop them.
-                    pushes, depths = collide.capsule_mesh_pushes(
-                        capsule, Pj, self._near_triangles(j, Pj, capsule))
-                    contacts.extend(zip(pushes, depths, strict=True))
-                    continue
-                for c in collide.collide(0, 1, capsule, Pj):
-                    contacts.append((-c.normal, c.depth))   # from world into char
-            # Dynamic bodies come after the static world, so a contact tie goes
-            # to the body that can carry the capsule.
-            first_dynamic = len(contacts)
+            if gathered is None or not gathered.holds(lo, hi):
+                gathered = self._gather_statics(np.array(lo), np.array(hi))
+            contacts: list[tuple[Any, float]] = []
             owners: list[int] = []
-            for obstacle in self._obstacles:
-                for c in collide.collide(0, 1, capsule, obstacle.proxy):
-                    contacts.append((-c.normal, c.depth))
-                    owners.append(obstacle.body)
+            grounds = gathered.grounds if fast and not self._obstacles else None
+            if grounds is not None:
+                for field in grounds:
+                    contacts.extend(collide.upright_capsule_heightfield_pushes(
+                        field, px, py, pz, half, radius))
+                first_dynamic = len(contacts)
+            else:
+                first_dynamic = self._contacts_with_everything(
+                    gathered, np.array([px, py, pz]), contacts, owners)
             # Ground is a surface this capsule could stand on, which is what
             # ``maxSlope`` says.  A fixed threshold here would disagree with it
             # -- and a face counted as ground but too steep to walk is one the
             # player can climb, since every part of the controller that seats
             # or steps trusts this.
             for index, (push, _depth) in enumerate(contacts):
-                if self._walkable(push):
+                if float(push[1]) >= slope_cosine:
                     ground_n = push
                     ground_source = (owners[index - first_dynamic]
                                      if index >= first_dynamic else None)
@@ -891,15 +929,60 @@ class CharacterController:
             # answer is the same to the bit.
             cx = cy = cz = 0.0
             for push, depth in contacts:
-                px, py, pz = float(push[0]), float(push[1]), float(push[2])
-                remaining = depth + 1e-4 - (cx * px + cy * py + cz * pz)
+                nx, ny, nz = float(push[0]), float(push[1]), float(push[2])
+                remaining = depth + 1e-4 - (cx * nx + cy * ny + cz * nz)
                 if remaining > 0:
-                    cx += px * remaining
-                    cy += py * remaining
-                    cz += pz * remaining
-            pos = pos + np.array([cx, cy, cz])
+                    cx += nx * remaining
+                    cy += ny * remaining
+                    cz += nz * remaining
+            px, py, pz = px + cx, py + cy, pz + cz
         self._ground_source = ground_source
-        return pos, ground_n
+        normal = None if ground_n is None else np.array(ground_n, dtype='d')
+        return np.array([px, py, pz]), normal
+
+    def _contacts_with_everything(self, gathered: '_Gather', pos: np.ndarray,
+                                  contacts: list[tuple[Any, float]], owners: list[int]) -> int:
+        """Add the capsule's contacts at ``pos`` with the bodies of ``gathered`` and the obstacles.
+
+        Each is ``(push, depth)``, ``push`` the unit normal from the surface into
+        the capsule; the owner of each obstacle contact goes to ``owners``.
+        Returns how many contacts come before the obstacles' own.
+        """
+        capsule = cast(CapsuleProxy, self._proxy(pos))
+        boxed = gathered.boxes.pushes(capsule)
+        fast = self.ground_fast_path
+        for j in gathered.bodies:
+            found = boxed.get(j)
+            if found is not None:
+                contacts.append(found)
+                continue
+            Pj = self._static_proxy(j)
+            if isinstance(Pj, BoxProxy):
+                continue
+            if isinstance(Pj, TriangleMeshProxy):
+                # The level, which is nearly always every contact there is.
+                # Straight to the two numbers this loop reads, so a frame
+                # does not build twenty thousand contact objects to look at
+                # a normal and a depth and drop them.
+                pushes, depths = collide.capsule_mesh_pushes(
+                    capsule, Pj, self._near_triangles(j, Pj, capsule))
+                contacts.extend(zip(pushes, depths, strict=True))
+                continue
+            if fast and isinstance(Pj, HeightFieldProxy):
+                contacts.extend(collide.upright_capsule_heightfield_pushes(
+                    Pj, float(pos[0]), float(pos[1]), float(pos[2]),
+                    capsule.half_height, capsule.radius))
+                continue
+            for c in collide.collide(0, 1, capsule, Pj):
+                contacts.append((-c.normal, c.depth))   # from world into char
+        # Dynamic bodies come after the static world, so a contact tie goes
+        # to the body that can carry the capsule.
+        first_dynamic = len(contacts)
+        for obstacle in self._obstacles:
+            for c in collide.collide(0, 1, capsule, obstacle.proxy):
+                contacts.append((-c.normal, c.depth))
+                owners.append(obstacle.body)
+        return first_dynamic
 
     # -- movement --------------------------------------------------------
     #: How much of the capsule's own extent it may cross in one collision step.
@@ -1520,14 +1603,18 @@ class CharacterController:
         [-1, 1], so a slope within ``maxSlope`` is exactly a normal whose
         component along up is at or above the cosine of it -- the same question
         without the two transcendentals, which matters because depenetration
-        asks it of every contact it resolves. The cosine is kept against the
-        limit it was taken from, so a capability changed mid-run is picked up.
+        asks it of every contact it resolves.
         """
+        return float(normal[1]) >= self._slope_cos()
+
+    def _slope_cos(self) -> float:
+        """The cosine of ``maxSlope``, kept against the limit it was taken from,
+        so a capability changed mid-run is picked up."""
         limit = self.caps.maxSlope
         if limit != self._slope_limit:
             self._slope_limit = float(limit)
             self._slope_cosine = math.cos(math.radians(self._slope_limit))
-        return float(np.dot(normal, UP)) >= self._slope_cosine
+        return self._slope_cosine
 
     #: How far below itself the capsule looks for floor when nothing touched it
     #: this step.  Enough to bridge the gap a step opens under a walker, small

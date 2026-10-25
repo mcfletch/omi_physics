@@ -396,6 +396,15 @@ body in y for the broad phase, which an unbounded field cannot be.
   narrower than `feature` and a box wider than 7 features can be missed
   between samples; set `feature` to the size of the smallest bump that
   matters.
+- A character among height fields alone, with no moving body near, is
+  collided with them with numbers: its capsule is the column of spheres down
+  its axis (`collide.upright_capsule_heightfield_pushes`), and no capsule
+  proxy or contact object is made. On a grid, a sphere is left out when it is
+  higher above the ground than a bound taken from the steepest slope within
+  reach of it (`heightfield.local_clearance`), so on a gentle slope a
+  standing capsule slides one sphere and not five. The pose agrees with the
+  contact solver's to 1e-9 m a step; `CharacterController.ground_fast_path =
+  False` collides it through `collide.collide` instead.
 - A ray is marched in steps of `feature` over the stretch inside the extent
   (at most 131,072 steps) and the step that crosses the surface is bisected.
 - The shape holds no mass: a dynamic or kinematic body cannot hold one

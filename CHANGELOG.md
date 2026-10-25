@@ -29,6 +29,12 @@ compatibility promise.
   spheres too far above a grid to touch it and finds the few left one at a time with numbers
   (`GridSurface.sphere_contact`): a capsule standing on a grid ground costs 4 times less to collide.
   The slide down the tangent planes for arrays is `sphere_contacts_by_sliding`.
+- A character among height fields alone, with no dynamic body near, is collided with them with
+  numbers (`collide.upright_capsule_heightfield_pushes`, `HeightSurface.column_contacts`): no
+  capsule proxy, box test or contact object. On a grid, spheres higher than
+  `heightfield.local_clearance` of the steepest slope within reach are left out. The controller's
+  share of a step on a hill grid is less than half what it was. Poses agree with the contact solver's to 1e-9 m a step;
+  `CharacterController.ground_fast_path = False` turns it off.
 
 ### Fixed
 

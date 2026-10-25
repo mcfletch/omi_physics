@@ -325,6 +325,9 @@ class HeightFieldProxy:
         self.surface = surface
         self.center = np.asarray(center, dtype='d')
         self.R = np.asarray(rotation, dtype='d')
+        #: Whether the field is not turned, so its frame differs from the world's by
+        #: :attr:`center` alone.
+        self.upright = bool(np.array_equal(self.R, np.eye(3)))
 
     def to_local(self, points: np.ndarray) -> np.ndarray:
         """World ``points`` ``(..., 3)`` in the field's frame."""

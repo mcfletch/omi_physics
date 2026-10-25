@@ -39,6 +39,15 @@ _FOOTPRINT_SAMPLES = 7
 
 _TINY = 1e-12
 
+#: A touching sphere of a column (:meth:`HeightSurface.column_contacts`): the contact point, the
+#: unit normal pointing out of the ground and the penetration along it.
+ColumnContact = tuple[tuple[float, float, float], tuple[float, float, float], float]
+
+
+def _triple(row: np.ndarray) -> tuple[float, float, float]:
+    x, y, z = row.tolist()
+    return float(x), float(y), float(z)
+
 
 class HeightSurface:
     """The interface of a height field: heights, normals, bounds and a ray cast.
@@ -71,6 +80,19 @@ class HeightSurface:
     def aabb(self) -> tuple[np.ndarray, np.ndarray]:
         """The local bounding box as ``(low, high)`` corners."""
         return self.low.copy(), self.high.copy()
+
+    def column_contacts(self, x: float, z: float, heights: list[float], radius: float
+                        ) -> list[ColumnContact]:
+        """The touching spheres of ``radius`` at ``(x, y, z)``, one for each ``y`` of ``heights``.
+
+        Returns ``(point, normal, depth)`` for each touching sphere, in the order
+        of ``heights``: the contacts :func:`sphere_contacts` finds for those
+        spheres. An upright capsule is such a column of spheres.
+        """
+        centres = np.array([(x, y, z) for y in heights], dtype='d').reshape(-1, 3)
+        touching, points, normals, depths = sphere_contacts(self, centres, radius)
+        return [(_triple(points[k]), _triple(normals[k]), float(depths[k]))
+                for k in np.flatnonzero(touching).tolist()]
 
     def ray(self, origin: np.ndarray, heading: np.ndarray,
             limit: float) -> tuple[float, np.ndarray] | None:
@@ -170,6 +192,8 @@ class GridSurface(HeightSurface):
         along = float(np.abs(np.diff(grid, axis=0)).max() / step[1])
         self.lipschitz = math.hypot(across, along)
         self._numbers: tuple[list[list[float]], int, int, float, float, float, float, float] | None = None
+        #: :meth:`_steepest_table` by its reach in cells across and along.
+        self._steepest: dict[tuple[int, int], list[list[float]]] = {}
 
     def sphere_contact(self, cx: float, cy: float, cz: float, radius: float
                        ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float], float]:
@@ -256,7 +280,23 @@ class GridSurface(HeightSurface):
         until the last has settled, so the answer is the same to the bit; for
         a capsule's few spheres it is several times as fast.
         """
-        points = centres.tolist()
+        found = self._slide_together(centres.tolist(), radius)
+        count = len(found)
+        touching = np.zeros(count, dtype=bool)
+        contact = np.zeros((count, 3))
+        normals = np.zeros((count, 3))
+        depths = np.zeros(count)
+        for k, (inside, point, normal, depth) in enumerate(found):
+            touching[k] = inside
+            contact[k] = point
+            normals[k] = normal
+            depths[k] = depth
+        return touching, contact, normals, depths
+
+    def _slide_together(self, points: list[list[float]], radius: float
+                        ) -> list[tuple[bool, tuple[float, float, float],
+                                        tuple[float, float, float], float]]:
+        """Each sphere's ``(touching, point, normal, depth)``, slid until the last settles."""
         xs = [point[0] for point in points]
         zs = [point[2] for point in points]
         found: list[tuple[bool, float, float, float, float, float, float, float]] = []
@@ -279,19 +319,83 @@ class GridSurface(HeightSurface):
                 zs.append(foot_z)
             if moved < _SETTLED:
                 break
-        count = len(points)
-        touching = np.zeros(count, dtype=bool)
-        contact = np.zeros((count, 3))
-        normals = np.zeros((count, 3))
-        depths = np.zeros(count)
-        for k, (inside, x, y, z, nx, ny, nz, distance) in enumerate(found):
+        out = []
+        for inside, x, y, z, nx, ny, nz, distance in found:
             depth = radius - distance
             half = 0.5 * depth
-            touching[k] = inside and depth > 0.0
-            contact[k] = (x - nx * half, y - ny * half, z - nz * half)
-            normals[k] = (nx, ny, nz)
-            depths[k] = depth
-        return touching, contact, normals, depths
+            out.append((inside and depth > 0.0, (x - nx * half, y - ny * half, z - nz * half),
+                        (nx, ny, nz), depth))
+        return out
+
+    def column_contacts(self, x: float, z: float, heights: list[float], radius: float
+                        ) -> list[ColumnContact]:
+        """:meth:`HeightSurface.column_contacts` as :func:`sphere_contacts` finds them.
+
+        The spheres share their ``(x, z)``, so the height under them is read once.
+        """
+        bound = self.lipschitz
+        if bound is None or len(heights) > _WITH_NUMBERS:
+            return super().column_contacts(x, z, heights, radius)
+        reach = 2.0 * radius * math.sqrt(1.0 + bound * bound)
+        ground = self.height_at(x, z)
+        near = [y for y in heights if y - ground < reach]
+        nearer = near
+        if near:
+            limit = self._local_clearance(x, z, radius, reach)
+            nearer = [y for y in near if y - ground < limit]
+        if len(nearer) > _ONE_BY_ONE or (nearer is near and len(near) > _ONE_BY_ONE):
+            found = self._slide_together([[x, y, z] for y in nearer], radius)
+        else:
+            found = [self.sphere_contact(x, y, z, radius) for y in nearer]
+        return [(point, normal, depth) for touching, point, normal, depth in found if touching]
+
+    def _local_clearance(self, x: float, z: float, radius: float, reach: float) -> float:
+        """How high above the ground at ``(x, z)`` a sphere of ``radius`` there cannot touch it.
+
+        The bound is :func:`local_clearance` of the steepest slope within ``reach``
+        of the point (:meth:`_steepest_near`). ``reach`` is the height under which
+        :func:`sphere_contacts` slides a sphere at all, and the slide down the
+        tangent planes of a sphere lower than that stays within ``reach`` of the
+        point while the slope is gentle enough for a bound to exist; where none
+        does, ``inf``.
+        """
+        steepest = self._steepest_near(x, z, reach)
+        return local_clearance(steepest, radius) if clearance_spread(steepest) <= 1.0 else math.inf
+
+    def _steepest_near(self, x: float, z: float, reach: float) -> float:
+        """The steepest slope of the cells within ``reach`` of ``(x, z)``, as a rise over a run."""
+        _grid, rows, columns, ox, _oy, oz, sx, sz = self._frame()
+        wide = (math.ceil(reach / sx), math.ceil(reach / sz))
+        table = self._steepest.get(wide)
+        if table is None:
+            table = self._steepest[wide] = self._steepest_table(*wide)
+        gx = (x - ox) / sx
+        gz = (z - oz) / sz
+        if not (0.0 <= gx <= columns - 1 and 0.0 <= gz <= rows - 1):
+            return math.inf
+        return table[min(int(gz), rows - 2)][min(int(gx), columns - 2)]
+
+    def _steepest_table(self, across: int, along: int) -> list[list[float]]:
+        """Per cell, the steepest slope of the cells ``across`` columns and ``along`` rows away.
+
+        A cell's slope is bounded by the steepest of its edges in x and in z,
+        as :attr:`lipschitz` is for the whole grid.
+        """
+        grid, (sx, sz) = self.grid, self.spacing
+        dx = np.abs(np.diff(grid, axis=1)) / sx
+        dz = np.abs(np.diff(grid, axis=0)) / sz
+        cell_x = np.maximum(dx[:-1, :], dx[1:, :])
+        cell_z = np.maximum(dz[:, :-1], dz[:, 1:])
+        slope = np.hypot(cell_x, cell_z)
+        rows, columns = slope.shape
+        padded = np.pad(slope, ((along, along), (across, across)), constant_values=0.0)
+        wide = np.zeros((rows + 2 * along, columns))
+        for shift in range(2 * across + 1):
+            np.maximum(wide, padded[:, shift:shift + columns], out=wide)
+        out = np.zeros((rows, columns))
+        for shift in range(2 * along + 1):
+            np.maximum(out, wide[shift:shift + rows, :], out=out)
+        return out.tolist()
 
     def _cell(self, x: np.ndarray, z: np.ndarray
               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -435,6 +539,76 @@ class FunctionSurface(HeightSurface):
         stencil = self.heights(np.stack((x, x + d, x - d, x, x)), np.stack((z, z, z, z + d, z - d)))
         return stencil[0], self._differenced(*stencil[1:])
 
+    def column_contacts(self, x: float, z: float, heights: list[float], radius: float
+                        ) -> list[ColumnContact]:
+        """:meth:`HeightSurface.column_contacts`, the spheres slid together as
+        :func:`sphere_contacts_by_sliding` slides them, with numbers.
+
+        Each distinct point is sampled once a slide, and the spheres share the
+        first, the point under them all, so a column on level ground costs one
+        call of the function for the height and its four differences.
+        """
+        feet_x = [x] * len(heights)
+        feet_z = [z] * len(heights)
+        found: list[tuple[bool, float, float, float, float, float, float, float]] = []
+        for _ in range(_SLIDES):
+            samples = self._sample_points(feet_x, feet_z)
+            found = []
+            moved = 0.0
+            for y, foot_x, foot_z, (height, nx, ny, nz) in zip(
+                    heights, feet_x, feet_z, samples, strict=True):
+                inside = math.isfinite(height)
+                ground_y = height if inside else 0.0
+                distance = (x - foot_x) * nx + (y - ground_y) * ny + (z - foot_z) * nz
+                found.append((inside, foot_x, ground_y, foot_z, nx, ny, nz, distance))
+            feet_x, feet_z = [], []
+            for inside, foot_x, _y, foot_z, nx, _ny, nz, distance in found:
+                next_x = x - distance * nx if inside else foot_x
+                next_z = z - distance * nz if inside else foot_z
+                moved = max(moved, abs(next_x - foot_x), abs(next_z - foot_z))
+                feet_x.append(next_x)
+                feet_z.append(next_z)
+            if moved < _SETTLED:
+                break
+        out: list[ColumnContact] = []
+        for inside, foot_x, ground_y, foot_z, nx, ny, nz, distance in found:
+            depth = radius - distance
+            if inside and depth > 0.0:
+                half = 0.5 * depth
+                out.append(((foot_x - nx * half, ground_y - ny * half, foot_z - nz * half),
+                            (nx, ny, nz), depth))
+        return out
+
+    def _sample_points(self, xs: list[float], zs: list[float]
+                       ) -> list[tuple[float, float, float, float]]:
+        """:meth:`sample` at each ``(x, z)`` as numbers ``(height, nx, ny, nz)``.
+
+        Each distinct point is asked for once.
+        """
+        index: dict[tuple[float, float], int] = {}
+        for point in zip(xs, zs, strict=True):
+            index.setdefault(point, len(index))
+        points = list(index)
+        px = np.array([p[0] for p in points], dtype='d')
+        pz = np.array([p[1] for p in points], dtype='d')
+        answers: list[tuple[float, float, float, float]] = []
+        if self._normal is not None:
+            heights, normals = self.heights(px, pz).tolist(), self.normals(px, pz).tolist()
+            answers = [(height, nx, ny, nz)
+                       for height, (nx, ny, nz) in zip(heights, normals, strict=True)]
+        else:
+            d = self.delta
+            stencil = self.heights(np.stack((px, px + d, px - d, px, px)),
+                                   np.stack((pz, pz, pz, pz + d, pz - d))).tolist()
+            for height, east, west, north, south in zip(*stencil, strict=True):
+                slope_x = (east - west) / (2 * d)
+                slope_z = (north - south) / (2 * d)
+                if not (math.isfinite(slope_x) and math.isfinite(slope_z)):
+                    slope_x = slope_z = 0.0
+                length = math.sqrt(slope_x * slope_x + 1.0 + slope_z * slope_z)
+                answers.append((height, -slope_x / length, 1.0 / length, -slope_z / length))
+        return [answers[index[point]] for point in zip(xs, zs, strict=True)]
+
     def _differenced(self, east: np.ndarray, west: np.ndarray, north: np.ndarray,
                      south: np.ndarray) -> np.ndarray:
         """The unit normal from the heights :attr:`delta` either side along x and along z."""
@@ -448,6 +622,45 @@ class FunctionSurface(HeightSurface):
         slope_z = np.where(flat, 0.0, slope_z)
         out = np.stack((-slope_x, np.ones_like(slope_x), -slope_z), axis=-1)
         return out / np.linalg.norm(out, axis=-1, keepdims=True)
+
+
+#: The steepest slope, as a rise over a run, under which :func:`local_clearance` has a bound.
+_GENTLE = 0.45
+
+
+def clearance_spread(slope: float) -> float:
+    """How far, as a multiple of a sphere's height above the ground, the slide down the tangent
+    planes can carry the point it samples from the point under the sphere, on ground no steeper than
+    ``slope``; ``inf`` past :data:`_GENTLE`.
+
+    Each slide moves the sampled point to the foot of the perpendicular from the centre to the
+    tangent plane, at most the distance to the plane times ``slope / sqrt(1 + slope**2)`` from the
+    point under the centre, and that distance grows by at most ``1 + slope`` times the move.
+    Over the four moves of :data:`_SLIDES` slides that sums to the value returned.
+    """
+    if slope > _GENTLE:
+        return math.inf
+    share = slope / math.sqrt(1.0 + slope * slope)
+    grow = share * (1.0 + slope)
+    return share * (1.0 + grow + grow * grow + grow * grow * grow)
+
+
+def local_clearance(slope: float, radius: float) -> float:
+    """The height above the ground under it from which a sphere of ``radius`` cannot touch ground no
+    steeper than ``slope`` within :func:`clearance_spread` times that height; ``inf`` where no
+    height is.
+
+    At height ``H`` the sampled point stays within ``e = H * clearance_spread(slope)``, where the
+    ground is at most ``slope * e`` higher and its tangent plane tilts toward the centre by at most
+    ``slope * e``, so the distance to the plane is at least
+    ``(H - 2 * slope * e) / sqrt(1 + slope**2)``.
+    The height returned makes that ``radius``, with a margin for rounding.
+    """
+    spread = clearance_spread(slope)
+    room = 1.0 - 2.0 * slope * spread
+    if room <= 0.0:
+        return math.inf
+    return radius * math.sqrt(1.0 + slope * slope) / room * (1.0 + 1e-9) + 1e-9
 
 
 #: The most spheres a grid finds contacts for one at a time, with numbers; more are found together.
