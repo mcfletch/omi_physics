@@ -551,8 +551,9 @@ class FunctionSurface(HeightSurface):
         feet_x = [x] * len(heights)
         feet_z = [z] * len(heights)
         found: list[tuple[bool, float, float, float, float, float, float, float]] = []
-        for _ in range(_SLIDES):
-            samples = self._sample_points(feet_x, feet_z)
+        for slide in range(_SLIDES):
+            samples = (self._sample_points(feet_x, feet_z) if slide
+                       else [self._sample_one(x, z)] * len(heights))
             found = []
             moved = 0.0
             for y, foot_x, foot_z, (height, nx, ny, nz) in zip(
@@ -578,6 +579,32 @@ class FunctionSurface(HeightSurface):
                 out.append(((foot_x - nx * half, ground_y - ny * half, foot_z - nz * half),
                             (nx, ny, nz), depth))
         return out
+
+    def _sample_one(self, x: float, z: float) -> tuple[float, float, float, float]:
+        """:meth:`sample` at one point as numbers ``(height, nx, ny, nz)``.
+
+        The height and the four of its central difference are asked for in one
+        call where all five are inside the extent.
+        """
+        d = self.delta
+        low, high = self.low, self.high
+        if (self._normal is not None or not (low[0] <= x - d and x + d <= high[0]
+                                             and low[2] <= z - d and z + d <= high[2])):
+            return self._sample_points([x], [z])[0]
+        xs = (x, x + d, x - d, x, x)
+        zs = (z, z, z, z + d, z - d)
+        if self._vectorized:
+            height, east, west, north, south = np.asarray(
+                self._sample(np.array(xs), np.array(zs)), dtype='d').tolist()
+        else:
+            height, east, west, north, south = (float(np.asarray(self._sample(a, b), dtype='d'))
+                                                for a, b in zip(xs, zs, strict=True))
+        slope_x = (east - west) / (2 * d)
+        slope_z = (north - south) / (2 * d)
+        if not (math.isfinite(slope_x) and math.isfinite(slope_z)):
+            slope_x = slope_z = 0.0
+        length = math.sqrt(slope_x * slope_x + 1.0 + slope_z * slope_z)
+        return height, -slope_x / length, 1.0 / length, -slope_z / length
 
     def _sample_points(self, xs: list[float], zs: list[float]
                        ) -> list[tuple[float, float, float, float]]:
