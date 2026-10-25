@@ -616,6 +616,8 @@ class PhysicsWorld:
     def _record_contacts(self, solver: Any, contacts: 'list[Contact]',
                          excluded: 'list[Contact]') -> None:
         """Run the contact tracker over the step just solved, and deliver its events."""
+        if not contacts and not excluded and not self._tracker.tracking:
+            return
         batch = getattr(solver, 'last_batch', None)
         if batch is None or getattr(solver, 'last_batch_step', None) != self.step_count:
             batch = ContactBatch.from_contacts(contacts)

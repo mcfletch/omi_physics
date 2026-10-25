@@ -447,6 +447,8 @@ class ContactTracker:
         without an ``'end'``, since nothing says the two parted, and a contact
         filter's verdict on it is dropped with it.
         """
+        if not len(batch.a) and not len(self._keys):
+            return []                       # nothing touching, then or now
         step, time = world.step_count, world.time
         now = _group(batch) if len(batch.a) else None
         now_keys = now.keys if now is not None else np.zeros(0, dtype=np.int64)
