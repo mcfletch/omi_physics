@@ -331,9 +331,19 @@ class CharacterController:
         if height != before:
             self.position = self.position + UP * (0.5 * (height - before))
 
+    #: How far the capsule that is tested for standing up is raised, in metres.
+    #: A capsule resting on a slope touches it, and a touch reads as an overlap
+    #: to the collision test; the raise leaves the contact alone and asks only
+    #: whether something is in the way.
+    STAND_CLEARANCE = 0.02
+
     def _blocked_at(self, height: float) -> bool:
-        """Whether a capsule of ``height`` on the same feet would overlap something."""
-        lift = 0.5 * (height - self.height)
+        """Whether a capsule of ``height`` on the same feet would overlap something.
+
+        The test capsule is raised by :data:`STAND_CLEARANCE`, so the ground
+        the character stands on does not count as in the way.
+        """
+        lift = 0.5 * (height - self.height) + self.STAND_CLEARANCE
         return self._overlaps(make_proxy(self._shape(height), self.position + UP * lift, IDENT))
 
     def _shape(self, height: float | None = None) -> model.Shape:
@@ -596,12 +606,7 @@ class CharacterController:
 
     def _can_stand(self) -> bool:
         """No static geometry where the standing capsule's head would be."""
-        stand = self._proxy(height=self.caps.standHeight)
-        # raise so the feet stay put while the head extends upward
-        lift = 0.5 * (self.caps.standHeight - self.caps.crouchHeight)
-        stand = make_proxy(self._shape(self.caps.standHeight),
-                           self.position + UP * lift, IDENT)
-        return not self._overlaps(stand)
+        return not self._blocked_at(self.caps.standHeight)
 
     # -- world queries ---------------------------------------------------
     def _static_bodies(self, lo: np.ndarray | None = None,
