@@ -18,6 +18,14 @@ compatibility promise.
 
 ### Added
 
+- `CharacterController` integrates gravity exactly, so a jump reaches
+  `jumpHeight` and lands after `2 sqrt(2 h / g)` at every step size.
+- `CharacterController.slide`, `knock_down`, `get_up`, `knockback`, `state`
+  (`CharacterState`), `landing`, `standing_on` and `pushing`.
+  `CharacterCapabilities` gains `mass`, `pushMass` and `pushSpeed`.
+- `omi_physics.collisionquery`: the `CollisionQuery` protocol and `WorldQuery`.
+  `CharacterController` takes either a `PhysicsWorld` or a `CollisionQuery`, and
+  treats dynamic bodies as obstacles, floors and pushable weights.
 - `ThreadedSimulation.post(fn)` and `call(fn)`: a command inbox any thread
   writes to, run on the simulation thread at the start of the next tick.
   `call` answers a `concurrent.futures.Future`. `wait_steps(n, timeout)` waits

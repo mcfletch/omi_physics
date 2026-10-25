@@ -16,7 +16,7 @@ import gc
 
 import numpy as np
 
-from omi_physics import character, model
+from omi_physics import collisionquery, model
 from omi_physics.character import CharacterCapabilities, CharacterController
 from omi_physics.world import PhysicsWorld
 
@@ -60,10 +60,10 @@ def test_the_shared_cache_goes_when_the_world_does():
     w = world()
     floor(w)
     walker(w).update(1.0 / 60.0)
-    assert w in character._STATIC_PROXIES
+    assert w in collisionquery.STATIC_PROXIES
     del w
     gc.collect()
-    assert len(character._STATIC_PROXIES) == 0
+    assert len(collisionquery.STATIC_PROXIES) == 0
 
 
 def test_sharing_does_not_change_where_anybody_stands():

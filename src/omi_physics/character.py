@@ -8,25 +8,29 @@ never leaves the user stuck in the ground.
 
 The capsule is *kinematic* (move-and-slide against the world's static colliders)
 rather than a dynamic rigid body — the standard approach for responsive avatars.
+It reads the world through a :class:`~omi_physics.collisionquery.CollisionQuery`,
+so it runs against a live :class:`~omi_physics.world.PhysicsWorld` or against a
+published copy of one. Dynamic bodies are obstacles and floors for it. A body no
+heavier than ``pushMass`` that blocks a step is named in ``pushing`` for the
+caller to move with a kinematic stand-in, and a body it stands on carries it.
 Pure CPU; the GL-facing :class:`PhysicsViewPlatform` wraps this.
 """
+import enum
 import math
 import operator
 import sys
-import weakref
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 
 from . import collide, model
-from .body import CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy
+from .body import CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy, pose_key
+from .collisionquery import CollisionQuery, DynamicBody, WorldQuery
 from .contactevents import ContactEvent
 from .mathutil import Vec, flat_length, length
-
-if TYPE_CHECKING:
-    from .world import PhysicsWorld
+from .world import PhysicsWorld
 
 UP = np.array([0.0, 1.0, 0.0])
 
@@ -35,13 +39,7 @@ UP = np.array([0.0, 1.0, 0.0])
 #: per comparison.
 _depth_of = operator.itemgetter(1)
 IDENT = np.array([0.0, 0.0, 0.0, 1.0])
-
-#: World-space proxies for each world's static colliders, keyed by world and
-#: then by body index.  Weak, so an unloaded level takes its collision copy
-#: with it rather than keeping it alive for the rest of the process.  See
-#: :meth:`CharacterController._static_proxy` for why it is shared.
-_STATIC_PROXIES: "weakref.WeakKeyDictionary[Any, dict[int, Proxy]]" = \
-    weakref.WeakKeyDictionary()
+FLAT = np.array([1.0, 0.0, 1.0])
 
 
 def _depth_of_contact(contact: Any) -> float:
@@ -49,12 +47,39 @@ def _depth_of_contact(contact: Any) -> float:
     return float(contact.depth)
 
 
-def _static_proxies(world: "PhysicsWorld") -> dict[int, Proxy]:
-    """The proxy cache belonging to ``world``, made on first use."""
-    found = _STATIC_PROXIES.get(world)
-    if found is None:
-        found = _STATIC_PROXIES[world] = {}
-    return found
+class CharacterState(enum.Enum):
+    """What a character is doing, as :attr:`CharacterController.state` reports it.
+
+    The first match in this order: ``FLYING``, ``SWIMMING``, ``DOWN``,
+    ``AIRBORNE`` (off the ground), ``SLIDING``, ``CROUCHING``, ``STANDING``.
+    """
+
+    STANDING = 'standing'
+    CROUCHING = 'crouching'
+    SLIDING = 'sliding'
+    AIRBORNE = 'airborne'
+    DOWN = 'down'
+    SWIMMING = 'swimming'
+    FLYING = 'flying'
+
+
+@dataclass(slots=True)
+class _Slide:
+    """A slide under way: how long it lasts, how much of that is the rise, and how far in."""
+
+    duration: float
+    rise: float
+    elapsed: float = 0.0
+
+
+@dataclass(slots=True)
+class _Obstacle:
+    """A dynamic body as the capsule collides with it this update."""
+
+    body: int
+    proxy: Proxy
+    velocity: np.ndarray
+    light: bool
 
 
 @dataclass
@@ -107,22 +132,51 @@ class CharacterCapabilities:
     #: Seconds a refused jump is remembered for, so one asked for just before
     #: landing fires on landing rather than being dropped.  0 disables it.
     jumpBuffer: float = 0.12
+    #: Kilograms. A blow's impulse divided by this is the change in velocity
+    #: (:meth:`CharacterController.knockback`).
+    mass: float = 80.0
+    #: The heaviest dynamic body, in kilograms, that the character moves by
+    #: walking into it. A heavier one blocks the step instead.
+    pushMass: float = 200.0
+    #: Fastest, in metres a second, that a body is pushed at. None is
+    #: ``walkSpeed``.
+    pushSpeed: float | None = None
 
 
 class CharacterController:
-    """Kinematic capsule avatar: move-and-slide against the world's static colliders."""
+    """Kinematic capsule avatar: move-and-slide against the world's colliders."""
 
-    def __init__(self, world: "PhysicsWorld",
+    def __init__(self, world: PhysicsWorld | CollisionQuery,
                  capabilities: CharacterCapabilities | None = None,
                  position: Vec = (0, 0, 0), gravity: float = 9.81,
-                 body: bool = False) -> None:
+                 body: bool = False, ignore: Iterable[int] = ()) -> None:
         """Place a capsule of ``capabilities`` at ``position`` (its centre) in ``world``.
+
+        ``world`` is a :class:`~omi_physics.world.PhysicsWorld` or any
+        :class:`~omi_physics.collisionquery.CollisionQuery`.
 
         ``body`` gives the character a body in the world as well: a kinematic
         sensor capsule, standing height, that follows it on every
-        :meth:`update` and :meth:`safe_bind` (:attr:`body`).
+        :meth:`update` and :meth:`safe_bind` (:attr:`body`). It needs a
+        ``PhysicsWorld``.
+
+        ``ignore`` names bodies the capsule does not collide with, such as the
+        kinematic stand-in that carries this character's velocity into the
+        world (:attr:`pushing`).
         """
-        self.world = world
+        #: The world the character walks in, or None when it was given a
+        #: collision query in place of one.
+        self.world: PhysicsWorld | None
+        #: What the capsule collides with and casts rays at.
+        self.query: CollisionQuery
+        if isinstance(world, PhysicsWorld):
+            self.world, self.query = world, WorldQuery(world)
+        else:
+            self.world, self.query = None, world
+            if body:
+                raise ValueError('a character body needs a PhysicsWorld, '
+                                 'not a collision query')
+        self.ignore = set(ignore)
         self.caps = capabilities or CharacterCapabilities()
         self.gravity_mag = gravity
         self.position = np.asarray(position, dtype='d')     # capsule centre
@@ -172,11 +226,8 @@ class CharacterController:
         #: Metres a step-up advanced beyond what its frame was due, taken back
         #: out of the frames that follow.  See :meth:`_try_step_up`.
         self._step_debt: float = 0.0
-        # Static body -> world-space proxy, shared with every other avatar in
-        # this world.  See `_static_proxy`.
-        self._proxy_cache: dict[int, Proxy] = _static_proxies(world)
-        # Per *avatar*, unlike the proxy cache above: it is keyed on where this
-        # capsule is, and two avatars are in different places.  See
+        # Per *avatar*, unlike the proxy cache the query keeps: it is keyed on
+        # where this capsule is, and two avatars are in different places.  See
         # `_near_triangles`.
         self._near_cache: dict[int, tuple[np.ndarray, np.ndarray,
                                           np.ndarray]] = {}
@@ -191,17 +242,91 @@ class CharacterController:
         self._touching: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         #: Velocity the capsule arrived with at the start of the last update.
         self._arrived = np.zeros(3)
+        #: The dynamic body to move, with the velocity to move it at, when the
+        #: last :meth:`update` was blocked by one the character can push, else
+        #: None. A caller that keeps a kinematic stand-in for the character in
+        #: its physics world gives the stand-in that velocity, so the solver
+        #: pushes the body and the capsule follows on the next frames.
+        self.pushing: tuple[int, np.ndarray] | None = None
+        #: Whether the character is knocked down (:meth:`knock_down`).
+        self.down = False
+        #: The way the character was last told to move, as a flat unit vector.
+        self._heading = np.zeros(3)
+        self._slide: _Slide | None = None
+        #: A height that replaces the standing and crouching ones while a slide
+        #: or a knock-down holds the capsule at another.
+        self._pose_height: float | None = None
+        #: Speed the character landed at in the last :meth:`update`.
+        self._landing: float | None = None
+        #: Downward speed at the end of a free-fall step, before the ground has
+        #: its say. It becomes the landing speed if the step ends on the ground.
+        self._impact = 0.0
+        #: The dynamic bodies the capsule collides with this update.
+        self._obstacles: list[_Obstacle] = []
+        self._obstacle_of: dict[int, _Obstacle] = {}
+        #: Proxies of the dynamic bodies, kept while a body keeps its pose.
+        self._obstacle_proxies: dict[int, tuple[model.Shape, tuple, Proxy]] = {}
+        #: The dynamic body the last depenetration found the ground in, or None
+        #: for a static one.
+        self._ground_source: int | None = None
+        self._standing_on: int | None = None
         if body:
-            shape = world.add_shape(self._shape(self.caps.standHeight))
-            self.body = world.add_body(model.Motion(type=model.KINEMATIC),
-                                       collider=model.Collider(shape=shape),
-                                       position=tuple(self.position), sensor=True)
+            assert self.world is not None
+            shape = self.world.add_shape(self._shape(self.caps.standHeight))
+            self.body = self.world.add_body(model.Motion(type=model.KINEMATIC),
+                                            collider=model.Collider(shape=shape),
+                                            position=tuple(self.position), sensor=True)
 
     # -- geometry --------------------------------------------------------
     @property
     def height(self) -> float:
-        """Current capsule height (crouch or stand, per pose)."""
+        """Current capsule height (crouch or stand, per pose, or a slide's or fall's own)."""
+        if self._pose_height is not None:
+            return self._pose_height
         return self.caps.crouchHeight if self.crouching else self.caps.standHeight
+
+    @property
+    def state(self) -> CharacterState:
+        """What the character is doing, for choosing an animation."""
+        if self.flying:
+            return CharacterState.FLYING
+        if self.swimming:
+            return CharacterState.SWIMMING
+        if self.down:
+            return CharacterState.DOWN
+        if not self.grounded:
+            return CharacterState.AIRBORNE
+        if self._slide is not None:
+            return CharacterState.SLIDING
+        if self.crouching:
+            return CharacterState.CROUCHING
+        return CharacterState.STANDING
+
+    @property
+    def landing(self) -> float | None:
+        """Speed in metres a second the character landed at in the last :meth:`update`, else None.
+
+        The downward speed at the end of the step that put it on the ground
+        after being off it.
+        """
+        return self._landing
+
+    @property
+    def standing_on(self) -> int | None:
+        """The id of the dynamic body underfoot, or None on the static world or in the air."""
+        return self._standing_on if self.grounded else None
+
+    def _resize(self, height: float) -> None:
+        """Set the capsule's height, keeping its feet where they are."""
+        before = self.height
+        self._pose_height = height
+        if height != before:
+            self.position = self.position + UP * (0.5 * (height - before))
+
+    def _blocked_at(self, height: float) -> bool:
+        """Whether a capsule of ``height`` on the same feet would overlap something."""
+        lift = 0.5 * (height - self.height)
+        return self._overlaps(make_proxy(self._shape(height), self.position + UP * lift, IDENT))
 
     def _shape(self, height: float | None = None) -> model.Shape:
         """Capsule shape at ``height`` (defaults to the current pose height)."""
@@ -227,9 +352,11 @@ class CharacterController:
     def set_move(self, direction: Vec, mode: str = 'walk') -> None:
         """Set the desired horizontal move (flattened to the ground plane) and speed tier."""
         d = np.asarray(direction, dtype='d')
-        d = d * np.array([1, 0, 1])                         # flatten to ground plane
+        d = d * FLAT                                        # flatten to ground plane
         n = np.linalg.norm(d)
         self.move_dir = d / n if n > 1e-9 else np.zeros(3)
+        if n > 1e-9:
+            self._heading = self.move_dir
         self.mode = mode
 
     def set_fly_move(self, direction: Vec) -> None:
@@ -247,6 +374,12 @@ class CharacterController:
         if self.mode == 'run':
             return self.caps.runSpeed
         return self.caps.walkSpeed
+
+    def _intent(self) -> np.ndarray:
+        """Ground velocity the input asks for. Nothing while sliding or knocked down."""
+        if self.down or self._slide is not None:
+            return np.zeros(3)
+        return self.move_dir * self.speed()
 
     def jump(self) -> bool:
         """Launch upward if able; return whether the jump fired *now*.
@@ -273,7 +406,8 @@ class CharacterController:
 
     def _may_jump(self) -> bool:
         """Whether a jump is permitted at all, timing aside."""
-        return bool(self.caps.canJump and not self.crouching and not self.flying)
+        return bool(self.caps.canJump and not self.crouching and not self.flying
+                    and not self.down)
 
     def _can_launch(self) -> bool:
         """Whether the capsule is on the ground, or close enough in time to it."""
@@ -324,7 +458,7 @@ class CharacterController:
         snapped back onto its surface each step, which would eat the impulse.
         """
         v = np.asarray(velocity, dtype='d')
-        self.push = v * np.array([1, 0, 1])
+        self.push = v * FLAT
         self.vy = float(v[1])
         self.grounded = False
         # Launched, not fallen: no coyote time off a jump pad, and a press held
@@ -332,8 +466,79 @@ class CharacterController:
         self._airborne_for = None
         self._jump_wanted_for = None
 
+    def knockback(self, impulse: Vec) -> None:
+        """Change the velocity by ``impulse`` (kilogram metres a second) over ``caps.mass``.
+
+        The blow adds to the motion the character has. Its horizontal part is
+        carried like an :meth:`apply_impulse` and bled off by ground friction;
+        an upward part leaves the ground.
+        """
+        change = np.asarray(impulse, dtype='d') / self.caps.mass
+        self.push = self.push + change * FLAT
+        self.vy += float(change[1])
+        if self.vy > 0.0:
+            self.grounded = False
+            self._airborne_for = None
+            self._jump_wanted_for = None
+
+    def slide(self, duration: float, rise: float = 0.3) -> bool:
+        """Slide for ``duration`` seconds; return whether it began.
+
+        A crouch that keeps the momentum the character has and ignores input.
+        Ground friction (``pushFriction``) bleeds the speed off. The capsule is
+        ``crouchHeight`` tall until the last ``rise`` seconds and then grows to
+        ``standHeight``, waiting under a ceiling that leaves no room, and the
+        slide ends crouched if it never gets any. It begins only from the
+        ground, walking, and not already sliding or knocked down.
+        """
+        if (duration <= 0.0 or not self.grounded or self.flying or self.swimming
+                or self.down or self._slide is not None):
+            return False
+        momentum = self.velocity * FLAT
+        if flat_length(momentum) < 1e-6:
+            momentum = self._intent()
+        self.push = momentum
+        self._slide = _Slide(duration, min(max(rise, 0.0), duration))
+        self._resize(self.caps.crouchHeight)
+        self.crouching = True
+        return True
+
+    def knock_down(self) -> None:
+        """Lie on the ground: input is ignored, the speed drops to zero and the capsule is low.
+
+        Gravity still acts. :meth:`get_up` ends it.
+        """
+        self._slide = None
+        self.down = True
+        self.push = np.zeros(3)
+        self._jump_wanted_for = None
+        self._resize(self.caps.crouchHeight)
+
+    def get_up(self, start_speed: float | None = None) -> None:
+        """End a knock-down and stand, or crouch where there is no room to stand.
+
+        ``start_speed`` (metres a second) is carried along the last direction
+        the character was told to move in and bled off by ground friction.
+        """
+        if not self.down:
+            return
+        self.down = False
+        height = self.caps.crouchHeight if self.crouching else self.caps.standHeight
+        if height > self.height and self._blocked_at(height):
+            self.crouching = True
+            height = self.caps.crouchHeight
+        self._resize(height)
+        self._pose_height = None
+        if start_speed:
+            self.push = self._heading * start_speed
+
     def set_crouch(self, crouch: bool) -> bool:
-        """Crouch or stand; standing fails (returns False) if the head is blocked."""
+        """Crouch or stand; standing fails (returns False) if the head is blocked.
+
+        A slide holds its own pose, so this changes nothing during one.
+        """
+        if self._slide is not None:
+            return crouch
         if crouch and self.caps.canCrouch:
             self.crouching = True
         elif not crouch and self.crouching:
@@ -392,38 +597,55 @@ class CharacterController:
 
     # -- world queries ---------------------------------------------------
     def _static_bodies(self) -> Iterator[int]:
-        """Yield the index of each non-dynamic body with a collider that is not a sensor."""
-        w = self.world
-        for j in range(w.body_count):
-            if w.collider_shape[j] >= 0 and w.motion_type[j] != 2 and not w.is_sensor(j):
+        """Yield the id of each solid body that does not move under the solver."""
+        ignore = self.ignore
+        for j in self.query.static_bodies():
+            if j not in ignore:
                 yield j
 
     def _static_proxy(self, j: int) -> Proxy:
-        """Cached world-space proxy for a static body (they never move, so a
-        trimesh's transformed vertices are computed once, not per query).
+        """The query's world-space proxy for a static body.
 
-        The cache is the **world's**, shared by every avatar walking in it: a
-        trimesh proxy is not a handle but a transformed copy of the geometry
-        with a uniform grid over it, so one per controller is one copy of the
-        level per person in the level.  With opponents in the world that is
-        paid again the first time each of them takes a step, which reads as a
-        hitch at the start of a fight.  Sharing is correct precisely because
+        The query keeps these, and for a live world shares them between every
+        avatar walking in it: a trimesh proxy is a transformed copy of the
+        geometry with a uniform grid over it, so one per controller would be
+        one copy of the level per person in it. Sharing is correct because
         these bodies never move.
         """
-        proxy = self._proxy_cache.get(j)
-        if proxy is None:
-            w = self.world
-            proxy = make_proxy(w.shapes[w.collider_shape[j]],
-                               w.position[j], w.orientation[j])
-            self._proxy_cache[j] = proxy
+        return self.query.static_proxy(j)
+
+    def _gather_obstacles(self, lo: np.ndarray, hi: np.ndarray) -> None:
+        """Read the dynamic bodies in the box ``lo`` to ``hi`` as this update's obstacles."""
+        kept: dict[int, tuple[model.Shape, tuple, Proxy]] = {}
+        obstacles: list[_Obstacle] = []
+        for found in self.query.dynamic_near(lo, hi):
+            if found.body in self.ignore:
+                continue
+            obstacles.append(_Obstacle(found.body, self._obstacle_proxy(found, kept),
+                                       found.velocity, found.mass <= self.caps.pushMass))
+        self._obstacle_proxies = kept
+        self._obstacles = obstacles
+        self._obstacle_of = {obstacle.body: obstacle for obstacle in obstacles}
+
+    def _obstacle_proxy(self, found: DynamicBody,
+                        kept: dict[int, tuple[model.Shape, tuple, Proxy]]) -> Proxy:
+        """A proxy of ``found`` at its pose, reused while the body keeps its shape and pose."""
+        key = pose_key(found.position, found.orientation)
+        cached = self._obstacle_proxies.get(found.body)
+        if cached is not None and cached[0] is found.shape and cached[1] == key:
+            proxy = cached[2]
+        else:
+            proxy = make_proxy(found.shape, found.position, found.orientation)
+        kept[found.body] = (found.shape, key, proxy)
         return proxy
 
     def _overlaps(self, proxy: Proxy) -> bool:
-        """True if ``proxy`` intersects any static collider."""
+        """True if ``proxy`` intersects any static collider or dynamic obstacle."""
         for j in self._static_bodies():
             if collide.collide(0, 1, proxy, self._static_proxy(j)):
                 return True
-        return False
+        return any(collide.collide(0, 1, proxy, obstacle.proxy)
+                   for obstacle in self._obstacles)
 
     #: How far past the capsule a cached candidate gather reaches, in metres.
     #: Wide enough that the depenetration iterations, the ground probe and the
@@ -462,7 +684,7 @@ class CharacterController:
 
     def _push_out(self, position: Vec,
                   iterations: int = 3) -> tuple[np.ndarray, np.ndarray | None]:
-        """Depenetrate the capsule from static colliders; return (pos, ground_n).
+        """Depenetrate the capsule from static colliders and obstacles; return (pos, ground_n).
 
         Contacts are resolved by sequential projection (deepest first): each
         contact only contributes the penetration *not already* resolved by the
@@ -474,6 +696,7 @@ class CharacterController:
         """
         pos = np.asarray(position, dtype='d').copy()
         ground_n: np.ndarray | None = None
+        ground_source: int | None = None
         for _ in range(iterations):
             contacts: list[tuple[np.ndarray, float]] = []
             for j in self._static_bodies():
@@ -490,14 +713,24 @@ class CharacterController:
                     continue
                 for c in collide.collide(0, 1, self._proxy(pos), Pj):
                     contacts.append((-c.normal, c.depth))   # from world into char
+            # Dynamic bodies come after the static world, so a contact tie goes
+            # to the body that can carry the capsule.
+            first_dynamic = len(contacts)
+            owners: list[int] = []
+            for obstacle in self._obstacles:
+                for c in collide.collide(0, 1, self._proxy(pos), obstacle.proxy):
+                    contacts.append((-c.normal, c.depth))
+                    owners.append(obstacle.body)
             # Ground is a surface this capsule could stand on, which is what
             # ``maxSlope`` says.  A fixed threshold here would disagree with it
             # -- and a face counted as ground but too steep to walk is one the
             # player can climb, since every part of the controller that seats
             # or steps trusts this.
-            for push, _depth in contacts:
+            for index, (push, _depth) in enumerate(contacts):
                 if self._walkable(push):
                     ground_n = push
+                    ground_source = (owners[index - first_dynamic]
+                                     if index >= first_dynamic else None)
             if not contacts:
                 break
             contacts.sort(key=_depth_of, reverse=True)       # deepest first
@@ -516,6 +749,7 @@ class CharacterController:
                     cy += py * remaining
                     cz += pz * remaining
             pos = pos + np.array([cx, cy, cz])
+        self._ground_source = ground_source
         return pos, ground_n
 
     # -- movement --------------------------------------------------------
@@ -536,19 +770,84 @@ class CharacterController:
         no longer something it overlaps and so no longer something it can be
         stopped by.  Stepping it in shorter pieces is what makes the landing
         depend on the geometry rather than on the frame rate.
+
+        The dynamic bodies near the capsule are read once, at the start, and
+        stay where they were found for the whole update. A body the character
+        stands on carries it by the velocity it was found with.
         """
+        self._gather_for(dt)
+        self._advance_pose(dt)
         start = self.position.copy()
         self._arrived = self.velocity.copy()
+        self.pushing = None
+        self._landing = None
         for piece in self._substeps(dt):
             was_grounded = self.grounded
             self._step(piece)
+            self._carry(piece)
             # After the step, so "left the ground" and "landed" are settled
             # facts rather than predictions, and so every early return above is
             # covered.
+            if self.grounded and not was_grounded and self._impact > 0.0:
+                self._landing = max(self._landing or 0.0, self._impact)
             if not self.flying:
                 self._tick_jump_windows(piece, was_grounded)
         self.velocity = (self.position - start) / dt if dt > 0 else np.zeros(3)
         self._carry_body()
+
+    def _gather_for(self, dt: float) -> None:
+        """Read the dynamic bodies this update can reach.
+
+        The box is the capsule grown by :attr:`NEAR_MARGIN`, the step height and
+        the furthest it can travel in ``dt`` at the speeds it has.
+        """
+        if self.flying:
+            self._obstacles, self._obstacle_of = [], {}
+            return
+        caps = self.caps
+        speed = max(self.speed(), caps.swimSpeed) + length(self.push)
+        fall = abs(self.vy) + self.gravity_mag * dt
+        reach = self.NEAR_MARGIN + caps.stepHeight + (speed + fall) * dt
+        half = np.array([caps.radius + reach, 0.5 * max(self.height, caps.standHeight) + reach,
+                         caps.radius + reach])
+        self._gather_obstacles(self.position - half, self.position + half)
+
+    def _advance_pose(self, dt: float) -> None:
+        """Move a slide along: the capsule stays low, then rises, then the slide ends.
+
+        The rise waits while the taller capsule would overlap something. A
+        slide that never gets the room ends crouched.
+        """
+        slide = self._slide
+        if slide is None:
+            return
+        slide.elapsed += dt
+        done = slide.elapsed >= slide.duration - 1e-9
+        into = slide.elapsed - (slide.duration - slide.rise)
+        fraction = 1.0 if done else min(max(into / slide.rise, 0.0), 1.0) if slide.rise else 0.0
+        low, high = self.caps.crouchHeight, self.caps.standHeight
+        height = low + (high - low) * fraction
+        if height > self.height and self._blocked_at(height):
+            height = self.height
+        self._resize(height)
+        if not done:
+            return
+        self._slide = None
+        if height >= high - 1e-9:
+            self.crouching = False
+            self._pose_height = None
+        else:
+            self.crouching = True
+            self._resize(low)
+            self._pose_height = None
+
+    def _carry(self, dt: float) -> None:
+        """Move the capsule with the dynamic body it stands on."""
+        if not self.grounded or self._standing_on is None:
+            return
+        obstacle = self._obstacle_of.get(self._standing_on)
+        if obstacle is not None:
+            self.position = self.position + obstacle.velocity * dt
 
     #: How far past the capsule's surface a static collider still counts as
     #: touched, in metres. A capsule resting on a floor is pushed just clear
@@ -562,9 +861,9 @@ class CharacterController:
         moving body has a closing speed. The controller's own collisions, with
         the static world, are reported here while the world records contacts.
         """
-        if self.body is None:
-            return
         world = self.world
+        if self.body is None or world is None:
+            return
         world.place_body(self.body, position=self.position)
         world.linear_velocity[self.body] = self.velocity
         if world.contact_reporting == 'off':
@@ -611,7 +910,7 @@ class CharacterController:
                reason: str | None = None) -> Any:
         """A contact event between static body ``j`` and :attr:`body`; None if unreported."""
         world, mine = self.world, cast(int, self.body)
-        if not world.reports_pair(j, mine):
+        if world is None or not world.reports_pair(j, mine):
             return None
         approach = (max(0.0, -float(np.dot(self._arrived, normal)))
                     if phase == 'begin' else 0.0)
@@ -628,15 +927,16 @@ class CharacterController:
 
         What the capsule was touching ends with ``reason='removed'``.
         """
-        if self.body is None:
+        world = self.world
+        if self.body is None or world is None:
             return
-        if self.world.contact_reporting != 'off':
-            self.world.report_contact_events([
+        if world.contact_reporting != 'off':
+            world.report_contact_events([
                 event for event in (self._event(j, 'end', normal, point, reason='removed')
                                     for j, (normal, point) in self._touching.items())
                 if event is not None])
         self._touching = {}
-        self.world.remove_body(self.body)
+        world.remove_body(self.body)
         self.body = None
 
     def _reach(self) -> tuple[float, float]:
@@ -693,7 +993,7 @@ class CharacterController:
             return [dt]
         vertical = min(abs(self.vy) + self.gravity_mag * dt,
                        self.terminal_velocity()) * dt
-        horizontal = length(self.move_dir * self.speed() + self.push) * dt
+        horizontal = length(self._intent() + self.push) * dt
         across, along = self._reach()
         if across <= 0 or along <= 0:
             return [dt]
@@ -704,6 +1004,8 @@ class CharacterController:
 
     def _step(self, dt: float) -> None:
         """One movement step, before the jump windows are aged."""
+        self._impact = 0.0
+        self._standing_on = None
         if self.flying:
             self._update_fly(dt)
             return
@@ -716,8 +1018,9 @@ class CharacterController:
             # instead would shorten every launch by however long it hangs there.
             self.push = self.push * max(0.0, 1.0 - self.caps.pushFriction * dt)
         control = 1.0 if self.grounded else self.caps.airControl
-        horiz = self.move_dir * self.speed() * control + self.push
+        horiz = self._intent() * control + self.push
         horiz = self._settle_step_debt(horiz, dt)
+        wanted = horiz * FLAT
         if self.grounded:
             horiz = self._along_ground(horiz)
 
@@ -733,10 +1036,13 @@ class CharacterController:
             resolved = np.array([resolved[0], target[1], resolved[2]])
         moved = flat_length(resolved - self.position)
         want = flat_length(horiz) * dt
+        blocker = self._pushable_blocker(resolved, wanted) if want > 1e-6 else None
         if want > 1e-6 and moved < 0.7 * want:
             stepped = self._try_step_up(horiz, dt)
             if stepped is not None:
-                resolved = stepped
+                resolved, blocker = stepped, None
+        if blocker is not None:
+            self.pushing = (blocker, self._push_velocity(wanted))
         self.position = resolved
 
         # Step-down: while grounded and not rising, stick to the surface over
@@ -754,6 +1060,7 @@ class CharacterController:
                     [self.position[0], seated[1], self.position[2]])
                 self.grounded = True
                 self.ground_normal = gn
+                self._standing_on = self._ground_source
                 self.vy = 0.0
                 return
 
@@ -766,6 +1073,7 @@ class CharacterController:
             return
 
         vtarget = self.position + UP * self._fall(dt)
+        self._impact = max(0.0, -self.vy)
         vresolved, ground_n = self._push_out(vtarget)
         self.position = vresolved
         self._update_grounded(ground_n)
@@ -791,6 +1099,47 @@ class CharacterController:
         reach = min(max((v0 + limit) / g, 0.0), dt) if g > 0.0 else 0.0
         self.vy = -limit
         return v0 * reach - 0.5 * g * reach * reach - limit * (dt - reach)
+
+    def _pushable_blocker(self, at: np.ndarray, wanted: np.ndarray) -> int | None:
+        """The pushable body in the way of a step taken to ``at``, or None.
+
+        A body is in the way when it is within :attr:`PUSH_REACH` of the capsule
+        and presses on it against the direction it is going. The deepest light
+        one is the answer, unless a heavy one is in the way too: that one blocks
+        the step.
+        """
+        if not self._obstacles:
+            return None
+        speed = flat_length(wanted)
+        if speed <= 1e-9:
+            return None
+        mid = max(self.height - 2 * self.caps.radius, 1e-3)
+        reach = make_proxy(model.Shape.capsule(height=mid, radius=self.caps.radius
+                                               + self.PUSH_REACH), at, IDENT)
+        found, deepest = None, 0.0
+        for obstacle in self._obstacles:
+            for c in collide.collide(0, 1, reach, obstacle.proxy):
+                push = -c.normal                          # from the body into the capsule
+                across = flat_length(push)
+                if across < 0.3 or float(np.dot(push * FLAT, wanted)) / (across * speed) > -0.3:
+                    continue
+                if not obstacle.light:
+                    return None
+                if c.depth > deepest:
+                    found, deepest = obstacle.body, c.depth
+        return found
+
+    #: How close to a body, in metres, the capsule is taken to be pushing it. A
+    #: kinematic stand-in for the character whose capsule is wider than the
+    #: controller's by up to this much overlaps a body the character touches,
+    #: which is what makes the solver move it.
+    PUSH_REACH = 0.05
+
+    def _push_velocity(self, wanted: np.ndarray) -> np.ndarray:
+        """``wanted`` limited to ``pushSpeed``, or to ``walkSpeed`` where that is None."""
+        limit = self.caps.walkSpeed if self.caps.pushSpeed is None else self.caps.pushSpeed
+        speed = length(wanted)
+        return wanted * (limit / speed) if speed > limit else wanted.copy()
 
     def _snap_down(self, max_drop: float,
                    step: float = 0.04) -> tuple[np.ndarray, np.ndarray | None]:
@@ -835,6 +1184,8 @@ class CharacterController:
         # while overlapping geometry (e.g. after a stuck safe-bind fell back to
         # fly) oscillates the position; noclip lets the user simply fly out.
         move = (self.move_dir + self.fly_dir) * self.caps.flySpeed
+        if self.down:
+            move = np.zeros(3)
         self.position = self.position + move * dt
         self.vy = 0.0
         self.push = np.zeros(3)                 # noclip answers to input alone
@@ -859,6 +1210,8 @@ class CharacterController:
         # letting go coasts.  Movement that switched on and off is what makes
         # a swim read as walking with the floor removed.
         desired = (self.move_dir + self.fly_dir) * self.caps.swimSpeed
+        if self.down:
+            desired = np.zeros(3)
         self._swim_velocity += ((desired - self._swim_velocity)
                                 * min(1.0, self.caps.swimDrag * dt))
         self.vy += (self.buoyancy - 1.0) * self.gravity_mag * dt
@@ -1037,6 +1390,7 @@ class CharacterController:
         if ground_n is not None:
             self.grounded = True
             self.ground_normal = ground_n
+            self._standing_on = self._ground_source
             self.vy = max(self.vy, 0.0)
             return
         probe, gn = self._push_out(self.position - UP * self.GROUND_PROBE)
@@ -1044,6 +1398,7 @@ class CharacterController:
             self.position = probe
             self.grounded = True
             self.ground_normal = gn
+            self._standing_on = self._ground_source
             self.vy = 0.0
         else:
             self.grounded = False
@@ -1084,6 +1439,9 @@ class CharacterController:
         self.push = np.zeros(3)                     # ...and at rest
         self.vy = 0.0
         self.velocity = np.zeros(3)
+        reach = np.array([self.caps.radius, 0.5 * self.caps.standHeight + search,
+                          self.caps.radius]) + self.NEAR_MARGIN
+        self._gather_obstacles(self.position - reach, self.position + reach)
         resolved, _ground_n = self._push_out(self.position, iterations=12)
         self.position = resolved
         if self._overlaps(self._proxy()):
@@ -1111,6 +1469,7 @@ class CharacterController:
                 seated, _ = self._push_out(probe)
                 self.position = seated
                 self.grounded = True
+                self._standing_on = self._ground_source
                 self.vy = 0.0
                 return
             drop += step

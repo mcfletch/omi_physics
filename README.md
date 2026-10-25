@@ -240,6 +240,54 @@ Under `'flagged'` reporting, a pair whose bodies are both unflagged is no
 longer tracked, and its verdict is dropped with it: flagged again, the filter
 is asked about it afresh.
 
+### Character states, slides and moving bodies
+
+`CharacterController.state` is a `CharacterState`: `STANDING`, `CROUCHING`,
+`SLIDING`, `AIRBORNE`, `DOWN`, `SWIMMING` or `FLYING`. When several hold, the
+first of `FLYING`, `SWIMMING`, `DOWN`, `AIRBORNE`, `SLIDING`, `CROUCHING`
+wins.
+
+- `slide(duration, rise=0.3)` starts a slide from the ground and returns whether
+  it began. The character keeps the speed it had, input is ignored, and
+  `pushFriction` bleeds the speed off. The capsule is `crouchHeight` tall until
+  the last `rise` seconds, then grows to `standHeight` with its feet in place.
+  Under a ceiling that leaves no room the rise waits, and the slide ends
+  crouched.
+- `knock_down()` lowers the capsule to `crouchHeight`, ignores input and sets
+  the speed to zero. Gravity still acts and `jump()` is refused. `get_up()` ends
+  it; `get_up(start_speed=4.0)` also carries 4 m/s along the last direction the
+  character was told to move in, bled off by `pushFriction`.
+- `landing` is the downward speed in m/s of the step that put the character on
+  the ground during the last `update`, and None for an update that did not.
+- Gravity is integrated exactly (`v dt - g dt^2 / 2`), so a jump of
+  `jumpHeight` rises exactly that far and lands after `2 sqrt(2 h / g)` at any
+  frame rate.
+
+The controller reads the world through the `CollisionQuery` protocol
+(`omi_physics.collisionquery`): `static_bodies()`, `static_proxy(body)`,
+`dynamic_near(lo, hi)` (a list of `DynamicBody` with shape, pose, velocity and
+mass) and `raycast(...)`. `WorldQuery(world)` answers it from a live
+`PhysicsWorld`, which `CharacterController(world, ...)` builds itself; an
+immutable copy of the colliders can answer it instead. `body=True` needs a
+`PhysicsWorld`. `ignore=[...]` lists bodies the capsule does not collide with.
+
+Dynamic bodies are obstacles and floors for the capsule, read once at the start
+of each `update`:
+
+- A body of at most `pushMass` kilograms (default 200) that the capsule is
+  within `PUSH_REACH` (0.05 m) of, in the way of its step, is named in
+  `pushing` as `(body, velocity)`. The velocity is the one the step wanted,
+  limited to `pushSpeed` (default `walkSpeed`). The caller gives that velocity to
+  a kinematic stand-in body placed at the character, wider than the capsule by
+  at most `PUSH_REACH` so it overlaps what the capsule touches, and the solver
+  moves the body. The solver treats a kinematic body as infinitely heavy, so it
+  would move a crate of any weight; a stand-in needs a `set_pair_rule` that skips
+  bodies heavier than `pushMass`. Those block the capsule like a wall.
+- `standing_on` is the id of the dynamic body underfoot, which carries the
+  character by its velocity.
+- `knockback(impulse)` adds `impulse / mass` (`mass` is 80 kg by default) to the
+  velocity; an upward part leaves the ground.
+
 ### What a line meets
 
 `omi_physics.raycast` answers what a ray, a line of sight or a bundle of rays
@@ -536,6 +584,7 @@ src/omi_physics/        the engine (importable as omi_physics)
   jointrows.py          joints as rows of velocity constraints, solved together
   massprops.py          volume, centroid and inertia of every shape
   character.py          kinematic character controller
+  collisionquery.py     what the controller asks of a world: CollisionQuery, WorldQuery
   kinematic.py          kinematic bodies driven along a pose, or to a target
   vehicle.py            raycast vehicle: suspension, drive, steering
   cookery.py / hull.py  shape cooking (convex hulls, trimeshes)
