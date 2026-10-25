@@ -17,12 +17,12 @@ bodies costs more than the exact tests it is there to avoid.
 Shapes are tested exactly: a height field by marching along the ray and
 bisecting the step that crosses the surface, a sphere analytically, a box in its own frame, a
 capsule as a segment, a cylinder or cone as its slanted side and flat ends, a
-trimesh triangle by triangle through the proxy's own spatial grid, and a
-compound part by part. **A convex hull is not cast against**, because doing it properly
-needs the hull's faces and this holds only its points; such a body is left out
-of the answer and named by :func:`unsupported_shapes`, which is a prop you
-cannot shoot rather than a hit in the wrong place. The second would be blamed
-on the weapon.
+convex hull by clipping the ray against the planes of its faces
+(:meth:`~omi_physics.model.Shape.hull_planes`), a trimesh triangle by triangle
+through the proxy's own spatial grid, and a compound part by part. A shape this
+module cannot test is left out of the answer and named by
+:func:`unsupported_shapes`, which is a prop you cannot shoot rather than a hit
+in the wrong place. The second would be blamed on the weapon.
 """
 
 from __future__ import annotations
@@ -59,7 +59,8 @@ _TINY = 1e-12
 
 #: Shape types this module tests exactly.  Anything else is skipped; see the
 #: module docstring for why that is the honest answer.
-SUPPORTED = frozenset(('box', 'sphere', 'capsule', 'cylinder', 'trimesh', 'heightfield'))
+SUPPORTED = frozenset(('box', 'sphere', 'capsule', 'cylinder', 'convex', 'trimesh',
+                       'heightfield'))
 
 
 @dataclass(frozen=True)
@@ -443,6 +444,8 @@ def _hit_shape(world: Any, key: Any, shape: Any, centre: np.ndarray,
         found = _hit_cylinder(origin, heading, centre, rotation, shape, limit)
     elif kind == 'heightfield':
         found = _hit_heightfield(origin, heading, centre, rotation, shape, limit)
+    elif kind == 'convex':
+        found = _hit_convex(origin, heading, centre, rotation, shape, limit)
     elif kind == 'trimesh':
         placed = _placed(world, key, shape, centre, rotation)
         met = (None if placed is None
@@ -551,6 +554,46 @@ def _hit_box(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
     local_normal = np.zeros(3)
     local_normal[axis] = sign
     return (distance, rotation @ local_normal)
+
+
+def _hit_convex(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
+                rotation: np.ndarray, shape: Any,
+                limit: float) -> tuple[float, np.ndarray] | None:
+    """Ray against a convex hull: the stretch of the ray inside every face's plane.
+
+    The ray enters through the last plane it crosses going in and leaves
+    through the first it crosses going out; it hits where the first is not past
+    the second. A ray beginning inside leaves, as it does for a box.
+    """
+    normals, offsets = shape.hull_planes()
+    if not len(normals):
+        return None
+    local_origin = rotation.T @ (origin - centre)
+    local_heading = rotation.T @ heading
+    slope = normals @ local_heading
+    room = offsets - normals @ local_origin
+    parallel = np.abs(slope) < _TINY
+    if np.any(parallel & (room < 0.0)):
+        return None
+    along = np.divide(room, slope, out=np.zeros_like(room), where=~parallel)
+    entering = ~parallel & (slope < 0.0)
+    leaving = ~parallel & (slope > 0.0)
+    near, far = -math.inf, math.inf
+    way_in = way_out = -1
+    if entering.any():
+        rows = np.flatnonzero(entering)
+        way_in = int(rows[np.argmax(along[rows])])
+        near = float(along[way_in])
+    if leaving.any():
+        rows = np.flatnonzero(leaving)
+        way_out = int(rows[np.argmin(along[rows])])
+        far = float(along[way_out])
+    if near > far:
+        return None
+    distance, face = (near, way_in) if near >= 0.0 else (far, way_out)
+    if distance < 0.0 or distance > limit or not math.isfinite(distance):
+        return None
+    return (distance, rotation @ normals[face])
 
 
 def _hit_capsule(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,

@@ -23,6 +23,9 @@ compatibility promise.
 - `CharacterController.slide`, `knock_down`, `get_up`, `knockback`, `state`
   (`CharacterState`), `landing`, `standing_on` and `pushing`.
   `CharacterCapabilities` gains `mass`, `pushMass` and `pushSpeed`.
+- `raycast` and `raycast_many` cast at convex hulls, by clipping the ray against
+  the planes of the hull's faces. `unsupported_shapes` names none of the shapes a
+  world holds.
 - `CollisionQuery.static_near(lo, hi)` lists the fixed bodies whose boxes overlap
   a box, from a grid over their footprints (`omi_physics.staticindex`) that
   `WorldQuery` shares between every query on a world. The grid reads up to 4096

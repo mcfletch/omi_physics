@@ -306,20 +306,101 @@ class TestWhatToIgnore:
         target = box(w, position=(5.0, 0.0, 0.0), motion=model.KINEMATIC)
         assert raycast.raycast(w, (0, 0, 0), (1, 0, 0)).body == target
 
-    def test_a_shape_the_caster_cannot_handle_is_reported_not_guessed(self):
-        """A convex hull is not ray-cast, and saying so beats inventing a hit.
-
-        Recorded rather than silently skipped: a prop that cannot be shot is a
-        thing to know about, and a *wrong* hit point would be blamed on the
-        weapon rather than on the query.
-        """
+    def test_every_shape_a_world_holds_can_be_cast_at(self):
         w = world()
-        shape = w.add_shape(model.Shape.convex(
-            np.array([(4, -1, -1), (6, -1, -1), (5, 1, 0), (5, 0, 1)], 'd')))
-        w.add_body(model.Motion(type=model.STATIC),
-                   collider=model.Collider(shape=shape), position=(0, 0, 0))
-        assert raycast.raycast(w, (0, 0, 0), (1, 0, 0)) is None
-        assert 'convex' in raycast.unsupported_shapes(w)
+        box(w)
+        hull(w, CUBE)
+        assert raycast.unsupported_shapes(w) == set()
+
+
+CUBE = [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+
+#: A square pyramid, its base on y = 0 and its apex at (0, 2, 0).
+PYRAMID = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1), (0, 2, 0)]
+
+
+def hull(w, points, position=(0.0, 0.0, 0.0), orientation=(0.0, 0.0, 0.0, 1.0)):
+    shape = w.add_shape(model.Shape.convex(np.array(points, 'd')))
+    return w.add_body(model.Motion(type=model.STATIC),
+                      collider=model.Collider(shape=shape), position=position,
+                      orientation=orientation)
+
+
+class TestAConvexHull:
+    """A hull is cast at by clipping the ray against its faces."""
+
+    def test_a_ray_meets_the_face_it_enters_by(self):
+        w = world()
+        body = hull(w, CUBE, position=(5.0, 0.0, 0.0))
+        found = raycast.raycast(w, (0, 0, 0), (1, 0, 0))
+        assert found.body == body
+        assert found.distance == pytest.approx(4.0)
+        assert found.point == pytest.approx([4.0, 0.0, 0.0])
+        assert found.normal == pytest.approx([-1.0, 0.0, 0.0])
+
+    def test_a_ray_down_onto_an_apex_meets_the_apex(self):
+        w = world()
+        hull(w, PYRAMID, position=(0.0, 1.0, 0.0))
+        found = raycast.raycast(w, (0, 10, 0), (0, -1, 0))
+        assert found.distance == pytest.approx(10.0 - 3.0)
+
+    def test_a_ray_down_the_slope_of_a_pyramid_meets_its_face(self):
+        w = world()
+        hull(w, PYRAMID)
+        found = raycast.raycast(w, (0.5, 10, 0), (0, -1, 0))
+        assert found.point[1] == pytest.approx(1.0)
+        assert found.normal == pytest.approx(np.array([2.0, 1.0, 0.0]) / np.sqrt(5.0))
+
+    def test_a_ray_past_the_hull_misses_it(self):
+        w = world()
+        hull(w, CUBE, position=(5.0, 0.0, 0.0))
+        assert raycast.raycast(w, (0, 3, 0), (1, 0, 0)) is None
+        assert raycast.raycast(w, (0, 0, 0), (-1, 0, 0)) is None
+
+    def test_a_ray_alongside_a_face_without_touching_it_misses(self):
+        w = world()
+        hull(w, CUBE, position=(5.0, 0.0, 0.0))
+        assert raycast.raycast(w, (0, 1.5, 0), (1, 0, 0)) is None
+
+    def test_a_ray_along_a_face_inside_its_plane_is_a_hit_or_a_miss_but_not_an_error(self):
+        w = world()
+        hull(w, CUBE, position=(5.0, 0.0, 0.0))
+        raycast.raycast(w, (0, 1.0, 0), (1, 0, 0))
+
+    def test_a_ray_starting_inside_leaves_by_the_far_face(self):
+        w = world()
+        hull(w, CUBE)
+        found = raycast.raycast(w, (0, 0, 0), (1, 0, 0))
+        assert found.distance == pytest.approx(1.0)
+
+    def test_the_limit_is_kept(self):
+        w = world()
+        hull(w, CUBE, position=(5.0, 0.0, 0.0))
+        assert raycast.raycast(w, (0, 0, 0), (1, 0, 0), max_distance=3.0) is None
+
+    def test_a_turned_hull_is_cast_at_where_it_is(self):
+        w = world()
+        half = np.sqrt(0.5)
+        long_box = [(x, y, z) for x in (-3, 3) for y in (-1, 1) for z in (-1, 1)]
+        hull(w, long_box, position=(0.0, 0.0, 0.0), orientation=(0.0, half, 0.0, half))
+        assert raycast.raycast(w, (10, 0, 0), (-1, 0, 0)).distance == pytest.approx(9.0)
+        assert raycast.raycast(w, (0, 0, 10), (0, 0, -1)).distance == pytest.approx(7.0)
+
+    def test_points_that_enclose_no_volume_are_not_hit(self):
+        w = world()
+        hull(w, [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)], position=(5.0, 0.0, 0.0))
+        assert raycast.raycast(w, (0, 0.5, 0.5), (1, 0, 0)) is None
+
+    def test_a_bundle_of_rays_meets_it_as_each_would_alone(self):
+        w = world()
+        hull(w, PYRAMID, position=(0.0, 1.0, 0.0))
+        origins = [(0.0, 10, 0.0), (0.5, 10, 0.0), (4.0, 10, 0.0)]
+        many = raycast.raycast_many(w, origins, [(0, -1, 0)] * 3)
+        alone = [raycast.raycast(w, o, (0, -1, 0)) for o in origins]
+        assert many[2] is None and alone[2] is None
+        for together, single in zip(many[:2], alone[:2], strict=True):
+            assert together.distance == pytest.approx(single.distance)
+            assert together.normal == pytest.approx(single.normal)
 
 
 class TestAskingOnlyWhetherTheViewIsClear:
