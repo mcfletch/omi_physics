@@ -20,12 +20,15 @@ from typing import cast
 
 import numpy as np
 
-from . import mathutil
+from . import heightfield, mathutil
 from ._accel import accelerators_disabled
 from .body import (
     BoxProxy,
     CapsuleProxy,
     CompoundProxy,
+    ConvexProxy,
+    CylinderProxy,
+    HeightFieldProxy,
     Proxy,
     SphereProxy,
     SupportProxy,
@@ -290,6 +293,8 @@ def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     if PB.kind == 'compound':
         return [contact for part in cast(CompoundProxy, PB).parts
                 for contact in collide(a, b, PA, part)]
+    if PA.kind == 'heightfield' or PB.kind == 'heightfield':
+        return _collide_heightfield(a, b, PA, PB)
     if PA.kind == 'trimesh' or PB.kind == 'trimesh':
         return _collide_mesh(a, b, PA, PB)
     key = (PA.kind, PB.kind)
@@ -302,6 +307,82 @@ def collide(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     from .gjk import collide_convex  # noqa: PLC0415 gjk imports collide.Contact
     # The trimesh case returned above, so both proxies answer support() here.
     return collide_convex(a, b, cast(SupportProxy, PA), cast(SupportProxy, PB))
+
+
+#: Points around each end of a cylinder that stand for its rim against a height field.
+_RIM_POINTS = 24
+
+#: The most spheres a capsule's axis is sampled with against a height field.
+_AXIS_SPHERES = 9
+
+
+def _collide_heightfield(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
+    """A mover against a height field, which is the ground and never moves.
+
+    The mover is taken into the field's frame. A sphere, and a capsule as
+    spheres along its axis, are tested against the surface directly. A box, a
+    hull and a cylinder (as points around both rims) are tested by their
+    vertices below the surface, together with any ground that rises into the
+    interior of their footprint between the vertices. The depth of each is
+    along the surface normal, which is how far the point is from the tangent
+    plane, so a steep slope does not push out further than it is in. At most
+    four contacts are kept, the most spread out.
+    """
+    if PA.kind == 'heightfield':
+        if PB.kind == 'heightfield':
+            return []
+        field, mover, field_is_a = cast(HeightFieldProxy, PA), PB, True
+    else:
+        field, mover, field_is_a = cast(HeightFieldProxy, PB), PA, False
+    surface = field.surface
+    if mover.kind == 'sphere':
+        sphere = cast(SphereProxy, mover)
+        touching, points, normals, depths = heightfield.sphere_contacts(
+            surface, field.to_local(sphere.center[None, :]), sphere.radius)
+    elif mover.kind == 'capsule':
+        capsule = cast(CapsuleProxy, mover)
+        length = float(np.linalg.norm(capsule.p1 - capsule.p0))
+        count = int(np.clip(np.ceil(length / max(capsule.radius, 1e-9)) + 1, 2, _AXIS_SPHERES))
+        along = np.linspace(0.0, 1.0, count)[:, None]
+        centres = field.to_local(capsule.p0 + (capsule.p1 - capsule.p0) * along)
+        touching, points, normals, depths = heightfield.sphere_contacts(
+            surface, centres, capsule.radius)
+    elif mover.kind in ('box', 'convex', 'cylinder'):
+        vertices = field.to_local(_vertices_of(mover))
+        touching, points, normals, depths = heightfield.vertex_contacts(surface, vertices)
+        deepest = float(depths[touching].max()) if touching.any() else 0.0
+        face_normals, face_offsets = cast(
+            'BoxProxy | ConvexProxy | CylinderProxy', mover).planes()
+        more_points, more_normals, more_depths = heightfield.footprint_contacts(
+            surface, vertices, face_normals @ field.R,
+            face_offsets - face_normals @ field.center, deepest)
+        points = np.vstack((points[touching], more_points))
+        normals = np.vstack((normals[touching], more_normals))
+        depths = np.concatenate((depths[touching], more_depths))
+        touching = np.ones(len(depths), dtype=bool)
+    else:
+        return []
+    if not touching.any():
+        return []
+    sign = 1.0 if field_is_a else -1.0
+    world_points = field.to_world(points[touching])
+    world_normals = (normals[touching] @ field.R.T) * sign
+    contacts = [Contact(a, b, world_points[i], world_normals[i], float(depth))
+                for i, depth in enumerate(depths[touching])]
+    return _reduce_manifold(contacts)
+
+
+def _vertices_of(proxy: Proxy) -> np.ndarray:
+    """World-space points whose hull is the convex mover: corners, vertices or rim points."""
+    if proxy.kind == 'box':
+        return cast(BoxProxy, proxy).corners()
+    if proxy.kind == 'convex':
+        return cast(ConvexProxy, proxy).world
+    cylinder = cast(CylinderProxy, proxy)
+    angle = np.linspace(0.0, 2.0 * np.pi, _RIM_POINTS, endpoint=False)[:, None]
+    ring = np.cos(angle) * cylinder.R[:, 0] + np.sin(angle) * cylinder.R[:, 2]
+    return np.vstack((cylinder.bottom + cylinder.radius_bottom * ring,
+                      cylinder.top + cylinder.radius_top * ring))
 
 
 def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:

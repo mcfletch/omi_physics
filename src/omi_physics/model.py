@@ -10,12 +10,14 @@ References:
     OMI_physics_shape / OMI_physics_body / OMI_physics_gravity / OMI_physics_joint
     https://github.com/omigroup/gltf-extensions/tree/main/extensions/2.0
 """
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import ArrayLike
 
+from .heightfield import FunctionSurface, GridSurface, HeightSurface
+from .hull import convex_hull
 from .mathutil import Vec
 
 # Motion types (OMI_physics_body.motion.type)
@@ -39,7 +41,8 @@ class Shape:
     ``trimesh``, triangle indices) so the simulation never depends on render
     geometry.  A ``cylinder`` has flat ends and may narrow along its height:
     ``radiusTop`` 0 is a cone.  A ``compound`` is not an OMI shape type; it
-    holds ``parts`` (:meth:`compound`).
+    holds ``parts`` (:meth:`compound`).  A ``heightfield`` is not one either: it
+    holds a ``surface`` (:meth:`heightfield`), is static, and has no glTF form.
     """
     type: str = 'box'
     size: tuple = (1.0, 1.0, 1.0)              # box
@@ -52,6 +55,21 @@ class Shape:
     mesh: int = -1                              # glTF mesh index (convex / trimesh)
     #: The shapes of a ``compound``, each placed in the body's frame.
     parts: 'list[ShapePart] | None' = None
+    #: The ground of a ``heightfield`` (:mod:`omi_physics.heightfield`).
+    surface: HeightSurface | None = None
+    _planes: tuple[np.ndarray, np.ndarray] | None = field(
+        default=None, init=False, repr=False, compare=False)
+
+    def hull_planes(self) -> tuple[np.ndarray, np.ndarray]:
+        """The faces of a ``convex`` shape's hull as ``(normals, offsets)`` in its local frame.
+
+        A face is the set of ``x`` with ``normal . x = offset``, its normal
+        pointing out of the hull. Worked out on the first call and kept; empty for
+        points that do not span a volume.
+        """
+        if self._planes is None:
+            self._planes = _face_planes(self.points)
+        return self._planes
 
     @classmethod
     def box(cls, size: Vec = (1.0, 1.0, 1.0)) -> 'Shape':
@@ -99,6 +117,70 @@ class Shape:
         placed = [part if isinstance(part, ShapePart) else ShapePart(*part)
                   for part in parts]
         return cls(type='compound', parts=placed)
+
+    @classmethod
+    def heightfield(cls, heights: ArrayLike | None = None, origin: Vec = (0.0, 0.0, 0.0),
+                    spacing: 'float | tuple[float, float]' = 1.0, *,
+                    sample: 'Callable[..., ArrayLike] | None' = None,
+                    normal: 'Callable[..., ArrayLike] | None' = None,
+                    extent: 'tuple[tuple[float, float], tuple[float, float]] | None' = None,
+                    vectorized: bool = False,
+                    height_range: 'tuple[float, float] | None' = None,
+                    feature: float = 1.0, delta: float = 1e-3) -> 'Shape':
+        """A static ground ``y = h(x, z)`` in the body's frame, local +Y up.
+
+        Everything below the surface is solid. Spheres, capsules, cylinders,
+        boxes and convex hulls collide with it, and rays are cast at it. It has
+        no sides or underside, there is nothing outside its extent, and a body
+        holding it is static.
+
+        Given ``heights``, it is a regular grid. ``heights[j, i]`` is the height
+        at ``x = origin[0] + i * spacing`` and ``z = origin[2] + j * spacing``,
+        added to ``origin[1]``; ``spacing`` is one number or ``(along x, along
+        z)``. Heights are interpolated bilinearly, and the normal is the exact
+        slope of the cell. The grid is the extent.
+
+        Given ``sample``, it is a function: ``sample(x, z)`` answers the
+        height, called with floats or, when ``vectorized``, with arrays of one
+        shape. The function stays in the process, so this form is not written to
+        glTF. ``normal(x, z)`` answers the unit normal as ``(nx, ny, nz)``;
+        without it the normal is the central difference of ``sample`` over
+        ``delta``. ``extent`` is ``((x_min, z_min), (x_max, z_max))`` and None
+        reaches every ``(x, z)``. ``height_range`` is ``(lowest, highest)`` and
+        bounds the body for the broad phase, which an unbounded field cannot.
+        ``feature`` is the horizontal distance over which the surface changes
+        appreciably, in the field's units: ray casts and the search of a shape's
+        footprint sample at that spacing.
+        """
+        if (heights is None) == (sample is None):
+            raise ValueError('a heightfield is given heights or a sample function, not both '
+                             'and not neither')
+        surface: HeightSurface
+        if heights is not None:
+            surface = GridSurface(heights, origin, spacing)
+        else:
+            assert sample is not None
+            surface = FunctionSurface(sample, normal, extent, vectorized, height_range,
+                                      feature, delta)
+        return cls(type='heightfield', surface=surface)
+
+
+def _face_planes(points: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """The distinct outward face planes of the hull of ``points``, as ``(normals, offsets)``."""
+    if points is None or len(points) < 4:
+        return np.zeros((0, 3)), np.zeros(0)
+    vertices, faces = convex_hull(points)
+    if not len(faces):
+        return np.zeros((0, 3)), np.zeros(0)
+    a, b, c = (vertices[faces[:, k]] for k in range(3))
+    normals = np.cross(b - a, c - a)
+    length = np.linalg.norm(normals, axis=1)
+    sound = length > 1e-12
+    normals = normals[sound] / length[sound, None]
+    offsets = np.einsum('ij,ij->i', normals, a[sound])
+    _, unique = np.unique(np.round(np.column_stack((normals, offsets)), 9), axis=0,
+                          return_index=True)
+    return normals[unique], offsets[unique]
 
 
 @dataclass

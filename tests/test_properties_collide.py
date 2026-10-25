@@ -18,7 +18,7 @@ import pytest
 # Hypothesis is a CPython-only test dependency; see test_properties_math.py.
 pytest.importorskip('hypothesis', reason='hypothesis has no wheel for this interpreter')
 
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 from property_strategies import (
     SCALES,
@@ -247,7 +247,13 @@ class TestWhereTheShapesAreDoesNotMatter:
     def test_two_spheres_meet_in_the_same_way_wherever_they_are(self, A, B, offset):
         """Exactly, and not only in whether they touch: sphere against sphere is
         a subtraction of two lengths, with nothing in it that could be relative
-        to where the pair happens to be."""
+        to where the pair happens to be.
+
+        Centres closer than the 1e-9 threshold at which the normal turns from
+        the direction between the centres to straight up are left out:
+        translating a pair that close can carry it across the threshold."""
+        gap = float(np.linalg.norm(B.center - A.center))
+        assume(gap == 0.0 or gap > 1e-6)
         here = collide.collide(0, 1, A, B)
         there = collide.collide(0, 1, translated(A, offset), translated(B, offset))
         assert len(here) == len(there)

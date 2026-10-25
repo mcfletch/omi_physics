@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from . import mathutil, model
+from .heightfield import HeightSurface
 from .mathutil import Vec
 from .trigrid import TriangleGrid
 
@@ -61,9 +62,18 @@ class BoxProxy:
         self.half = np.asarray(half, dtype='d')
         self.R = np.asarray(rotation, dtype='d')     # columns = world axes
 
+    def planes(self) -> tuple[np.ndarray, np.ndarray]:
+        """The six faces as world ``(normals, offsets)``, normals out: ``normal . x = offset``."""
+        normals = np.vstack((self.R.T, -self.R.T))
+        return normals, normals @ self.center + np.concatenate((self.half, self.half))
+
+    def corners(self) -> np.ndarray:
+        """The eight corners in the world, ``(8, 3)``."""
+        return _box_corners(self.half) @ self.R.T + self.center
+
     def aabb(self) -> _AABB:
         """Axis-aligned bounding box as ``(lo, hi)``."""
-        corners = _box_corners(self.half) @ self.R.T + self.center
+        corners = self.corners()
         return corners.min(axis=0), corners.max(axis=0)
 
     def support(self, direction: Vec) -> np.ndarray:
@@ -152,6 +162,22 @@ class CylinderProxy:
         top = self.top + self.radius_top * radial
         return top if np.dot(top, d) >= np.dot(bottom, d) else bottom
 
+    def planes(self, sides: int = 24) -> tuple[np.ndarray, np.ndarray]:
+        """The two ends and ``sides`` side facets as world ``(normals, offsets)``, normals out."""
+        angle = (np.arange(sides) + 0.5) * (2.0 * np.pi / sides)
+        radial = np.cos(angle)[:, None] * self.R[:, 0] + np.sin(angle)[:, None] * self.R[:, 2]
+        length = 2.0 * self.half_height
+        # A side narrows by (bottom - top) over its length, which tilts its normal along the axis.
+        side = length * radial + (self.radius_bottom - self.radius_top) * self.axis
+        side /= np.linalg.norm(side, axis=1, keepdims=True)
+        reach = self.radius_bottom * np.cos(np.pi / sides)
+        on_side = self.bottom + reach * radial
+        normals = np.vstack((self.axis, -self.axis, side))
+        offsets = np.concatenate((
+            [self.axis @ self.top, -(self.axis @ self.bottom)],
+            np.einsum('ij,ij->i', side, on_side)))
+        return normals, offsets
+
     def center_hint(self) -> np.ndarray:
         """A representative interior point (the middle of the axis)."""
         return self.center
@@ -179,11 +205,24 @@ class ConvexProxy:
     """A world-space convex point cloud (its own convex hull)."""
     kind = 'convex'
 
-    def __init__(self, points: ArrayLike, center: ArrayLike, rotation: ArrayLike):
+    def __init__(self, points: ArrayLike, center: ArrayLike, rotation: ArrayLike,
+                 planes: tuple[np.ndarray, np.ndarray] | None = None):
         self.local = np.asarray(points, dtype='d')
         self.center = np.asarray(center, dtype='d')
         self.R = np.asarray(rotation, dtype='d')
         self.world = self.local @ self.R.T + self.center
+        self._local_planes = planes
+
+    def planes(self) -> tuple[np.ndarray, np.ndarray]:
+        """The hull's faces as world ``(normals, offsets)``, normals out: ``normal . x = offset``.
+
+        Taken from the shape's cached faces when the proxy was made with them.
+        """
+        if self._local_planes is None:
+            self._local_planes = model.Shape.convex(self.local).hull_planes()
+        normals, offsets = self._local_planes
+        placed = normals @ self.R.T
+        return placed, offsets + placed @ self.center
 
     def aabb(self) -> _AABB:
         """Axis-aligned bounding box as ``(lo, hi)``."""
@@ -272,12 +311,52 @@ class TriangleMeshProxy:
         return self.world_pts.mean(axis=0)
 
 
+class HeightFieldProxy:
+    """A height field placed in the world: its surface, its origin and its rotation.
+
+    The surface is shared with the shape and never copied, so building one for a
+    body costs nothing however large the field is. It collides in its own frame
+    (:meth:`to_local`), which is why it holds the rotation and not a world-space
+    copy of anything.
+    """
+    kind = 'heightfield'
+
+    def __init__(self, surface: HeightSurface, center: ArrayLike, rotation: ArrayLike):
+        self.surface = surface
+        self.center = np.asarray(center, dtype='d')
+        self.R = np.asarray(rotation, dtype='d')
+
+    def to_local(self, points: np.ndarray) -> np.ndarray:
+        """World ``points`` ``(..., 3)`` in the field's frame."""
+        return (points - self.center) @ self.R
+
+    def to_world(self, points: np.ndarray) -> np.ndarray:
+        """Points ``(..., 3)`` of the field's frame in the world."""
+        return points @ self.R.T + self.center
+
+    def aabb(self) -> _AABB:
+        """The world box of the surface's bounds; infinite on an axis the surface leaves open."""
+        low, high = self.surface.aabb()
+        if np.all(np.isfinite(low)) and np.all(np.isfinite(high)):
+            box = np.array([(x, y, z) for x in (low[0], high[0]) for y in (low[1], high[1])
+                            for z in (low[2], high[2])])
+            placed = self.to_world(box)
+            return placed.min(axis=0), placed.max(axis=0)
+        if np.allclose(self.R, np.eye(3)):
+            return low + self.center, high + self.center
+        return np.full(3, -np.inf), np.full(3, np.inf)
+
+    def center_hint(self) -> np.ndarray:
+        """A representative point (the field's origin)."""
+        return self.center
+
+
 # A support proxy answers ``support(direction)``; the mesh proxy does not (it is
 # collided triangle-by-triangle instead), nor does a compound (part by part).
 # ``Proxy`` is any collision proxy.
 SupportProxy = (SphereProxy | BoxProxy | CapsuleProxy | CylinderProxy | ConvexProxy
                 | TriangleProxy)
-Proxy = SupportProxy | TriangleMeshProxy | CompoundProxy
+Proxy = SupportProxy | TriangleMeshProxy | CompoundProxy | HeightFieldProxy
 
 
 def make_proxy(shape: 'model.Shape', position: ArrayLike,
@@ -298,11 +377,15 @@ def make_proxy(shape: 'model.Shape', position: ArrayLike,
     if t == 'convex':
         if shape.points is None:
             raise ValueError('convex shape has no points')
-        return ConvexProxy(shape.points, pos, R)
+        return ConvexProxy(shape.points, pos, R, shape.hull_planes())
     if t == 'trimesh':
         if shape.points is None or shape.indices is None:
             raise ValueError('trimesh shape needs both points and indices')
         return TriangleMeshProxy(shape.points, shape.indices, pos, R)
+    if t == 'heightfield':
+        if shape.surface is None:
+            raise ValueError('heightfield shape has no surface')
+        return HeightFieldProxy(shape.surface, pos, R)
     if t == 'compound':
         return CompoundProxy([make_proxy(part.shape, *part_pose(part, pos, orientation))
                               for part in shape.parts or ()])

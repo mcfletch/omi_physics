@@ -14,7 +14,8 @@ world's own AABB arrays. A streamed landscape holds hundreds of static
 colliders and a vehicle casts a ray per wheel per step; a Python loop over the
 bodies costs more than the exact tests it is there to avoid.
 
-Shapes are tested exactly: a sphere analytically, a box in its own frame, a
+Shapes are tested exactly: a height field by marching along the ray and
+bisecting the step that crosses the surface, a sphere analytically, a box in its own frame, a
 capsule as a segment, a cylinder or cone as its slanted side and flat ends, a
 trimesh triangle by triangle through the proxy's own spatial grid, and a
 compound part by part. **A convex hull is not cast against**, because doing it properly
@@ -58,7 +59,7 @@ _TINY = 1e-12
 
 #: Shape types this module tests exactly.  Anything else is skipped; see the
 #: module docstring for why that is the honest answer.
-SUPPORTED = frozenset(('box', 'sphere', 'capsule', 'cylinder', 'trimesh'))
+SUPPORTED = frozenset(('box', 'sphere', 'capsule', 'cylinder', 'trimesh', 'heightfield'))
 
 
 @dataclass(frozen=True)
@@ -440,6 +441,8 @@ def _hit_shape(world: Any, key: Any, shape: Any, centre: np.ndarray,
         found = _hit_capsule(origin, heading, centre, rotation, shape, limit)
     elif kind == 'cylinder':
         found = _hit_cylinder(origin, heading, centre, rotation, shape, limit)
+    elif kind == 'heightfield':
+        found = _hit_heightfield(origin, heading, centre, rotation, shape, limit)
     elif kind == 'trimesh':
         placed = _placed(world, key, shape, centre, rotation)
         met = (None if placed is None
@@ -452,6 +455,16 @@ def _hit_shape(world: Any, key: Any, shape: Any, centre: np.ndarray,
     if found is None:
         return None
     return found[0], found[1], triangle
+
+
+def _hit_heightfield(origin: np.ndarray, heading: np.ndarray, centre: np.ndarray,
+                     rotation: np.ndarray, shape: Any,
+                     limit: float) -> tuple[float, np.ndarray] | None:
+    """Ray against a height field, marched in the field's frame and bisected at the crossing."""
+    found = shape.surface.ray(rotation.T @ (origin - centre), rotation.T @ heading, limit)
+    if found is None:
+        return None
+    return found[0], rotation @ found[1]
 
 
 def _hit_compound(world: Any, key: Any, shape: Any, centre: np.ndarray,

@@ -343,6 +343,53 @@ zero at either end is a cone. A ray meets each part, side and end exactly. A
 triangle mesh is for what does not move: two meshes make no contacts with
 each other, so a moving body is given a convex shape.
 
+### Height fields
+
+`Shape.heightfield` is a static ground `y = h(x, z)` in the body's frame, local
++Y up, with everything below the surface solid. It comes in two forms:
+
+```python
+# A regular grid: heights[j, i] is the height at x = origin[0] + i * spacing,
+# z = origin[2] + j * spacing, added to origin[1]. Bilinear, with the exact
+# slope of the cell as its normal. The grid is the extent.
+land = model.Shape.heightfield(heights, origin=(-500.0, 0.0, -500.0), spacing=2.0)
+
+# A function, for a landscape too large for a grid or one a renderer already
+# samples. In-process only; not written to glTF.
+land = model.Shape.heightfield(sample=terrain.height, normal=terrain.normal,
+                               extent=((-4000, -4000), (4000, 4000)),
+                               feature=2.0, vectorized=True)
+
+ground = world.add_body(model.Motion(type=model.STATIC),
+                        collider=model.Collider(shape=world.add_shape(land)))
+```
+
+Spheres, capsules, cylinders, boxes and convex hulls collide with it, and rays
+hit it. `sample(x, z)` is called with floats, or with arrays of one shape when
+`vectorized=True`. Without `normal` the normal is the central difference of
+`sample` over `delta` (1e-3). `extent` is `((x_min, z_min), (x_max, z_max))`
+and None reaches every `(x, z)`; `height_range=(lowest, highest)` bounds the
+body in y for the broad phase, which an unbounded field cannot be.
+
+- Nothing exists outside the extent: a ball rolling off the edge falls. The
+  surface has no sides, so a ray entering the extent sideways below the
+  surface passes through, while a ray that starts below the surface inside
+  the extent hits it at distance 0.
+- Depth is measured along the surface normal, the distance to the tangent
+  plane, so a steep slope pushes a body out by the depth it is in.
+- A sphere finds the nearest ground by sliding down the tangent plane from the
+  point beneath its centre; a capsule is spheres along its axis. A box,
+  hull or cylinder is tested by its vertices (a cylinder by 24 points around
+  each end) and by ground rising into its footprint between the vertices,
+  sampled every `feature` units, at most 7 samples a side. A ground feature
+  narrower than `feature` and a box wider than 7 features can be missed
+  between samples; set `feature` to the size of the smallest bump that
+  matters.
+- A ray is marched in steps of `feature` over the stretch inside the extent
+  (at most 131,072 steps) and the step that crosses the surface is bisected.
+- The shape holds no mass: a dynamic or kinematic body cannot hold one
+  (`add_body` raises `ValueError`).
+
 ### Hinges, sliders and wheels
 
 `omi_physics.joints` holds two bodies together in the ways a machine does.
@@ -587,6 +634,7 @@ src/omi_physics/        the engine (importable as omi_physics)
   collisionquery.py     what the controller asks of a world: CollisionQuery, WorldQuery
   kinematic.py          kinematic bodies driven along a pose, or to a target
   vehicle.py            raycast vehicle: suspension, drive, steering
+  heightfield.py        height-field surfaces: grid and function, contacts, ray march
   cookery.py / hull.py  shape cooking (convex hulls, trimeshes)
   omi_gltf.py           read/write OMI physics from glTF documents
   threaded.py           ThreadedSimulation — background-thread stepping

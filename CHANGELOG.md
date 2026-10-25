@@ -35,6 +35,11 @@ compatibility promise.
   `block_when_idle=False` control it. `with_world()` wakes it on leaving.
 - `PhysicsWorld.add_step_hook(before, after)` and `omi_physics.Step`: hooks
   around every fixed step, inline or threaded.
+- `Shape.heightfield`: a static ground from a grid of heights (bilinear, exact
+  cell normal) or from a function `sample(x, z)`, collided with spheres,
+  capsules, cylinders, boxes and convex hulls and cast at by rays
+  (`omi_physics.heightfield`). `Shape.hull_planes()` gives a convex shape's
+  faces.
 - Compound shapes: `Shape.compound` and `ShapePart`, shapes placed at offsets
   in one body's frame, collided, cast at and weighed part by part.
 - Cylinders with flat ends, narrowing to a cone (`radiusTop` 0), collided,

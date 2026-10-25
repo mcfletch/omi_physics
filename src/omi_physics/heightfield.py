@@ -1,0 +1,394 @@
+"""Height-field surfaces: a ground that answers a height and a normal anywhere.
+
+A height field is a surface ``y = h(x, z)`` in a body's own frame, with the
+body's local +Y as up. Everything below the surface is solid. It has no sides:
+a ray that enters the extent from the side, below the surface, passes through.
+
+There are two forms, both :class:`HeightSurface`:
+
+* :class:`GridSurface` interpolates a regular grid of heights bilinearly and
+  answers the exact slope of the cell it is in.
+* :class:`FunctionSurface` calls a function ``sample(x, z)``. It never leaves the
+  process, which is what lets a landscape too large to hold as a grid, or one
+  a renderer already samples, serve as the collision surface.
+
+Outside its extent a surface has no height (``-inf``), so nothing collides
+there. The routines below work in the field's local frame and return arrays;
+:mod:`omi_physics.collide` turns them into contacts and
+:mod:`omi_physics.raycast` into hits.
+"""
+from collections.abc import Callable
+
+import numpy as np
+from numpy.typing import ArrayLike
+
+#: How many samples a ray march may take before it widens its step.
+MAX_RAY_SAMPLES = 1 << 17
+
+#: Bisection halvings of the interval a march found a crossing in.
+_BISECTIONS = 40
+
+#: Slides down the tangent plane a sphere's nearest ground point is looked for in,
+#: and the move in x and z, in the field's units, below which it has been found.
+_SLIDES = 5
+_SETTLED = 1e-9
+
+#: The most samples a footprint is searched at along one axis.
+_FOOTPRINT_SAMPLES = 7
+
+_TINY = 1e-12
+
+
+class HeightSurface:
+    """The interface of a height field: heights, normals, bounds and a ray cast.
+
+    ``low`` and ``high`` are the local bounding box, infinite on an axis the
+    surface does not bound. ``feature`` is the smallest horizontal distance over
+    which the surface is taken to change, which sets how finely a ray march and a
+    footprint search sample it.
+    """
+    low: np.ndarray
+    high: np.ndarray
+    feature: float
+
+    def heights(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Surface height at each ``(x, z)``; ``-inf`` outside the extent."""
+        raise NotImplementedError
+
+    def normals(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Unit surface normal, pointing up out of the ground, at each ``(x, z)``."""
+        raise NotImplementedError
+
+    def sample(self, x: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """:meth:`heights` and :meth:`normals` together, for a surface that can share their work."""
+        return self.heights(x, z), self.normals(x, z)
+
+    def aabb(self) -> tuple[np.ndarray, np.ndarray]:
+        """The local bounding box as ``(low, high)`` corners."""
+        return self.low.copy(), self.high.copy()
+
+    def ray(self, origin: np.ndarray, heading: np.ndarray,
+            limit: float) -> tuple[float, np.ndarray] | None:
+        """Where a ray first meets the surface from above: ``(distance, normal)`` or None.
+
+        ``heading`` is a unit vector in the field's frame. The ray is marched
+        in steps of :attr:`feature` over the stretch of it inside the extent, and
+        the interval of the first step that goes from above the surface to below
+        it is bisected. A ray that starts below the surface, inside
+        the extent, meets it at distance 0.
+        """
+        reach = self._reach(origin, heading, limit)
+        if reach is None:
+            return None
+        first, last = reach
+        count = int(np.ceil((last - first) / self.feature)) + 2
+        if count > MAX_RAY_SAMPLES:
+            count = MAX_RAY_SAMPLES
+        along = np.linspace(first, last, count)
+        points = origin + along[:, None] * heading
+        height = self.heights(points[:, 0], points[:, 2])
+        above = points[:, 1] - height          # +inf outside the extent
+        if along[0] == 0.0 and np.isfinite(above[0]) and above[0] < 0.0:
+            return 0.0, self.normals(points[:1, 0], points[:1, 2])[0]
+        crossing = np.flatnonzero((above[:-1] >= 0.0) & np.isfinite(above[:-1])
+                                  & (above[1:] < 0.0) & np.isfinite(above[1:]))
+        if not len(crossing):
+            return None
+        index = int(crossing[0])
+        near, far = float(along[index]), float(along[index + 1])
+        for _ in range(_BISECTIONS):
+            middle = 0.5 * (near + far)
+            spot = origin + middle * heading
+            gap = spot[1] - self.heights(np.array([spot[0]]), np.array([spot[2]]))[0]
+            if gap >= 0.0:
+                near = middle
+            else:
+                far = middle
+        distance = 0.5 * (near + far)
+        spot = origin + distance * heading
+        normal = self.normals(np.array([spot[0]]), np.array([spot[2]]))[0]
+        return distance, normal
+
+    def _reach(self, origin: np.ndarray, heading: np.ndarray,
+               limit: float) -> tuple[float, float] | None:
+        """The stretch ``(first, last)`` of the ray inside the extent and the limit, or None."""
+        first, last = 0.0, float(limit)
+        for axis in (0, 2):
+            low, high = float(self.low[axis]), float(self.high[axis])
+            if not (np.isfinite(low) or np.isfinite(high)):
+                continue
+            if abs(heading[axis]) < _TINY:
+                if not low <= origin[axis] <= high:
+                    return None
+                continue
+            near = (low - origin[axis]) / heading[axis]
+            far = (high - origin[axis]) / heading[axis]
+            first = max(first, min(near, far))
+            last = min(last, max(near, far))
+        if first > last:
+            return None
+        return first, last
+
+
+class GridSurface(HeightSurface):
+    """A regular grid of heights, interpolated bilinearly.
+
+    ``heights`` is ``(rows, columns)`` with ``heights[j, i]`` the height at
+    ``x = origin[0] + i * spacing[0]`` and ``z = origin[2] + j * spacing[1]``,
+    added to ``origin[1]``. The slope in a cell is the exact derivative of its
+    bilinear patch.
+    """
+
+    def __init__(self, heights: ArrayLike, origin: ArrayLike = (0.0, 0.0, 0.0),
+                 spacing: float | tuple[float, float] = 1.0) -> None:
+        grid = np.asarray(heights, dtype='d')
+        if grid.ndim != 2 or grid.shape[0] < 2 or grid.shape[1] < 2:
+            raise ValueError('a height grid needs at least 2 rows and 2 columns, got shape %r'
+                             % (grid.shape,))
+        if not np.all(np.isfinite(grid)):
+            raise ValueError('a height grid holds only finite heights')
+        step = np.broadcast_to(np.asarray(spacing, dtype='d'), (2,)).copy()
+        if np.any(step <= 0.0):
+            raise ValueError('a height grid needs a positive spacing, got %r' % (spacing,))
+        self.grid = grid
+        self.origin = np.asarray(origin, dtype='d').reshape(3)
+        self.spacing = step
+        rows, columns = grid.shape
+        self.low = np.array([self.origin[0], self.origin[1] + grid.min(), self.origin[2]])
+        self.high = np.array([self.origin[0] + (columns - 1) * step[0],
+                              self.origin[1] + grid.max(),
+                              self.origin[2] + (rows - 1) * step[1]])
+        self.feature = float(step.min())
+
+    def _cell(self, x: np.ndarray, z: np.ndarray
+              ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Per point: cell column and row, fractions across the cell, and on-grid or not."""
+        rows, columns = self.grid.shape
+        gx = (np.asarray(x, dtype='d') - self.origin[0]) / self.spacing[0]
+        gz = (np.asarray(z, dtype='d') - self.origin[2]) / self.spacing[1]
+        inside = (gx >= 0.0) & (gx <= columns - 1) & (gz >= 0.0) & (gz <= rows - 1)
+        gx = np.where(inside, gx, 0.0)
+        gz = np.where(inside, gz, 0.0)
+        i = np.minimum(gx.astype(np.intp), columns - 2)
+        j = np.minimum(gz.astype(np.intp), rows - 2)
+        return i, j, gx - i, gz - j, inside
+
+    def _corners(self, i: np.ndarray, j: np.ndarray) -> tuple[np.ndarray, ...]:
+        g = self.grid
+        return g[j, i], g[j, i + 1], g[j + 1, i], g[j + 1, i + 1]
+
+    def heights(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Bilinear height at each ``(x, z)``; ``-inf`` off the grid."""
+        i, j, u, v, inside = self._cell(x, z)
+        return self._height(i, j, u, v, inside)
+
+    def _height(self, i: np.ndarray, j: np.ndarray, u: np.ndarray, v: np.ndarray,
+                inside: np.ndarray) -> np.ndarray:
+        h00, h10, h01, h11 = self._corners(i, j)
+        height = (h00 * (1 - u) * (1 - v) + h10 * u * (1 - v)
+                  + h01 * (1 - u) * v + h11 * u * v) + self.origin[1]
+        return np.where(inside, height, -np.inf)
+
+    def normals(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """The normal of the cell's bilinear patch at each ``(x, z)``; up off the grid."""
+        i, j, u, v, inside = self._cell(x, z)
+        return self._normal(i, j, u, v, inside)
+
+    def _normal(self, i: np.ndarray, j: np.ndarray, u: np.ndarray, v: np.ndarray,
+                inside: np.ndarray) -> np.ndarray:
+        h00, h10, h01, h11 = self._corners(i, j)
+        slope_x = ((h10 - h00) * (1 - v) + (h11 - h01) * v) / self.spacing[0]
+        slope_z = ((h01 - h00) * (1 - u) + (h11 - h10) * u) / self.spacing[1]
+        out = np.stack((-slope_x, np.ones_like(slope_x), -slope_z), axis=-1)
+        out /= np.linalg.norm(out, axis=-1, keepdims=True)
+        return np.where(inside[..., None], out, (0.0, 1.0, 0.0))
+
+    def sample(self, x: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Height and normal at each ``(x, z)`` from one lookup of the cells."""
+        cell = self._cell(x, z)
+        return self._height(*cell), self._normal(*cell)
+
+
+class FunctionSurface(HeightSurface):
+    """A height given by a function ``sample(x, z)``, in the field's local frame.
+
+    sample -- the height at ``(x, z)``. Called with two floats unless
+        ``vectorized``, then with two arrays of one shape that it answers an
+        array for
+    normal -- optional, the unit normal at ``(x, z)`` as ``(nx, ny, nz)`` with the
+        same calling convention, array-valued as ``(..., 3)`` when vectorized.
+        Without it the normal is the central difference of ``sample`` over
+        ``delta``
+    extent -- ``((x_min, z_min), (x_max, z_max))``, or None for a field that
+        reaches every ``(x, z)``; either corner may hold infinities
+    height_range -- ``(lowest, highest)`` the surface reaches, which bounds the
+        body for the broad phase; None leaves it unbounded in y
+    feature -- the horizontal distance over which the surface is taken to change,
+        the step of a ray march and of a footprint search
+    delta -- the offset of the finite differences, in the field's units
+    """
+
+    def __init__(self, sample: Callable[..., ArrayLike],
+                 normal: Callable[..., ArrayLike] | None = None,
+                 extent: tuple[tuple[float, float], tuple[float, float]] | None = None,
+                 vectorized: bool = False,
+                 height_range: tuple[float, float] | None = None,
+                 feature: float = 1.0, delta: float = 1e-3) -> None:
+        if feature <= 0.0 or delta <= 0.0:
+            raise ValueError('feature and delta are positive distances')
+        self._sample = sample
+        self._normal = normal
+        self._vectorized = vectorized
+        self.delta = float(delta)
+        self.feature = float(feature)
+        (x0, z0), (x1, z1) = extent if extent is not None else ((-np.inf, -np.inf),
+                                                                (np.inf, np.inf))
+        if x1 < x0 or z1 < z0:
+            raise ValueError('the extent runs from its low corner to its high one')
+        y0, y1 = height_range if height_range is not None else (-np.inf, np.inf)
+        self.low = np.array([x0, y0, z0], dtype='d')
+        self.high = np.array([x1, y1, z1], dtype='d')
+
+    def _inside(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        return ((x >= self.low[0]) & (x <= self.high[0])
+                & (z >= self.low[2]) & (z <= self.high[2]))
+
+    def _call(self, function: Callable[..., ArrayLike], x: np.ndarray, z: np.ndarray,
+              width: int) -> np.ndarray:
+        """Call ``function`` at each point; ``width`` is one answer's length, 0 for a number."""
+        if self._vectorized:
+            return np.asarray(function(x, z), dtype='d')
+        flat_x, flat_z = x.reshape(-1), z.reshape(-1)
+        shape = (len(flat_x), width) if width else (len(flat_x),)
+        out = np.empty(shape, dtype='d')
+        for index in range(len(flat_x)):
+            out[index] = function(float(flat_x[index]), float(flat_z[index]))
+        return out.reshape(x.shape + ((width,) if width else ()))
+
+    def heights(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """The sampled height at each ``(x, z)``; ``-inf`` outside the extent."""
+        x = np.asarray(x, dtype='d')
+        z = np.asarray(z, dtype='d')
+        inside = self._inside(x, z)
+        if inside.all():
+            return self._call(self._sample, x, z, 0)
+        out = np.full(x.shape, -np.inf)
+        if inside.any():
+            out[inside] = self._call(self._sample, x[inside], z[inside], 0)
+        return out
+
+    def normals(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """The supplied normal, or the central difference of the heights, at each ``(x, z)``."""
+        x = np.asarray(x, dtype='d')
+        z = np.asarray(z, dtype='d')
+        if self._normal is not None:
+            out = self._call(self._normal, x, z, 3)
+            return out / np.linalg.norm(out, axis=-1, keepdims=True)
+        d = self.delta
+        slope_x = (self.heights(x + d, z) - self.heights(x - d, z)) / (2 * d)
+        slope_z = (self.heights(x, z + d) - self.heights(x, z - d)) / (2 * d)
+        # A difference taken across the edge of the extent is not a slope.
+        flat = ~(np.isfinite(slope_x) & np.isfinite(slope_z))
+        slope_x = np.where(flat, 0.0, slope_x)
+        slope_z = np.where(flat, 0.0, slope_z)
+        out = np.stack((-slope_x, np.ones_like(slope_x), -slope_z), axis=-1)
+        return out / np.linalg.norm(out, axis=-1, keepdims=True)
+
+
+def sphere_contacts(surface: HeightSurface, centres: np.ndarray, radius: float
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Spheres of ``radius`` at ``centres`` ``(K, 3)`` against the ground.
+
+    Returns, per sphere, whether it touches, the contact point, the unit normal
+    pointing out of the ground and the penetration along it. The nearest
+    ground point is found by sliding down the tangent plane: from the point
+    under the centre, the foot of the perpendicular from the centre to the
+    plane there is the next guess. On a plane the first guess is the answer.
+    """
+    x = centres[:, 0].copy()
+    z = centres[:, 2].copy()
+    for _ in range(_SLIDES):
+        height, normal = surface.sample(x, z)
+        inside = np.isfinite(height)
+        ground = np.stack((x, np.where(inside, height, 0.0), z), axis=-1)
+        distance = np.einsum('ij,ij->i', centres - ground, normal)
+        # The perpendicular foot of the centre on the tangent plane is the next guess.
+        foot_x = np.where(inside, centres[:, 0] - distance * normal[:, 0], x)
+        foot_z = np.where(inside, centres[:, 2] - distance * normal[:, 2], z)
+        settled = max(np.abs(foot_x - x).max(), np.abs(foot_z - z).max()) < _SETTLED
+        x, z = foot_x, foot_z
+        if settled:
+            break
+    depth = radius - distance
+    touching = inside & (depth > 0.0)
+    point = ground - normal * (0.5 * depth)[:, None]
+    return touching, point, normal, depth
+
+
+def vertex_contacts(surface: HeightSurface, vertices: np.ndarray
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Points of a shape, ``(N, 3)``, against the ground: those below the surface.
+
+    Returns whether each is below, its contact point (midway between the point
+    and the surface above it), the normal and the penetration along that
+    normal: the height difference scaled by the normal's vertical component,
+    which is the distance to the tangent plane.
+    """
+    height, normal = surface.sample(vertices[:, 0], vertices[:, 2])
+    inside = np.isfinite(height)
+    lift = np.where(inside, height - vertices[:, 1], 0.0)
+    depth = lift * normal[:, 1]
+    below = inside & (depth > 0.0)
+    point = vertices + normal * (0.5 * depth)[:, None]
+    return below, point, normal, depth
+
+
+def footprint_contacts(surface: HeightSurface, vertices: np.ndarray,
+                       face_normals: np.ndarray, face_offsets: np.ndarray, deeper_than: float
+                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Ground that rises into the interior of a convex shape, past its vertices.
+
+    A peak under the middle of a flat face touches no vertex. The ground is
+    sampled across the shape's footprint, a grid of :attr:`HeightSurface.feature`
+    spacing over the box of its vertices seen from above, at most 7 samples a
+    side. A sample inside the shape, whose faces are the planes
+    ``face_normals . x = face_offsets`` with normals pointing out, is in contact:
+    the contact point is the ground point and the normal the ground's. The depth
+    is how far the shape would have to move along that normal for the point to
+    leave through a face looking down.
+
+    Only ground deeper into the shape than ``deeper_than``, the deepest vertex
+    contact, is returned, since anything shallower is already a contact.
+
+    Returns the contact points, normals and depths, possibly none.
+    """
+    empty = np.zeros((0, 3)), np.zeros((0, 3)), np.zeros(0)
+    if not len(face_normals):
+        return empty
+    low = vertices[:, [0, 2]].min(axis=0)
+    high = vertices[:, [0, 2]].max(axis=0)
+    counts = np.clip(np.ceil((high - low) / surface.feature).astype(int) + 1, 2,
+                     _FOOTPRINT_SAMPLES)
+    gx, gz = np.meshgrid(np.linspace(low[0], high[0], counts[0]),
+                         np.linspace(low[1], high[1], counts[1]))
+    x, z = gx.ravel(), gz.ravel()
+    height, normal = surface.sample(x, z)
+    keep = np.isfinite(height)
+    if not keep.any():
+        return empty
+    ground = np.column_stack((x[keep], height[keep], z[keep]))
+    normal = normal[keep]
+    # slack[i, f]: how far inside face f the ground point i is.
+    slack = face_offsets[None, :] - ground @ face_normals.T
+    inside = np.all(slack >= -1e-9, axis=1)
+    if not inside.any():
+        return empty
+    ground, normal, slack = ground[inside], normal[inside], slack[inside]
+    # A face looking down along the ground normal lets the point out: moving the
+    # shape up by slack / (-n_face . n_ground) puts the point on that face.
+    facing = -(normal @ face_normals.T)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        escape = np.where(facing > 1e-9, slack / facing, np.inf)
+    depth = escape.min(axis=1)
+    pressed = np.isfinite(depth) & (depth > max(deeper_than, 0.0) + 1e-6)
+    return ground[pressed], normal[pressed], depth[pressed]

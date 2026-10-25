@@ -762,6 +762,11 @@ class PhysicsWorld:
         """
         if motion is None:
             motion = model.Motion()
+        if (motion.type != model.STATIC and collider is not None
+                and 0 <= collider.shape < len(self.shapes)
+                and self.shapes[collider.shape].type == 'heightfield'):
+            raise ValueError('a heightfield is ground and only a static body can hold it, '
+                             'not a %s one' % motion.type)
         if self._free:
             i = self._free.pop()
             self._reset_body(i)

@@ -17,10 +17,11 @@ in the second.
 ```mermaid
 classDiagram
     class Shape {
-        type: box|sphere|capsule|cylinder|convex|trimesh|compound
+        type: box|sphere|capsule|cylinder|convex|trimesh|compound|heightfield
         size / radius / height
         Shape.box(size)
         Shape.sphere(radius)
+        Shape.heightfield(heights | sample)
     }
     class Motion {
         type: static|kinematic|dynamic
