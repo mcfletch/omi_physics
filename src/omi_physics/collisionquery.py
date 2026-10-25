@@ -144,6 +144,16 @@ class WorldQuery:
         """
         return static_grid(self.world).near(lo, hi)
 
+    def static_epoch(self) -> int | None:
+        """A number that changes when :meth:`static_near` may answer differently, or None.
+
+        The world's layout epoch, while none of its fixed bodies is kinematic: a
+        kinematic body moves without the layout changing, so with one there is
+        no such number.
+        """
+        grid = static_grid(self.world)
+        return None if grid.has_movers else self.world.layout_epoch
+
     def static_proxy(self, body: int) -> Proxy:
         """The cached world-space proxy of static body ``body``."""
         proxy = self._proxies.get(body)

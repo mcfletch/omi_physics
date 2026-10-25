@@ -39,6 +39,9 @@ compatibility promise.
   a step raise for one that was not recorded. A static sensor's placement and removal are recorded
   too.
 - A dynamic body asleep against a static body that is placed, added or removed is woken.
+- A character holds the static bodies it gathered across updates while the query's
+  `static_epoch()` holds (`WorldQuery.static_epoch`: the layout epoch, where no fixed body is
+  kinematic), so a walk asks the static grid once in several updates.
 - A character among height fields alone, with no dynamic body near, is collided with them with
   numbers (`collide.upright_capsule_heightfield_pushes`, `HeightSurface.column_contacts`): no
   capsule proxy, box test or contact object. On a grid, spheres higher than

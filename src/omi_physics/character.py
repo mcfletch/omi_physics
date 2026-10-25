@@ -302,6 +302,9 @@ class CharacterController:
         #: The static bodies gathered during the update under way; None outside an
         #: update. See :meth:`_keep_gathers`.
         self._gathers: list[_Gather] | None = None
+        #: The last gather, held across updates while the query's static layout
+        #: (``static_epoch``) and :attr:`ignore` are those it was made under.
+        self._held: tuple[int, frozenset[int], _Gather] | None = None
         #: Whether a capsule among height fields alone is collided with them with
         #: numbers (:meth:`_push_out`). False collides it through
         #: :func:`~omi_physics.collide.collide`, with the same answer, for comparison.
@@ -846,6 +849,22 @@ class CharacterController:
         more bodies, and those touch nothing the capsule's box does not reach.
         """
         self._gathers = []
+        held = self._held
+        if held is not None:
+            if held[0] == self._static_epoch() and held[1] == self.ignore:
+                self._gathers.append(held[2])
+            else:
+                self._held = None
+
+    def _static_epoch(self) -> int | None:
+        """The query's static layout epoch, or None where it cannot say when its statics change."""
+        epoch = getattr(self.query, 'static_epoch', None)
+        return None if epoch is None else epoch()
+
+    #: How far past the capsule a gather that is held across updates reaches, in
+    #: metres: a walker crosses it in a few updates, and what it holds besides
+    #: grounds is tested exactly and rejected at once.
+    HOLD_MARGIN = 1.0
 
     def _gather_statics(self, lo: np.ndarray, hi: np.ndarray) -> '_Gather':
         """The static bodies near the box ``lo`` to ``hi``, from a gather this update kept if one holds it."""
@@ -856,11 +875,15 @@ class CharacterController:
                 if (lo[0] >= low[0] and lo[1] >= low[1] and lo[2] >= low[2]
                         and hi[0] <= high[0] and hi[1] <= high[1] and hi[2] <= high[2]):
                     return gathered
-        low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
+        epoch = self._static_epoch()
+        margin = self.NEAR_MARGIN if epoch is None else self.HOLD_MARGIN
+        low, high = lo - margin, hi + margin
         gathered = _Gather(low, high, list(self._static_bodies(low, high)), self._static_proxy)
         if kept is not None:
             kept.insert(0, gathered)
             del kept[_GATHERS_KEPT:]
+        if epoch is not None:
+            self._held = (epoch, frozenset(self.ignore), gathered)
         return gathered
 
     def _push_out(self, position: Vec,

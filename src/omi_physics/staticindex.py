@@ -76,6 +76,11 @@ class StaticGrid:
         self._loose = np.zeros(0, dtype=np.intp)
         self._loose_epoch = self.epoch
 
+    @property
+    def has_movers(self) -> bool:
+        """Whether any of the bodies is kinematic, and so moves without the layout changing."""
+        return bool(len(self._movers))
+
     def current(self) -> bool:
         """Whether the grid, with the bodies it reads from the world, answers for the world.
 

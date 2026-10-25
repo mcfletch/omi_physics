@@ -270,7 +270,29 @@ class TestOneGatherAnUpdate:
         asked.clear()
         controller.update(DT)
         assert len(controller._substeps(DT)) == 1
-        assert len(asked) == 1
+        assert len(asked) <= 1
+
+    def test_a_gather_is_held_across_updates_while_the_layout_holds(self, monkeypatch) -> None:
+        world, _floor = world_with_floor()
+        posts_in_a_row(world, 50)
+        asked = []
+        original = WorldQuery.static_near
+        monkeypatch.setattr(WorldQuery, 'static_near',
+                            lambda self, lo, hi: asked.append(1) or original(self, lo, hi))
+        self.walk(world, 60)
+        assert len(asked) < 30
+
+    def test_a_post_added_in_the_way_of_a_held_gather_is_met(self) -> None:
+        world, _floor = world_with_floor()
+        controller = CharacterController(world, CharacterCapabilities(), position=(0.0, 0.95, 0.0))
+        controller.set_move((0.0, 0.0, 1.0), 'walk')
+        for _ in range(20):
+            controller.update(DT)
+        ahead = float(controller.position[2]) + 0.9
+        add_posts(world, [(0.0, 2.0, ahead)])
+        for _ in range(120):
+            controller.update(DT)
+        assert float(controller.position[2]) < ahead - 0.4 - controller.caps.radius + 0.01
 
     def test_a_walk_goes_where_it_went_with_a_gather_for_every_depenetration(
             self, monkeypatch) -> None:
