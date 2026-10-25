@@ -70,6 +70,8 @@ class _Slide:
     duration: float
     rise: float
     elapsed: float = 0.0
+    #: Whether the input still steers the slide, at the speed of its mode.
+    steer: bool = False
 
 
 @dataclass(slots=True)
@@ -104,6 +106,9 @@ class CharacterCapabilities:
     #: rate, which is ``(1 - buoyancy) * gravity / swimDrag``.
     swimDrag: float = 4.0
     jumpHeight: float = 1.2
+    #: A jump from the ground keeps the vertical speed the run along the ground had, so a jump
+    #: off a falling slope rises ``jumpHeight`` above the ground and not above the point it left.
+    jumpFollowsSlope: bool = False
     stepHeight: float = 0.35
     maxSlope: float = 50.0            # degrees
     eyeHeight: float = 1.6
@@ -384,8 +389,11 @@ class CharacterController:
         self.fly_dir = d / n if n > 1e-9 else np.zeros(3)
 
     def speed(self) -> float:
-        """Ground speed for the current pose and mode (walk/run/sprint/crouch)."""
-        if self.crouching:
+        """Ground speed for the current pose and mode (walk/run/sprint/crouch).
+
+        A steered slide goes at the speed of the mode, not the crouch's."""
+        slide = self._slide
+        if self.crouching and not (slide is not None and slide.steer):
             return self.caps.crouchSpeed
         if self.mode == 'sprint' and self.caps.canSprint:
             return self.caps.sprintSpeed
@@ -394,8 +402,9 @@ class CharacterController:
         return self.caps.walkSpeed
 
     def _intent(self) -> np.ndarray:
-        """Ground velocity the input asks for. Nothing while sliding or knocked down."""
-        if self.down or self._slide is not None:
+        """Ground velocity the input asks for. Nothing while knocked down or in a slide that is not steered."""
+        slide = self._slide
+        if self.down or (slide is not None and not slide.steer):
             return np.zeros(3)
         return self.move_dir * self.speed()
 
@@ -436,6 +445,8 @@ class CharacterController:
 
     def _launch(self) -> None:
         self.vy = np.sqrt(2.0 * self.gravity_mag * self.caps.jumpHeight)
+        if self.caps.jumpFollowsSlope and self.grounded:
+            self.vy += float(self._along_ground(self._intent() + self.push)[1])
         self.grounded = False
         # Neither window survives a launch: coyote time forgives falling only,
         # and a buffered press has now been spent.
@@ -499,11 +510,13 @@ class CharacterController:
             self._airborne_for = None
             self._jump_wanted_for = None
 
-    def slide(self, duration: float, rise: float = 0.3) -> bool:
+    def slide(self, duration: float, rise: float = 0.3, steer: bool = False) -> bool:
         """Slide for ``duration`` seconds; return whether it began.
 
         A crouch that keeps the momentum the character has and ignores input.
-        Ground friction (``pushFriction``) bleeds the speed off. The capsule is
+        Ground friction (``pushFriction``) bleeds the speed off. With ``steer``
+        the slide takes no momentum, friction does not act, and the input goes
+        on moving the character at the speed of its mode. The capsule is
         ``crouchHeight`` tall until the last ``rise`` seconds and then grows to
         ``standHeight``, waiting under a ceiling that leaves no room, and the
         slide ends crouched if it never gets any. It begins only from the
@@ -515,10 +528,37 @@ class CharacterController:
         momentum = self.velocity * FLAT
         if flat_length(momentum) < 1e-6:
             momentum = self._intent()
-        self.push = momentum
-        self._slide = _Slide(duration, min(max(rise, 0.0), duration))
+        self.push = np.zeros(3) if steer else momentum
+        self._slide = _Slide(duration, min(max(rise, 0.0), duration), steer=steer)
         self._resize(self.caps.crouchHeight)
         self.crouching = True
+        return True
+
+    def extend_slide(self, duration: float) -> bool:
+        """Have the slide last ``duration`` seconds more, from now; return whether there is one.
+
+        The capsule goes low again, the rise comes at the end of the new length, and
+        :attr:`slide_progress` is the time slid over the new length.
+        """
+        slide = self._slide
+        if slide is None:
+            return False
+        slide.duration = slide.elapsed + max(duration, 0.0)
+        slide.rise = min(slide.rise, max(duration, 0.0))
+        return True
+
+    def end_slide(self) -> bool:
+        """End a slide at once and stand, or crouch where there is no room; return whether there was one."""
+        if self._slide is None:
+            return False
+        self._slide = None
+        if self._blocked_at(self.caps.standHeight):
+            self.crouching = True
+            self._resize(self.caps.crouchHeight)
+        else:
+            self.crouching = False
+            self._resize(self.caps.standHeight)
+        self._pose_height = None
         return True
 
     def knock_down(self) -> None:

@@ -252,7 +252,15 @@ wins.
   `pushFriction` bleeds the speed off. The capsule is `crouchHeight` tall until
   the last `rise` seconds, then grows to `standHeight` with its feet in place.
   Under a ceiling that leaves no room the rise waits, and the slide ends
-  crouched.
+  crouched. `slide(duration, steer=True)` takes no momentum and no friction:
+  the input still moves the character, at the speed of its mode and not the
+  crouch's. `extend_slide(duration)` gives a slide that long again from now, with
+  the capsule low again, and returns whether there was a slide; `end_slide()`
+  ends one at once and stands, or crouches where there is no room.
+- `jumpFollowsSlope` in `CharacterCapabilities` (default false) adds the vertical
+  speed of the run along the ground to a jump's launch speed, so a jump off a
+  falling slope rises `jumpHeight` above the ground and not above the point it
+  left.
 - `knock_down()` lowers the capsule to `crouchHeight`, ignores input and sets
   the speed to zero. Gravity still acts and `jump()` is refused. `get_up()` ends
   it; `get_up(start_speed=4.0)` also carries 4 m/s along the last direction the

@@ -32,6 +32,10 @@ compatibility promise.
   bodies only. `CharacterController` collides with the
   bodies near its capsule, so a step costs the same in a world of 200,000 posts as
   in one of 200. `PhysicsWorld.sensor` is the column of sensor flags.
+- `CharacterController.slide(steer=True)`, `extend_slide` and `end_slide`: a slide the
+  input still steers, one that goes on for a time from now, and one cut short. The
+  capability `jumpFollowsSlope` keeps the vertical speed of a run down a slope in a
+  jump.
 - `omi_physics.collisionquery`: the `CollisionQuery` protocol and `WorldQuery`.
   `CharacterController` takes either a `PhysicsWorld` or a `CollisionQuery`, and
   treats dynamic bodies as obstacles, floors and pushable weights.
