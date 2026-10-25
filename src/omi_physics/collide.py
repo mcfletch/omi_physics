@@ -582,6 +582,110 @@ def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
     return pushes[order], found[order]
 
 
+#: Below this distance from a box, in metres, a capsule's axis is taken to reach into it.
+_TOUCHING = 1e-9
+
+
+def capsule_box_pushes(cap: CapsuleProxy, centers: np.ndarray, halves: np.ndarray,
+                       rotations: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Depenetration for a capsule against ``K`` oriented boxes, as ``(hit, pushes, depths)``.
+
+    The boxes are ``centers`` ``(K, 3)``, half-extents ``halves`` ``(K, 3)``
+    and ``rotations`` ``(K, 3, 3)`` whose columns are the box axes in the
+    world. ``hit`` ``(K,)`` says which the capsule overlaps; for those,
+    ``pushes`` ``(K, 3)`` is the unit direction from the box into the capsule
+    and ``depths`` ``(K,)`` the distance the capsule must move along it to
+    come clear: the minimum translation, as GJK and EPA would find it.
+
+    Where the capsule's axis stays outside a box, the push runs from the
+    nearest point of the box to the nearest point of the axis, found exactly:
+    the squared distance along the axis is a quadratic between the places
+    the axis crosses the box's face planes. Where the axis reaches into the
+    box, the push is along the separating axis of least overlap among the
+    three box faces and the three crossings of the capsule's axis with the
+    box edges, and the depth includes the radius.
+    """
+    count = len(centers)
+    radius = cap.radius
+    # Each box's own frame: local = R^T (p - c).
+    start = np.einsum('kji,kj->ki', rotations, cap.p0 - centers)
+    end = np.einsum('kji,kj->ki', rotations, cap.p1 - centers)
+    run = end - start
+    # Where the axis crosses each face plane, with 0 and 1, in order.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        crossing = np.concatenate(((halves - start) / run, (-halves - start) / run), axis=1)
+    crossing = np.where(np.isfinite(crossing), np.clip(crossing, 0.0, 1.0), 0.0)
+    knots = np.sort(np.concatenate((np.zeros((count, 1)), crossing, np.ones((count, 1))),
+                                   axis=1), axis=1)
+    low, high = knots[:, :-1], knots[:, 1:]
+    middle = start[:, None, :] + 0.5 * (low + high)[:, :, None] * run[:, None, :]
+    side = np.where(middle > halves[:, None, :], 1.0,
+                    np.where(middle < -halves[:, None, :], -1.0, 0.0))
+    outside = side != 0.0
+    offset = np.where(outside, start[:, None, :] - side * halves[:, None, :], 0.0)
+    slope = np.where(outside, run[:, None, :], 0.0)
+    curvature = np.einsum('kpi,kpi->kp', slope, slope)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        best = -np.einsum('kpi,kpi->kp', offset, slope) / curvature
+    best = np.clip(np.where(curvature > 0.0, best, low), low, high)
+    gap = offset + best[:, :, None] * slope
+    squared = np.einsum('kpi,kpi->kp', gap, gap)
+    piece = np.argmin(squared, axis=1)
+    rows = np.arange(count)
+    along = best[rows, piece]
+    distance = np.sqrt(squared[rows, piece])
+    # As :func:`~omi_physics.gjk.collide_convex`, a touch shallower than a nanometre is no contact.
+    hit = radius - distance > _TOUCHING
+    pushes = np.zeros((count, 3))
+    depths = np.zeros(count)
+    near = np.flatnonzero(hit & (distance > _TOUCHING))
+    if len(near):
+        point = start[near] + along[near, None] * run[near]
+        local = (point - np.clip(point, -halves[near], halves[near])) / distance[near, None]
+        pushes[near] = np.einsum('kij,kj->ki', rotations[near], local)
+        depths[near] = radius - distance[near]
+    deep = np.flatnonzero(hit & (distance <= _TOUCHING))
+    if len(deep):
+        pushes[deep], depths[deep] = _segment_box_overlap(start[deep], end[deep], halves[deep],
+                                                          rotations[deep])
+        depths[deep] += radius
+    return hit, pushes, depths
+
+
+def _segment_box_overlap(start: np.ndarray, end: np.ndarray, halves: np.ndarray,
+                         rotations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The least push, world direction and distance, that takes segments clear of the boxes they reach into.
+
+    ``start`` and ``end`` are in each box's frame. The candidate directions are
+    the faces of the box swept along the segment: the box's three axes and the
+    segment's direction crossed with each.
+    """
+    count = len(start)
+    run = end - start
+    length = np.linalg.norm(run, axis=1)
+    faces = np.broadcast_to(np.eye(3), (count, 3, 3))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        unit = np.where(length[:, None] > _TOUCHING, run / length[:, None], 0.0)
+    edges = np.cross(unit[:, None, :], np.eye(3)[None, :, :])
+    size = np.linalg.norm(edges, axis=2)
+    usable = size > 1e-9
+    with np.errstate(divide='ignore', invalid='ignore'):
+        edges = np.where(usable[:, :, None], edges / size[:, :, None], 0.0)
+    axes = np.concatenate((faces, edges), axis=1)
+    reach = np.einsum('kai,ki->ka', np.abs(axes), halves)
+    first = np.einsum('kai,ki->ka', axes, start)
+    second = np.einsum('kai,ki->ka', axes, end)
+    rise = reach - np.minimum(first, second)
+    fall = np.maximum(first, second) + reach
+    overlap = np.minimum(rise, fall)
+    overlap[:, 3:][~usable] = np.inf
+    choice = np.argmin(overlap, axis=1)
+    rows = np.arange(count)
+    sign = np.where(rise[rows, choice] <= fall[rows, choice], 1.0, -1.0)
+    local = axes[rows, choice] * sign[:, None]
+    return np.einsum('kij,kj->ki', rotations, local), overlap[rows, choice]
+
+
 #: How far outside a triangle's edges a corner of a box may lie and still
 #: stand on it, as a fraction of the triangle's own size; a corner on the edge
 #: two triangles share is on both.

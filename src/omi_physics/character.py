@@ -26,7 +26,7 @@ from typing import Any, cast
 import numpy as np
 
 from . import collide, model
-from .body import CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy, pose_key
+from .body import BoxProxy, CapsuleProxy, Proxy, TriangleMeshProxy, make_proxy, pose_key
 from .collisionquery import CollisionQuery, DynamicBody, WorldQuery
 from .contactevents import ContactEvent
 from .mathutil import Vec, flat_length, length
@@ -46,6 +46,27 @@ def _depth_of_contact(contact: Any) -> float:
     """A contact's depth, for picking the deepest."""
     return float(contact.depth)
 
+
+
+class _StaticBoxes:
+    """The oriented boxes among some static bodies, as arrays a capsule is tested against at once."""
+
+    def __init__(self, bodies: list[int], proxy_of: Any) -> None:
+        boxes = [(j, proxy) for j in bodies
+                 if isinstance(proxy := proxy_of(j), BoxProxy)]
+        #: The body of each box, in the order given.
+        self.rows = [j for j, _ in boxes]
+        self._centers = np.array([proxy.center for _, proxy in boxes]).reshape(-1, 3)
+        self._halves = np.array([proxy.half for _, proxy in boxes]).reshape(-1, 3)
+        self._rotations = np.array([proxy.R for _, proxy in boxes]).reshape(-1, 3, 3)
+
+    def pushes(self, capsule: CapsuleProxy) -> dict[int, tuple[np.ndarray, float]]:
+        """The push out of each box ``capsule`` overlaps, and its depth, by body."""
+        if not self.rows:
+            return {}
+        hit, pushes, depths = collide.capsule_box_pushes(capsule, self._centers, self._halves,
+                                                         self._rotations)
+        return {self.rows[k]: (pushes[k], float(depths[k])) for k in np.flatnonzero(hit).tolist()}
 
 class CharacterState(enum.Enum):
     """What a character is doing, as :attr:`CharacterController.state` reports it.
@@ -716,7 +737,13 @@ class CharacterController:
     def _overlaps(self, proxy: Proxy) -> bool:
         """True if ``proxy`` intersects any static collider or dynamic obstacle."""
         lo, hi = proxy.aabb()
-        for j in self._static_bodies(lo, hi):
+        near = list(self._static_bodies(lo, hi))
+        if isinstance(proxy, CapsuleProxy):
+            boxes = _StaticBoxes(near, self._static_proxy)
+            if boxes.pushes(proxy):
+                return True
+            near = [j for j in near if j not in boxes.rows]
+        for j in near:
             if collide.collide(0, 1, proxy, self._static_proxy(j)):
                 return True
         return any(collide.collide(0, 1, proxy, obstacle.proxy)
@@ -772,7 +799,7 @@ class CharacterController:
         pos = np.asarray(position, dtype='d').copy()
         ground_n: np.ndarray | None = None
         ground_source: int | None = None
-        gathered: tuple[np.ndarray, np.ndarray, list[int]] | None = None
+        gathered: tuple[np.ndarray, np.ndarray, list[int], _StaticBoxes] | None = None
         for _ in range(iterations):
             contacts: list[tuple[np.ndarray, float]] = []
             capsule = cast(CapsuleProxy, self._proxy(pos))
@@ -782,9 +809,17 @@ class CharacterController:
             # gathered for.
             if gathered is None or np.any(lo < gathered[0]) or np.any(hi > gathered[1]):
                 low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
-                gathered = (low, high, list(self._static_bodies(low, high)))
+                near = list(self._static_bodies(low, high))
+                gathered = (low, high, near, _StaticBoxes(near, self._static_proxy))
+            boxed = gathered[3].pushes(capsule)
             for j in gathered[2]:
+                found = boxed.get(j)
+                if found is not None:
+                    contacts.append(found)
+                    continue
                 Pj = self._static_proxy(j)
+                if isinstance(Pj, BoxProxy):
+                    continue
                 if isinstance(Pj, TriangleMeshProxy):
                     # The level, which is nearly always every contact there is.
                     # Straight to the two numbers this loop reads, so a frame
@@ -967,8 +1002,14 @@ class CharacterController:
         capsule = make_proxy(skin, self.position, IDENT)
         found: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         lo, hi = capsule.aabb()
-        for j in self._static_bodies(lo, hi):
+        near = list(self._static_bodies(lo, hi))
+        boxed = _StaticBoxes(near, self._static_proxy).pushes(cast(CapsuleProxy, capsule))
+        for j in near:
             other = self._static_proxy(j)
+            if isinstance(other, BoxProxy):
+                if j in boxed:
+                    found[j] = (boxed[j][0], self._surface_point(boxed[j][0]))
+                continue
             if isinstance(other, TriangleMeshProxy):
                 pushes, depths = collide.capsule_mesh_pushes(
                     cast(CapsuleProxy, capsule), other,
