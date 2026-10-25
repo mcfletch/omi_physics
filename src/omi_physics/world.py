@@ -1505,7 +1505,7 @@ class PhysicsWorld:
 
     # -- AABBs & sleeping ------------------------------------------------
     #: refit kinds -- 0 no shape, 1 sphere, 2 box, 3 other (per-body fallback)
-    _RFIT_NONE, _RFIT_SPHERE, _RFIT_BOX, _RFIT_OTHER = 0, 1, 2, 3
+    _RFIT_NONE, _RFIT_SPHERE, _RFIT_BOX, _RFIT_OTHER, _RFIT_CAPSULE = 0, 1, 2, 3, 4
 
     def _refit_shapes(self) -> tuple[np.ndarray, np.ndarray]:
         """Per-body shape kind (``_RFIT_*``) and local half-extents, ``(n,)`` and ``(n, 3)``.
@@ -1543,6 +1543,10 @@ class PhysicsWorld:
             return self._RFIT_SPHERE, float(shape.radius)
         if shape.type == 'box':
             return self._RFIT_BOX, 0.5 * np.asarray(shape.size, dtype='d')
+        if shape.type == 'capsule':
+            # The radius, then half the mid-section along the capsule's own y.
+            radius = float(shape.radiusBottom)
+            return self._RFIT_CAPSULE, np.array([radius, 0.5 * float(shape.height), radius])
         return self._RFIT_OTHER, 0.0
 
     def _build_refit_cache(self) -> None:
@@ -1664,6 +1668,9 @@ class PhysicsWorld:
         sph = kinds == self._RFIT_SPHERE
         if sph.any():
             hw[sph] = halves[sph]                       # sphere: isotropic, unrotated
+        cap = kinds == self._RFIT_CAPSULE
+        if cap.any():                                   # capsule: its axis turned, and the radius
+            hw[cap] = absR[cap][:, :, 1] * halves[cap][:, 1:2] + halves[cap][:, 0:1]
         self._aabb_min[rows] = pos - hw - margin
         self._aabb_max[rows] = pos + hw + margin
         none = rows[kinds == self._RFIT_NONE]

@@ -28,7 +28,7 @@ class NumpyBackend:
 
     def integrate_forces(self, world: "PhysicsWorld", dt: float) -> None:
         """Apply gravity, damping, and quadratic drag to dynamic bodies over ``dt`` seconds."""
-        rows = np.flatnonzero(world.dynamic_mask())
+        rows = world.awake_dynamic_rows()
         if not len(rows):
             return
         accel = world.resolve_gravity(rows) * world.gravity_factor[rows, None]
@@ -43,13 +43,19 @@ class NumpyBackend:
         world.angular_velocity[rows] *= np.maximum(1.0 - ang_damp * dt, 0.0)
 
     def integrate_positions(self, world: "PhysicsWorld", dt: float) -> None:
-        """Advance position and orientation of moving bodies over ``dt`` seconds."""
-        rows = np.flatnonzero(world.moving_mask())
+        """Advance position and orientation of moving bodies over ``dt`` seconds.
+
+        A body that is not turning keeps its orientation as it is.
+        """
+        rows = world.awake_moving_rows()
         if not len(rows):
             return
         world.position[rows] += world.linear_velocity[rows] * dt
-        world.orientation[rows] = mathutil.quat_integrate(
-            world.orientation[rows], world.angular_velocity[rows], dt)
+        spin = world.angular_velocity[rows]
+        turning = rows[np.any(spin != 0.0, axis=1)]
+        if len(turning):
+            world.orientation[turning] = mathutil.quat_integrate(
+                world.orientation[turning], world.angular_velocity[turning], dt)
 
     def refit_aabbs(self, world: "PhysicsWorld") -> None:
         """Recompute each body's world-space AABB after integration."""
