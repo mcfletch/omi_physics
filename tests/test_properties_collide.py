@@ -170,14 +170,27 @@ class TestTheDepthIsNeverMoreThanTheWayOut:
             assert collide.collide(0, 1, A, moved) == []
 
 
+def extent_directions(proxy) -> np.ndarray:
+    """The directions a sphere or a box has more than a nanometre of extent along, as rows."""
+    if proxy.kind == 'sphere':
+        return np.eye(3) if proxy.radius > 1e-9 else np.zeros((0, 3))
+    return proxy.R.T[proxy.half > 1e-9]
+
+
 def solidly_overlapping(A, B) -> bool:
-    """Whether the pair still meets with both shrunk about their centres.
+    """Whether the pair still meets with both shrunk about their centres, in a volume.
 
     A pair that only just touches is on a knife edge -- which axis offers the
     shorter way out, and which corners of a clipped face count as inside, come
     down to the last bit of the coordinates -- so the properties that ask for
     one answer rather than another ask them of pairs that are meeting solidly.
+    Two flattened shapes whose extents together span fewer than three directions,
+    such as two crossing segments in one plane, meet in no volume however they
+    are shrunk, and are on that edge too.
     """
+    spans = np.vstack((extent_directions(A), extent_directions(B)))
+    if len(spans) < 3 or np.linalg.matrix_rank(spans, tol=1e-6) < 3:
+        return False
     return bool(collide.collide(0, 1, shrunk(A), shrunk(B)))
 
 
@@ -254,6 +267,8 @@ class TestWhereTheShapesAreDoesNotMatter:
         translating a pair that close can carry it across the threshold."""
         gap = float(np.linalg.norm(B.center - A.center))
         assume(gap == 0.0 or gap > 1e-6)
+        # Surfaces closer than the rounding of the translation are on the edge of touching.
+        assume(abs(gap - (A.radius + B.radius)) > 1e-12 * max(np.max(np.abs(offset)), 1.0))
         here = collide.collide(0, 1, A, B)
         there = collide.collide(0, 1, translated(A, offset), translated(B, offset))
         assert len(here) == len(there)
