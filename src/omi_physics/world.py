@@ -1339,8 +1339,17 @@ class PhysicsWorld:
                 if not joint.collide_connected and joint.a >= 0 and joint.b >= 0}
 
     def _collide(self, stages: '_CollisionStages', dt: float) -> None:
-        """Run one collision pass: build pairs, solve solid contacts, fire triggers."""
-        pairs = stages.broadphase.pairs(self)
+        """Run one collision pass: build pairs, solve solid contacts, fire triggers.
+
+        A pair with no awake dynamic body, no kinematic body, no trigger and no
+        sensor in it is left out by the broad phase: such a pair makes no
+        contact the solver acts on.
+        """
+        n = self._n
+        kind = self._motion_type[:n]
+        active = (((kind == _DYNAMIC) & self._awake[:n]) | (kind == _KINEMATIC)
+                  | (self._trigger_shape[:n] >= 0) | self._sensor[:n])
+        pairs = stages.broadphase.pairs(self, active)
         jointed = self._jointed() if self.row_joints else None
         rule = self._pair_rule
         if rule is not None:

@@ -313,8 +313,12 @@ class BroadPhase:
             self.tree.update(i, world.aabb_min[i], world.aabb_max[i])
         self._known = current
 
-    def pairs(self, world: "PhysicsWorld") -> list[tuple[int, int]]:
+    def pairs(self, world: "PhysicsWorld", active: np.ndarray | None = None
+              ) -> list[tuple[int, int]]:
         """Candidate colliding body pairs ``(i, j)``, real-box- and filter-checked.
+
+        With ``active``, a mask over the bodies, a pair neither of whose bodies
+        is active is left out; the rest keep their order.
 
         Skips pairs of two non-dynamic bodies, except a kinematic body against
         a trigger, so a lift or an avatar's proxy enters a trigger volume; and
@@ -348,6 +352,9 @@ class BroadPhase:
             pair_a, pair_b = _sweep(world, None)
         else:
             pair_a, pair_b = self._pairs_split(world, inert)
+        if active is not None:
+            keep = active[pair_a] | active[pair_b]
+            pair_a, pair_b = pair_a[keep], pair_b[keep]
         if not len(pair_a):
             return []
         return filtered_pairs(world, np.minimum(pair_a, pair_b), np.maximum(pair_a, pair_b))
