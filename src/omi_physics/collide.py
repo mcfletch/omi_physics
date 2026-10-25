@@ -483,7 +483,7 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
             cast(BoxProxy, other), verts)
         if not mesh_is_a:
             normals = -normals
-        contacts = []
+        contacts: list[Contact] = []
         for i in np.flatnonzero(hit):
             feet = box_face_contacts(cast(BoxProxy, other), verts[i], normals[i],
                                      mesh_is_a)
