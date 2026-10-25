@@ -297,3 +297,21 @@ class TestLanding:
         for _ in range(120):
             character.update(DT)
             assert character.landing is None
+
+
+def test_slide_progress_is_how_far_through_the_slide_the_character_is():
+    world = PhysicsWorld(sleep_enabled=False)
+    shape = world.add_shape(model.Shape.box((40, 1, 40)))
+    world.add_body(model.Motion(type=model.STATIC), model.Collider(shape=shape),
+                   position=(0, -0.5, 0))
+    controller = CharacterController(world, CharacterCapabilities(), (0, 0.9, 0))
+    for _ in range(30):
+        controller.update(1 / 60)
+    assert controller.slide_progress == 0.0
+    controller.slide(1.0, rise=0.3)
+    for _ in range(30):
+        controller.update(1 / 60)
+    assert 0.45 < controller.slide_progress < 0.55
+    for _ in range(40):
+        controller.update(1 / 60)
+    assert controller.slide_progress == 0.0

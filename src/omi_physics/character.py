@@ -303,6 +303,14 @@ class CharacterController:
         return CharacterState.STANDING
 
     @property
+    def slide_progress(self) -> float:
+        """How far through the slide the character is, from 0 to 1; 0 when it is not sliding."""
+        slide = self._slide
+        if slide is None or slide.duration <= 0.0:
+            return 0.0
+        return min(slide.elapsed / slide.duration, 1.0)
+
+    @property
     def landing(self) -> float | None:
         """Speed in metres a second the character landed at in the last :meth:`update`, else None.
 
