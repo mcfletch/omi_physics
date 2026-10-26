@@ -1,5 +1,6 @@
 """The world-space proxy of a fixed body is the proxy of the body in its slot now."""
 import numpy as np
+import pytest
 
 from omi_physics import model
 from omi_physics.collisionquery import WorldQuery
@@ -42,3 +43,11 @@ def test_a_body_that_stays_keeps_the_proxy_it_has():
     world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=other),
                    position=(30.0, 0.0, 0.0))
     assert query.static_proxy(first) is proxy
+
+
+def test_a_vacant_slot_has_no_proxy():
+    world, query, first = world_with_a_slab()
+    world.add_shape(model.Shape.sphere(0.5))
+    world.remove_body(first)
+    with pytest.raises(LookupError):
+        query.static_proxy(first)

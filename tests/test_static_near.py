@@ -149,6 +149,37 @@ class TestTheIndexFollowsTheWorld:
         assert reused in set(query.static_near(np.array([299.0, 0.0, -1.0]),
                                                np.array([301.0, 1.0, 1.0])))
 
+    def test_a_large_body_removed_afterwards_is_gone(self) -> None:
+        world, floor = world_with_floor()
+        posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        assert floor in set(query.static_near(BOX_LO, BOX_HI))
+        world.remove_body(floor)
+        assert floor not in set(query.static_near(BOX_LO, BOX_HI))
+
+    def test_a_dynamic_body_in_a_removed_large_body_slot_is_not_listed(self) -> None:
+        world, floor = world_with_floor()
+        posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        world.remove_body(floor)
+        ball = world.add_shape(model.Shape.sphere(0.5))
+        crate = world.add_body(model.Motion(type=model.DYNAMIC, mass=1.0),
+                               collider=model.Collider(shape=ball), position=(0.0, 0.5, 40.0))
+        assert crate == floor
+        assert crate not in set(query.static_near(BOX_LO, BOX_HI))
+
+    def test_a_kinematic_body_removed_afterwards_is_gone(self) -> None:
+        world, _floor = world_with_floor()
+        posts_in_a_row(world, 50)
+        crate = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+        lift = world.add_body(model.Motion(type=model.KINEMATIC),
+                              collider=model.Collider(shape=crate), position=(1.0, 0.5, 40.0))
+        query = WorldQuery(world)
+        assert lift in set(query.static_near(BOX_LO, BOX_HI))
+        world.remove_body(lift)
+        assert lift not in set(query.static_near(BOX_LO, BOX_HI))
+
     def test_a_bulk_addition_rebuilds_the_grid(self) -> None:
         world, _ = world_with_floor()
         posts_in_a_row(world, 50)
@@ -172,6 +203,16 @@ class TestTheIndexFollowsTheWorld:
         found = set(query.static_near(BOX_LO, BOX_HI))
         assert static_grid(world) is not grid
         assert len(found) == 3
+
+    def test_the_static_epoch_is_none_once_a_kinematic_body_is_added(self) -> None:
+        world, _floor = world_with_floor()
+        posts_in_a_row(world, 50)
+        query = WorldQuery(world)
+        assert query.static_epoch() is not None
+        crate = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+        world.add_body(model.Motion(type=model.KINEMATIC, linearVelocity=(0.0, 0.0, 1.0)),
+                       collider=model.Collider(shape=crate), position=(1.0, 0.5, 30.0))
+        assert query.static_epoch() is None
 
     def test_moving_a_dynamic_body_does_not_rebuild_it(self) -> None:
         world, _ = world_with_floor()
@@ -269,7 +310,7 @@ class TestOneGatherAnUpdate:
         controller, _path = self.walk(world, 30)
         asked.clear()
         controller.update(DT)
-        assert len(controller._substeps(DT)) == 1
+        assert len(controller._substeps(DT)) == 1  # noqa: SLF001 the substep count has no public reader
         assert len(asked) <= 1
 
     def test_a_gather_is_held_across_updates_while_the_layout_holds(self, monkeypatch) -> None:

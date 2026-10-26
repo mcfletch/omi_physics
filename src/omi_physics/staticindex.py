@@ -75,11 +75,17 @@ class StaticGrid:
         self._fill_cells()
         self._loose = np.zeros(0, dtype=np.intp)
         self._loose_epoch = self.epoch
+        #: Whether any body changed since the build is kinematic now.
+        self._loose_movers = False
 
     @property
     def has_movers(self) -> bool:
-        """Whether any of the bodies is kinematic, and so moves without the layout changing."""
-        return bool(len(self._movers))
+        """Whether any of the bodies is kinematic, and so moves without the layout changing.
+
+        Counts the kinematic bodies of the build and those added or changed since,
+        as of the last :meth:`current`.
+        """
+        return bool(len(self._movers)) or self._loose_movers
 
     def current(self) -> bool:
         """Whether the grid, with the bodies it reads from the world, answers for the world.
@@ -95,8 +101,10 @@ class StaticGrid:
         changed = world.layout_changes_since(self.epoch)
         if changed is None or len(changed) > self.LOOSE_LIMIT:
             return False
-        self._loose = np.unique(np.asarray(changed, dtype=np.intp))
+        loose = np.unique(np.asarray(changed, dtype=np.intp))
+        self._loose = loose[loose < world.body_count]
         self._loose_epoch = world.layout_epoch
+        self._loose_movers = bool((world.motion_type[self._loose] == _KINEMATIC).any())
         return True
 
     def _cells(self, low: np.ndarray, high: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -139,10 +147,11 @@ class StaticGrid:
         """
         lo = np.asarray(lo, dtype='d')
         hi = np.asarray(hi, dtype='d')
-        gridded = self._gridded(lo, hi)
+        found = [self._gridded(lo, hi), self._others(lo, hi)]
         if len(self._loose):
-            gridded = gridded[~np.isin(gridded, self._loose)]
-        found = [gridded, self._others(lo, hi), self._changed(lo, hi)]
+            # A changed row is answered from the world as it is now, by _changed alone.
+            found = [rows[~np.isin(rows, self._loose)] for rows in found]
+        found.append(self._changed(lo, hi))
         return sorted(set(np.concatenate(found).tolist()))
 
     def _gridded(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:

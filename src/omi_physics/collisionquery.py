@@ -155,11 +155,17 @@ class WorldQuery:
         return None if grid.has_movers else self.world.layout_epoch
 
     def static_proxy(self, body: int) -> Proxy:
-        """The cached world-space proxy of static body ``body``."""
+        """The cached world-space proxy of static body ``body``.
+
+        Raises LookupError for a body with no collider, a vacant slot among them.
+        """
         proxy = self._proxies.get(body)
         if proxy is None:
             world = self.world
-            proxy = make_proxy(world.shapes[world.collider_shape[body]],
+            shape = int(world.collider_shape[body])
+            if shape < 0:
+                raise LookupError('body %d has no collider' % body)
+            proxy = make_proxy(world.shapes[shape],
                                world.position[body], world.orientation[body])
             self._proxies[body] = proxy
         return proxy
