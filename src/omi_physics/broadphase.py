@@ -585,22 +585,34 @@ def _sweep_from(world: "PhysicsWorld", movers: np.ndarray) -> tuple[np.ndarray, 
     A pair with something to report has a moving body in it, so each mover's
     box is tested against every body's, and the pairs are put in the order of
     the sweep: by where each body falls in the order of minimum x, then index.
+    A kinematic body is tested only against the bodies :func:`_moves_against`
+    pairs it with: dynamic bodies and triggers, and kinematic bodies where it
+    is a trigger itself.
     """
     n = world.body_count
     empty = np.zeros(0, dtype=np.intp)
     if n < 2 or not len(movers):
         return empty, empty
     lo, hi = world.aabb_min[:n], world.aabb_max[:n]
+    kind = world.motion_type[:n]
+    trigger = world.trigger_shape[:n] >= 0
+    meets: np.ndarray | None = None
     found_a, found_b = [], []
     for m in movers.tolist():
-        near = np.flatnonzero(np.all(hi >= lo[m], axis=1) & np.all(lo <= hi[m], axis=1))
+        overlapping = np.all(hi >= lo[m], axis=1) & np.all(lo <= hi[m], axis=1)
+        if kind[m] != _DYNAMIC_KIND:
+            if meets is None:
+                meets = (kind == _DYNAMIC_KIND) | trigger
+            overlapping &= (meets | (kind == _KINEMATIC_KIND)) if trigger[m] else meets
+        near = np.flatnonzero(overlapping)
         near = near[near != m]
-        found_a.append(np.full(len(near), m, dtype=np.intp))
-        found_b.append(near)
+        if len(near):
+            found_a.append(np.full(len(near), m, dtype=np.intp))
+            found_b.append(near)
+    if not found_a:
+        return empty, empty
     a = np.concatenate(found_a)
     b = np.concatenate(found_b)
-    if not len(a):
-        return empty, empty
     # The sweep names a pair once, earlier body first, in the order (minimum x, index).
     x = lo[:, 0]
     swap = (x[b] < x[a]) | ((x[b] == x[a]) & (b < a))
@@ -617,6 +629,10 @@ def _sweep_from(world: "PhysicsWorld", movers: np.ndarray) -> tuple[np.ndarray, 
             for body in involved.tolist()}
     order = sorted(range(len(a)), key=lambda k: (rank[int(a[k])], rank[int(b[k])]))
     return a[order], b[order]
+
+
+#: :attr:`PhysicsWorld.motion_type` of a kinematic body and of a dynamic one.
+_KINEMATIC_KIND, _DYNAMIC_KIND = 1, 2
 
 
 def _moves_against(world: "PhysicsWorld", a: np.ndarray, b: np.ndarray) -> np.ndarray:

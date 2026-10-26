@@ -60,6 +60,9 @@ compatibility promise.
   `_collide_native.upright_capsule_triangle_pushes`): no capsule proxy or contact array is made
   in depenetration, and the poses are those of the proxy path to the bit. twig-bb's frame with
   8 bots is 1.75 ms, from 2.16 ms.
+- The broad phase pairs a kinematic body only with the dynamic bodies and triggers near it (and
+  kinematic bodies, where it is a trigger), so a walker's stand-in among static colliders is
+  paired and ordered with nothing.
 
 ### Fixed
 

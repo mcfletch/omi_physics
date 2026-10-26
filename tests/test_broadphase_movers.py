@@ -22,8 +22,11 @@ def scattered(rng, movers: int) -> PhysicsWorld:
                            position=place)
     for _ in range(movers):
         kind = model.DYNAMIC if rng.random() < 0.5 else model.KINEMATIC
+        shape = int(rng.choice(shapes[:2]))
+        sensing = kind == model.KINEMATIC and rng.random() < 0.3
         world.add_body(model.Motion(type=kind, mass=1.0),
-                       collider=model.Collider(shape=int(rng.choice(shapes[:2]))),
+                       collider=None if sensing else model.Collider(shape=shape),
+                       trigger=model.Trigger(shape=shape) if sensing else None,
                        position=tuple(np.round(rng.uniform(-6, 6, 3), 1)))
     world.refit_aabbs()
     return world
@@ -47,3 +50,22 @@ def test_a_world_with_one_mover_is_not_swept_whole(monkeypatch):
     monkeypatch.setattr(broadphase, '_sweep', lambda *a: swept.append(1) or original(*a))
     world.step(1 / 60)
     assert swept == []
+
+
+def test_a_kinematic_body_with_nothing_to_meet_is_not_paired_or_sorted(monkeypatch):
+    """Beside static colliders alone, a kinematic body has no pair, and none is ordered."""
+    world = PhysicsWorld(gravity=model.Gravity(gravity=0.0))
+    box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+    for x in range(10):
+        world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box),
+                       position=(float(x), 0.0, 0.0))
+    world.add_body(model.Motion(type=model.STATIC), trigger=model.Trigger(shape=box),
+                   position=(30.0, 0.0, 0.0))
+    world.add_body(model.Motion(type=model.KINEMATIC), collider=model.Collider(shape=box),
+                   position=(4.5, 0.5, 0.0))
+    world.refit_aabbs()
+    asked = []
+    original = broadphase._moves_against              # noqa: SLF001 the test of each pair, counted
+    monkeypatch.setattr(broadphase, '_moves_against', lambda *a: asked.append(1) or original(*a))
+    found = broadphase._sweep_from(world, world._rows_by_motion()[2])  # noqa: SLF001 the path under test
+    assert found[0].tolist() == [] and asked == []
