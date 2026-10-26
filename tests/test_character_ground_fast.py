@@ -138,7 +138,9 @@ def test_a_sphere_above_its_local_clearance_never_touches_the_ground(seed):
     assert checked
 
 
-def test_on_gentle_ground_a_standing_capsule_slides_one_sphere():
+def test_on_gentle_ground_a_standing_capsule_slides_one_sphere(monkeypatch):
+    # The Python column; the compiled one slides none in Python (test_heightfield_column_native).
+    monkeypatch.setattr(heightfield, '_native', None)
     heights = gentle_heights()
     heights[:, -3:] += 6.0
     surface = heightfield.GridSurface(heights, origin=(-40.0, -2.0, -40.0), spacing=0.5)

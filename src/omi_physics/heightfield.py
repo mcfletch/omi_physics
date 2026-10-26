@@ -23,6 +23,16 @@ from collections.abc import Callable
 import numpy as np
 from numpy.typing import ArrayLike
 
+from ._accel import accelerators_disabled
+
+if accelerators_disabled():
+    _native = None
+else:
+    try:
+        from . import _collide_native as _native  # type: ignore[attr-defined]
+    except ImportError:                # pragma: no cover - pure-Python fallback
+        _native = None
+
 #: How many samples a ray march may take before it widens its step.
 MAX_RAY_SAMPLES = 1 << 17
 
@@ -194,6 +204,9 @@ class GridSurface(HeightSurface):
         self._numbers: tuple[list[list[float]], int, int, float, float, float, float, float] | None = None
         #: :meth:`_steepest_table` by its reach in cells across and along.
         self._steepest: dict[tuple[int, int], list[list[float]]] = {}
+        #: The grid and those tables as contiguous arrays, for the compiled column contacts.
+        self._compiled: dict[tuple[int, int], np.ndarray] = {}
+        self._contiguous: np.ndarray | None = None
 
     def sphere_contact(self, cx: float, cy: float, cz: float, radius: float
                        ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float], float]:
@@ -336,6 +349,8 @@ class GridSurface(HeightSurface):
         bound = self.lipschitz
         if bound is None or len(heights) > _WITH_NUMBERS:
             return super().column_contacts(x, z, heights, radius)
+        if _native is not None and hasattr(_native, 'grid_column_contacts'):
+            return self._compiled_column(x, z, heights, radius, bound)
         reach = 2.0 * radius * math.sqrt(1.0 + bound * bound)
         ground = self.height_at(x, z)
         near = [y for y in heights if y - ground < reach]
@@ -348,6 +363,28 @@ class GridSurface(HeightSurface):
         else:
             found = [self.sphere_contact(x, y, z, radius) for y in nearer]
         return [(point, normal, depth) for touching, point, normal, depth in found if touching]
+
+    def _compiled_column(self, x: float, z: float, heights: list[float], radius: float,
+                         bound: float) -> list[ColumnContact]:
+        """:meth:`column_contacts` by the compiled accelerator, which finds the same numbers."""
+        grid = self._contiguous
+        if grid is None:
+            grid = self._contiguous = np.ascontiguousarray(self.grid, dtype='d')
+        _rows, _r, _c, ox, oy, oz, sx, sz = self._frame()
+        reach = LOCAL_REACH * radius
+        wide = (math.ceil(reach / sx), math.ceil(reach / sz))
+        table = self._compiled.get(wide)
+        if table is None:
+            table = self._compiled[wide] = np.ascontiguousarray(self._steepest_list(wide))
+        return _native.grid_column_contacts(grid, ox, oy, oz, sx, sz, table, bound, x, z,
+                                            heights, radius)
+
+    def _steepest_list(self, wide: tuple[int, int]) -> list[list[float]]:
+        """:meth:`_steepest_table` for a reach of ``wide`` cells across and along, made once."""
+        table = self._steepest.get(wide)
+        if table is None:
+            table = self._steepest[wide] = self._steepest_table(*wide)
+        return table
 
     def _local_clearance(self, x: float, z: float, radius: float) -> tuple[float, float]:
         """The heights above the ground at ``(x, z)`` between which a sphere of ``radius`` there
@@ -369,10 +406,7 @@ class GridSurface(HeightSurface):
     def _steepest_near(self, x: float, z: float, reach: float) -> float:
         """The steepest slope of the cells within ``reach`` of ``(x, z)``, as a rise over a run."""
         _grid, rows, columns, ox, _oy, oz, sx, sz = self._frame()
-        wide = (math.ceil(reach / sx), math.ceil(reach / sz))
-        table = self._steepest.get(wide)
-        if table is None:
-            table = self._steepest[wide] = self._steepest_table(*wide)
+        table = self._steepest_list((math.ceil(reach / sx), math.ceil(reach / sz)))
         gx = (x - ox) / sx
         gz = (z - oz) / sz
         if not (0.0 <= gx <= columns - 1 and 0.0 <= gz <= rows - 1):

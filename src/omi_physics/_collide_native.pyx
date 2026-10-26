@@ -8,7 +8,7 @@ with fixed-size scratch, so a pair costs native arithmetic instead of dozens of
 tiny numpy calls. Boxes are passed as ``center(3)``, world rotation ``R(3,3)``
 (columns are the box axes) and half-extents ``half(3)``; no proxy object needed.
 """
-from libc.math cimport fabs, hypot, sqrt
+from libc.math cimport INFINITY, fabs, hypot, sqrt
 
 DEF EPS = 1e-9
 # Bounds on a sum of three squares inside which no square has underflowed or
@@ -586,3 +586,263 @@ def capsule_triangles(double[::1] cp0, double[::1] cp1, double radius,
             for m in range(3):
                 points[i, m] = btp[m]
             normals[i, 0] = nx; normals[i, 1] = ny; normals[i, 2] = nz
+
+
+# -- a column of spheres on a height grid ---------------------------------------
+# GridSurface.column_contacts and the routines it calls, operation for operation
+# and in the same order, so each answer is the one the Python finds to the bit.
+
+DEF SLIDES = 5
+DEF SETTLED = 1e-9
+DEF GENTLE = 0.55
+DEF ONE_BY_ONE = 3
+DEF COLUMN_MOST = 16
+DEF LOCAL_REACH = 4.0
+
+cdef struct _Grid:
+    const double* heights
+    Py_ssize_t rows
+    Py_ssize_t columns
+    double ox, oy, oz, sx, sz
+
+
+cdef inline double _grid_height(_Grid* g, double x, double z) noexcept nogil:
+    """GridSurface.height_at: the bilinear height at ``(x, z)``, ``-inf`` off the grid."""
+    cdef double gx = (x - g.ox) / g.sx
+    cdef double gz = (z - g.oz) / g.sz
+    cdef Py_ssize_t i, j
+    cdef double u, v, h00, h10, h01, h11
+    if not (0.0 <= gx and gx <= <double>(g.columns - 1)
+            and 0.0 <= gz and gz <= <double>(g.rows - 1)):
+        return -INFINITY
+    i = <Py_ssize_t>gx
+    if i > g.columns - 2:
+        i = g.columns - 2
+    j = <Py_ssize_t>gz
+    if j > g.rows - 2:
+        j = g.rows - 2
+    u = gx - <double>i
+    v = gz - <double>j
+    h00 = g.heights[j * g.columns + i]
+    h10 = g.heights[j * g.columns + i + 1]
+    h01 = g.heights[(j + 1) * g.columns + i]
+    h11 = g.heights[(j + 1) * g.columns + i + 1]
+    return (h00 * (1.0 - u) * (1.0 - v) + h10 * u * (1.0 - v) + h01 * (1.0 - u) * v
+            + h11 * u * v) + g.oy
+
+
+cdef inline double _grid_sample(_Grid* g, double x, double z,
+                                double* nx, double* ny, double* nz) noexcept nogil:
+    """GridSurface._sample_one: the height, and the unit normal into ``nx, ny, nz``."""
+    cdef double gx = (x - g.ox) / g.sx
+    cdef double gz = (z - g.oz) / g.sz
+    cdef Py_ssize_t i, j
+    cdef double u, v, h00, h10, h01, h11, height, slope_x, slope_z, length
+    if not (0.0 <= gx and gx <= <double>(g.columns - 1)
+            and 0.0 <= gz and gz <= <double>(g.rows - 1)):
+        nx[0] = 0.0
+        ny[0] = 1.0
+        nz[0] = 0.0
+        return -INFINITY
+    i = <Py_ssize_t>gx
+    if i > g.columns - 2:
+        i = g.columns - 2
+    j = <Py_ssize_t>gz
+    if j > g.rows - 2:
+        j = g.rows - 2
+    u = gx - <double>i
+    v = gz - <double>j
+    h00 = g.heights[j * g.columns + i]
+    h10 = g.heights[j * g.columns + i + 1]
+    h01 = g.heights[(j + 1) * g.columns + i]
+    h11 = g.heights[(j + 1) * g.columns + i + 1]
+    height = (h00 * (1.0 - u) * (1.0 - v) + h10 * u * (1.0 - v) + h01 * (1.0 - u) * v
+              + h11 * u * v) + g.oy
+    slope_x = ((h10 - h00) * (1.0 - v) + (h11 - h01) * v) / g.sx
+    slope_z = ((h01 - h00) * (1.0 - u) + (h11 - h10) * u) / g.sz
+    length = sqrt(slope_x * slope_x + 1.0 + slope_z * slope_z)
+    nx[0] = -slope_x / length
+    ny[0] = 1.0 / length
+    nz[0] = -slope_z / length
+    return height
+
+
+cdef inline double _clearance_spread(double slope) noexcept nogil:
+    """heightfield.clearance_spread."""
+    cdef double share, grow
+    if slope > GENTLE:
+        return INFINITY
+    share = slope / (1.0 + slope * slope)
+    grow = 2.0 * slope * share
+    return share * (1.0 + grow + grow * grow + grow * grow * grow)
+
+
+cdef inline double _local_clearance(double slope, double radius) noexcept nogil:
+    """heightfield.local_clearance."""
+    cdef double spread = _clearance_spread(slope)
+    cdef double room = 1.0 - 2.0 * slope * spread
+    if room <= 0.0:
+        return INFINITY
+    return radius * sqrt(1.0 + slope * slope) / room * (1.0 + 1e-9) + 1e-9
+
+
+cdef inline void _slide_one(_Grid* g, double cx, double cy, double cz, double* found) noexcept nogil:
+    """GridSurface.sphere_contact before its depth: ``found`` is inside, foot x, ground y, foot z,
+    the normal and the distance to the tangent plane."""
+    cdef double x = cx, z = cz
+    cdef double ground_x = 0.0, ground_y = 0.0, ground_z = 0.0
+    cdef double nx = 0.0, ny = 1.0, nz = 0.0, distance = 0.0, height, foot_x, foot_z, dx, dz
+    cdef bint inside = False
+    cdef int k
+    for k in range(SLIDES):
+        height = _grid_sample(g, x, z, &nx, &ny, &nz)
+        inside = height != -INFINITY
+        ground_x = x
+        ground_y = height if inside else 0.0
+        ground_z = z
+        distance = (cx - ground_x) * nx + (cy - ground_y) * ny + (cz - ground_z) * nz
+        if inside:
+            foot_x = cx - distance * nx
+            foot_z = cz - distance * nz
+        else:
+            foot_x = x
+            foot_z = z
+        dx = fabs(foot_x - x)
+        dz = fabs(foot_z - z)
+        x = foot_x
+        z = foot_z
+        if (dz if dz > dx else dx) < SETTLED:
+            break
+    found[0] = 1.0 if inside else 0.0
+    found[1] = ground_x
+    found[2] = ground_y
+    found[3] = ground_z
+    found[4] = nx
+    found[5] = ny
+    found[6] = nz
+    found[7] = distance
+
+
+cdef void _slide_together(_Grid* g, double cx, double cz, double* ys, int count,
+                          double* found) noexcept nogil:
+    """GridSurface._slide_together for spheres sharing ``(cx, cz)``: eight numbers a sphere into
+    ``found``, as :func:`_slide_one` gives them."""
+    cdef double xs[COLUMN_MOST]
+    cdef double zs[COLUMN_MOST]
+    cdef double moved, height, nx, ny, nz, ground_y, distance, foot_x, foot_z, step
+    cdef double* row
+    cdef int k, s
+    cdef bint inside
+    for k in range(count):
+        xs[k] = cx
+        zs[k] = cz
+    for s in range(SLIDES):
+        moved = 0.0
+        for k in range(count):
+            height = _grid_sample(g, xs[k], zs[k], &nx, &ny, &nz)
+            inside = height != -INFINITY
+            ground_y = height if inside else 0.0
+            distance = (cx - xs[k]) * nx + (ys[k] - ground_y) * ny + (cz - zs[k]) * nz
+            row = found + 8 * k
+            row[0] = 1.0 if inside else 0.0
+            row[1] = xs[k]
+            row[2] = ground_y
+            row[3] = zs[k]
+            row[4] = nx
+            row[5] = ny
+            row[6] = nz
+            row[7] = distance
+        for k in range(count):
+            row = found + 8 * k
+            if row[0] != 0.0:
+                foot_x = cx - row[7] * row[4]
+                foot_z = cz - row[7] * row[6]
+            else:
+                foot_x = row[1]
+                foot_z = row[3]
+            step = fabs(foot_x - row[1])
+            if step > moved:
+                moved = step
+            step = fabs(foot_z - row[3])
+            if step > moved:
+                moved = step
+            xs[k] = foot_x
+            zs[k] = foot_z
+        if moved < SETTLED:
+            break
+
+
+def grid_column_contacts(const double[:, ::1] heights, double ox, double oy, double oz,
+                         double sx, double sz, const double[:, ::1] steepest, double lipschitz,
+                         double x, double z, list ys, double radius):
+    """GridSurface.column_contacts for at most 16 spheres: ``(point, normal, depth)`` of each
+    touching sphere of ``radius`` at ``(x, y, z)`` for ``y`` in ``ys``, in their order.
+
+    ``steepest`` is the grid's table of the steepest slope near each cell for a reach of
+    four radii (GridSurface._steepest_table).
+    """
+    cdef _Grid g
+    g.heights = &heights[0, 0]
+    g.rows = heights.shape[0]
+    g.columns = heights.shape[1]
+    g.ox = ox; g.oy = oy; g.oz = oz; g.sx = sx; g.sz = sz
+    cdef int count = len(ys)
+    if count > COLUMN_MOST:
+        raise ValueError('a column of at most 16 spheres')
+    cdef double column[COLUMN_MOST]
+    cdef double kept[COLUMN_MOST]
+    cdef double found[8 * COLUMN_MOST]
+    cdef int k, near = 0, nearer = 0
+    for k in range(count):
+        column[k] = ys[k]
+    cdef double reach = 2.0 * radius * sqrt(1.0 + lipschitz * lipschitz)
+    cdef double ground = _grid_height(&g, x, z)
+    cdef double limit, top, slope, spread, wide_reach, gx, gz, above, depth, half
+    cdef Py_ssize_t i, j
+    for k in range(count):
+        if column[k] - ground < reach:
+            kept[near] = column[k]
+            near += 1
+    if near:
+        # GridSurface._local_clearance and _steepest_near.
+        wide_reach = LOCAL_REACH * radius
+        gx = (x - ox) / sx
+        gz = (z - oz) / sz
+        if not (0.0 <= gx and gx <= <double>(g.columns - 1)
+                and 0.0 <= gz and gz <= <double>(g.rows - 1)):
+            slope = INFINITY
+        else:
+            i = <Py_ssize_t>gx
+            if i > g.columns - 2:
+                i = g.columns - 2
+            j = <Py_ssize_t>gz
+            if j > g.rows - 2:
+                j = g.rows - 2
+            slope = steepest[j, i]
+        spread = _clearance_spread(slope)
+        limit = _local_clearance(slope, radius)
+        if limit != limit or limit == INFINITY or limit == -INFINITY:
+            limit = INFINITY
+            top = INFINITY
+        else:
+            top = wide_reach / spread if spread > 0.0 else INFINITY
+        for k in range(near):
+            above = kept[k] - ground
+            if not (limit <= above and above < top):
+                kept[nearer] = kept[k]
+                nearer += 1
+    if nearer > ONE_BY_ONE:
+        _slide_together(&g, x, z, kept, nearer, found)
+    else:
+        for k in range(nearer):
+            _slide_one(&g, x, kept[k], z, found + 8 * k)
+    cdef list out = []
+    cdef double* row
+    for k in range(nearer):
+        row = found + 8 * k
+        depth = radius - row[7]
+        if row[0] != 0.0 and depth > 0.0:
+            half = 0.5 * depth
+            out.append(((row[1] - row[4] * half, row[2] - row[5] * half, row[3] - row[6] * half),
+                        (row[4], row[5], row[6]), depth))
+    return out

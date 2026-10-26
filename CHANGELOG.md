@@ -50,6 +50,11 @@ compatibility promise.
   `heightfield.local_clearance` of the steepest slope within `LOCAL_REACH` radii are left out. The controller's
   share of a step on a hill grid is less than half what it was. Poses agree with the contact solver's to 1e-9 m a step;
   `CharacterController.ground_fast_path = False` turns it off.
+- `GridSurface.column_contacts` for up to 16 spheres runs in the compiled accelerator
+  (`_collide_native.grid_column_contacts`) where it is built, with the same arithmetic in the
+  same order, so the contacts are the Python's to the bit. A character's height-field contacts
+  on the hill grid cost 2 us a column, from 8 us. The accelerators are compiled with
+  `-ffp-contract=off`, so no multiply and add are fused on a processor that has the instruction.
 
 ### Fixed
 

@@ -14,6 +14,10 @@ import sys
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext as _build_ext
 
+#: Optimised, and with no multiply and add fused into one rounding, so the compiled
+#: arithmetic rounds as the Python twin of each routine does on every processor.
+_FLAGS = ["-O3", "-ffp-contract=off"]
+
 # Extension name -> path to its .pyx (falling back to a shipped .c).
 _ACCEL_STEMS = [
     "src/omi_physics/_solver_native",
@@ -28,9 +32,9 @@ def accelerator_extensions():
         name = "omi_physics." + os.path.basename(stem)
         pyx, csrc = stem + ".pyx", stem + ".c"
         if os.path.exists(pyx):
-            exts.append(Extension(name, [pyx], extra_compile_args=["-O3"]))
+            exts.append(Extension(name, [pyx], extra_compile_args=_FLAGS))
         elif os.path.exists(csrc):
-            exts.append(Extension(name, [csrc], extra_compile_args=["-O3"]))
+            exts.append(Extension(name, [csrc], extra_compile_args=_FLAGS))
     try:
         from Cython.Build import cythonize  # noqa: PLC0415 Cython is optional; .c sources suffice
         return cythonize(exts, language_level=3, quiet=True)
