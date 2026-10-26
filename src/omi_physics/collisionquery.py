@@ -19,7 +19,7 @@ from weakref import WeakKeyDictionary
 import numpy as np
 
 from . import model
-from .body import Proxy, make_proxy
+from .body import Proxy, make_proxy, pose_key
 from .mathutil import Vec
 from .raycast import DEFAULT_RANGE, RayHit, raycast
 from .staticindex import StaticGrid
@@ -29,12 +29,18 @@ if TYPE_CHECKING:
 
 __all__ = ['CollisionQuery', 'DynamicBody', 'WorldQuery', 'dynamic_rows']
 
-#: World-space proxies for each world's static colliders, keyed by world and
-#: then by body index. Weak, so an unloaded level takes its collision copy with
-#: it. A trimesh proxy is a transformed copy of the geometry with a grid over
-#: it, so one per controller is one copy of the level per character in it;
-#: sharing is correct because these bodies never move.
-STATIC_PROXIES: "WeakKeyDictionary[Any, dict[int, Proxy]]" = WeakKeyDictionary()
+#: The motion type number of a kinematic body in :attr:`PhysicsWorld.motion_type`.
+_KINEMATIC = 1
+
+#: World-space proxies for each world's fixed colliders, keyed by world and
+#: then by body index, each with the pose key it was built at for a kinematic
+#: body and None for a static one. Weak, so an unloaded level takes its
+#: collision copy with it. A trimesh proxy is a transformed copy of the geometry
+#: with a grid over it, so one per controller is one copy of the level per
+#: character in it. The world drops a static body's entry when it places or
+#: removes the body; a kinematic body's entry is rebuilt when its pose differs.
+STATIC_PROXIES: "WeakKeyDictionary[Any, dict[int, tuple[tuple | None, Proxy]]]" = (
+    WeakKeyDictionary())
 
 
 #: The grid over each world's fixed bodies, rebuilt when the world's layout changes.
@@ -64,7 +70,7 @@ def dynamic_rows(world: "PhysicsWorld") -> np.ndarray:
     return found[1]
 
 
-def static_proxies(world: "PhysicsWorld") -> dict[int, Proxy]:
+def static_proxies(world: "PhysicsWorld") -> dict[int, tuple[tuple | None, Proxy]]:
     """The proxy cache belonging to ``world``, made on first use."""
     found = STATIC_PROXIES.get(world)
     if found is None:
@@ -157,17 +163,21 @@ class WorldQuery:
     def static_proxy(self, body: int) -> Proxy:
         """The cached world-space proxy of static body ``body``.
 
+        A kinematic body's proxy is built again when its pose has changed.
         Raises LookupError for a body with no collider, a vacant slot among them.
         """
-        proxy = self._proxies.get(body)
-        if proxy is None:
-            world = self.world
-            shape = int(world.collider_shape[body])
-            if shape < 0:
-                raise LookupError('body %d has no collider' % body)
-            proxy = make_proxy(world.shapes[shape],
-                               world.position[body], world.orientation[body])
-            self._proxies[body] = proxy
+        world = self.world
+        pose = (pose_key(world.position[body], world.orientation[body])
+                if world.motion_type[body] == _KINEMATIC else None)
+        cached = self._proxies.get(body)
+        if cached is not None and cached[0] == pose:
+            return cached[1]
+        shape = int(world.collider_shape[body])
+        if shape < 0:
+            raise LookupError('body %d has no collider' % body)
+        proxy = make_proxy(world.shapes[shape],
+                           world.position[body].copy(), world.orientation[body].copy())
+        self._proxies[body] = (pose, proxy)
         return proxy
 
     def dynamic_near(self, lo: np.ndarray, hi: np.ndarray) -> list[DynamicBody]:

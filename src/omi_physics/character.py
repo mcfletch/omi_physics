@@ -793,8 +793,8 @@ class CharacterController:
         The query keeps these, and for a live world shares them between every
         avatar walking in it: a trimesh proxy is a transformed copy of the
         geometry with a uniform grid over it, so one per controller would be
-        one copy of the level per person in it. Sharing is correct because
-        these bodies never move.
+        one copy of the level per person in it. The query builds a proxy again
+        for a body that has been placed or has moved.
         """
         return self.query.static_proxy(j)
 

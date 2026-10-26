@@ -1071,6 +1071,7 @@ class PhysicsWorld:
         if fixed:
             self._wake_near(i)
             self._layout_changed(i)
+            self._forget_proxy(i)
 
     def moved(self, rows: ArrayLike) -> None:
         """Record that the bodies at ``rows`` were placed by writing their poses.
@@ -1091,6 +1092,7 @@ class PhysicsWorld:
                 self._fit_body(i, self._fitted_margin)
                 self._wake_near(i)
                 self._layout_changed(i)
+                self._forget_proxy(i)
 
     def _wake_near(self, i: int) -> None:
         """Wake the dynamic bodies whose boxes overlap body ``i``'s.
@@ -1168,13 +1170,17 @@ class PhysicsWorld:
         if self._reporting != 'off':
             self._deliver(self._tracker.retire(self, i))
 
-    def _forget_body(self, i: int) -> None:
-        """Drop per-body caches other modules keep on the world."""
+    def _forget_proxy(self, i: int) -> None:
+        """Drop the shared world-space proxy of fixed body ``i``."""
         from .collisionquery import STATIC_PROXIES  # noqa: PLC0415 collisionquery imports this module
 
         proxies = STATIC_PROXIES.get(self)
         if proxies is not None:
             proxies.pop(i, None)
+
+    def _forget_body(self, i: int) -> None:
+        """Drop per-body caches other modules keep on the world."""
+        self._forget_proxy(i)
         meshes = getattr(self, '_raycast_meshes', None)
         if meshes is not None:
             # A compound's meshes are kept under the body's index and the part's.

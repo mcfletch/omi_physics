@@ -261,8 +261,8 @@ class TriangleProxy:
 class TriangleMeshProxy:
     """Static triangle soup: per-triangle collision against a moving convex.
 
-    Triangle AABBs are precomputed for a cheap vectorized overlap query; the
-    proxy is meant to be cached for a (static) body since it never moves.
+    Triangle AABBs are precomputed for a vectorized overlap query. The proxy
+    holds the triangles at one pose and is cached for a body while it keeps that pose.
     """
     kind = 'trimesh'
 

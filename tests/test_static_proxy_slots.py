@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from omi_physics import model
+from omi_physics import mathutil, model
 from omi_physics.collisionquery import WorldQuery
 from omi_physics.world import PhysicsWorld
 
@@ -51,3 +51,26 @@ def test_a_vacant_slot_has_no_proxy():
     world.remove_body(first)
     with pytest.raises(LookupError):
         query.static_proxy(first)
+
+
+def test_a_fixed_body_turned_in_place_is_answered_turned():
+    world, query, first = world_with_a_slab()
+    before = query.static_proxy(first)
+    quarter = (0.0, np.sin(np.pi / 4), 0.0, np.cos(np.pi / 4))
+    world.place_body(first, orientation=quarter)
+    after = query.static_proxy(first)
+    assert after is not before
+    assert np.allclose(after.R[:, 0], (0.0, 0.0, -1.0))
+
+
+def test_a_kinematic_body_is_answered_where_a_step_has_moved_it():
+    world = PhysicsWorld()
+    slab = world.add_shape(model.Shape.box((4.0, 1.0, 4.0)))
+    lift = world.add_body(model.Motion(type=model.KINEMATIC, angularVelocity=(0.0, 1.0, 0.0)),
+                          collider=model.Collider(shape=slab))
+    query = WorldQuery(world)
+    before = query.static_proxy(lift)
+    world.step(0.5)
+    after = query.static_proxy(lift)
+    assert after is not before
+    assert np.allclose(after.R, mathutil.quat_to_matrix(world.orientation[lift]))
