@@ -316,6 +316,8 @@ class CharacterController:
         #: ceiling), -1 below (a bottom), 0 for open water.  See _update_swim.
         self._swim_contact = 0.0
         self.mode = 'walk'
+        #: Metres a second that replace the tier's speed, or None for the tier's (``set_move``).
+        self.move_speed: float | None = None
         self.move_dir = np.zeros(3)                         # world horizontal unit
         self.fly_dir = np.zeros(3)
         self.push = np.zeros(3)                             # impulse-carried horizontal m/s
@@ -494,8 +496,13 @@ class CharacterController:
         return self.base() + UP * self.caps.eyeHeight
 
     # -- input -----------------------------------------------------------
-    def set_move(self, direction: Vec, mode: str = 'walk') -> None:
-        """Set the desired horizontal move (flattened to the ground plane) and speed tier."""
+    def set_move(self, direction: Vec, mode: str = 'walk', speed: float | None = None) -> None:
+        """Set the desired horizontal move (flattened to the ground plane) and speed tier.
+
+        ``speed`` in metres a second replaces the tier's speed from the
+        capabilities; None goes at the tier's. A crouch goes no faster than
+        ``crouchSpeed`` either way.
+        """
         d = np.asarray(direction, dtype='d')
         d = d * FLAT                                        # flatten to ground plane
         n = np.linalg.norm(d)
@@ -503,6 +510,7 @@ class CharacterController:
         if n > 1e-9:
             self._heading = self.move_dir
         self.mode = mode
+        self.move_speed = None if speed is None else float(speed)
 
     def set_fly_move(self, direction: Vec) -> None:
         """Set the desired fly move (full 3D unit direction, no ground flattening)."""
@@ -515,8 +523,11 @@ class CharacterController:
 
         A steered slide goes at the speed of the mode, not the crouch's."""
         slide = self._slide
+        given = self.move_speed
         if self.crouching and not (slide is not None and slide.steer):
-            return self.caps.crouchSpeed
+            return self.caps.crouchSpeed if given is None else min(given, self.caps.crouchSpeed)
+        if given is not None:
+            return given
         if self.mode == 'sprint' and self.caps.canSprint:
             return self.caps.sprintSpeed
         if self.mode == 'run':

@@ -150,3 +150,22 @@ def test_a_step_up_probes_along_the_ground_whatever_the_slope_of_the_move():
     mounted = ch._try_step_up(climbing, 1.0 / 120.0)    # noqa: SLF001 the probe under test
     assert mounted is not None
     assert mounted[1] - 0.5 * ch.height == pytest.approx(level + 0.2, abs=0.01)
+
+
+def test_a_move_given_a_speed_goes_at_it_whatever_the_mode():
+    world = floor_world()
+    caps = CharacterCapabilities(walkSpeed=1.5, runSpeed=6.0, crouchSpeed=1.0)
+    ch = standing_character(world, caps)
+    ch.set_move((1, 0, 0), mode='run', speed=2.5)
+    assert ch.speed() == 2.5
+    ch.set_move((1, 0, 0), mode='walk', speed=2.5)
+    start = ch.position[0]
+    for _ in range(60):
+        ch.update(DT)
+    assert ch.position[0] - start == pytest.approx(2.5, abs=1e-6)
+    ch.set_crouch(True)
+    assert ch.speed() == 1.0                            # a crouch is no faster than its own speed
+    ch.set_crouch(False)
+    ch.set_move((1, 0, 0), mode='run')
+    assert ch.speed() == 6.0                            # no speed: the mode's again
+    assert caps.runSpeed == 6.0 and caps.walkSpeed == 1.5
