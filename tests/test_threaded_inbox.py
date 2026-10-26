@@ -312,37 +312,55 @@ class TestStart:
 
 
 class TestStopAndStart:
-    def test_a_stop_from_a_command_lets_a_later_start_run_again(self, sim) -> None:
+    def test_a_stop_from_a_command_lets_a_start_run_again_at_once(self, sim) -> None:
         sim.start()
-        sim.call(lambda world: sim.stop()).result(timeout=5)
-        deadline = time.monotonic() + 5
-        while sim._thread is not None and time.monotonic() < deadline:  # noqa: SLF001 the thread's exit is what is tested
-            time.sleep(0.01)
+        stopped = sim.call(lambda world: (sim.stop(), threading.current_thread())[1])
+        first = stopped.result(timeout=5)
         sim.start()
-        assert sim.call(lambda world: 'again').result(timeout=5) == 'again'
+        assert sim.call(lambda world: threading.current_thread()).result(timeout=5) is not first
+        first.join(timeout=5)
+        assert not first.is_alive()
 
     def test_a_stop_that_times_out_leaves_one_loop_stepping(self, moving) -> None:
-        moving.STOP_TIMEOUT = 0.05
-        stepping: set[int] = set()
-        moving.world.add_step_hook(before=lambda step: stepping.add(threading.get_ident()))
-        held = threading.Event()
+        moving.STOP_TIMEOUT = 0.0
         release = threading.Event()
+        restarter: list[threading.Thread] = []
 
-        def block(world: PhysicsWorld) -> None:
+        class ReleasedByTheRestart(threading.Event):
+            """The wake event; the restart clearing it releases the blocked command.
+
+            start() clears it once it has made the run's stop token, so the old
+            thread finishes its command with a start already under way.
+            """
+
+            def clear(self) -> None:
+                super().clear()
+                if restarter and threading.current_thread() is restarter[0]:
+                    release.set()
+
+        moving._wake = ReleasedByTheRestart()  # noqa: SLF001 the restart is made to interleave
+        stepped: list[threading.Thread] = []
+        moving.world.add_step_hook(
+            before=lambda step: release.is_set() and stepped.append(threading.current_thread()))
+        held = threading.Event()
+
+        def block(world: PhysicsWorld) -> threading.Thread:
             held.set()
             release.wait(5)
+            return threading.current_thread()
 
         moving.start()
-        moving.post(block)
+        blocked = moving.call(block)
         assert held.wait(5)
         moving.stop()
-        # start() publishes under the world lock, which the blocked command holds.
-        threading.Timer(0.1, release.set).start()
-        moving.start()
-        time.sleep(0.1)
-        stepping.clear()
-        assert moving.wait_steps(moving.steps + 20, timeout=10)
-        assert len(stepping) == 1
+        restarter.append(threading.Thread(target=moving.start))
+        restarter[0].start()
+        old = blocked.result(timeout=5)
+        restarter[0].join(timeout=5)
+        old.join(timeout=5)
+        assert not old.is_alive()
+        assert moving.wait_steps(moving.steps + 5, timeout=10)
+        assert stepped and old not in stepped
 
 
 class TestCallDuringAStep:
