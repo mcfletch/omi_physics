@@ -271,7 +271,9 @@ class _InertIndex:
         self.rank = np.zeros(count, dtype=np.intp)
         self.rank[self.rows] = np.arange(len(self.rows))
         width = self.hi[self.rows, 0] - self.lo[self.rows, 0]
-        cutoff = _LARGE_EXTENT * max(float(np.median(width)), 1e-6)
+        finite = width[np.isfinite(width)]
+        typical = float(np.median(finite)) if len(finite) else 0.0
+        cutoff = _LARGE_EXTENT * max(typical, 1e-6)
         small = width <= cutoff
         self.large = self.rows[~small]            # tested against every dynamic body
         self.small = self.rows[small]

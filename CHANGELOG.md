@@ -14,6 +14,9 @@ compatibility promise.
   `set_collider` changes or removes its collider, and `pose_arrays()` gives a compute backend
   the writable pose columns.
 - `refit_aabbs(rows=)` records the static bodies among the rows as placed.
+- `add_body`, `add_bodies` and `place_body` raise `ValueError` for a position that is not 3
+  finite numbers or an orientation that is not 4. One static body with a box of no finite width
+  no longer makes the broad phase test every static body against every dynamic one.
 - `WorldQuery.static_proxy` builds a proxy again for a static body that was placed and for a
   kinematic body whose pose changed, and raises `LookupError` for a body with no collider.
 - `StaticGrid.near` leaves out a removed large or kinematic body, and `WorldQuery.static_epoch()`

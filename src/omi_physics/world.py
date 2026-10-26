@@ -71,6 +71,14 @@ class Step:
     time: float
 
 
+def _pose_vector(value: ArrayLike, width: int, what: str) -> np.ndarray:
+    """``value`` as ``width`` finite floats; ValueError naming ``what`` otherwise."""
+    vector = np.asarray(value, dtype='d')
+    if vector.shape != (width,) or not np.isfinite(vector).all():
+        raise ValueError('a %s is %d finite numbers, got %r' % (what, width, value))
+    return vector
+
+
 def _column(name: str, writable: bool = True) -> property:
     """A property answering column ``name`` over the live bodies.
 
@@ -889,6 +897,8 @@ class PhysicsWorld:
         ``sensor`` makes its collider a sensor (:meth:`is_sensor`).
         Grows the columnar arrays if needed.
         """
+        position = _pose_vector(position, 3, 'position')
+        orientation = _pose_vector(orientation, 4, 'orientation')
         if motion is None:
             motion = model.Motion()
         if (motion.type != model.STATIC and collider is not None
@@ -977,6 +987,9 @@ class PhysicsWorld:
         points = np.asarray(positions, dtype='d')
         if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError('positions are an (N, 3) array, got shape %r' % (points.shape,))
+        if not np.isfinite(points).all():
+            raise ValueError('positions are finite, got %r'
+                             % (points[~np.isfinite(points).all(axis=1)][:3].tolist(),))
         if not 0 <= shape_index < len(self.shapes):
             raise IndexError('no shape %r: the world holds %d' % (shape_index, len(self.shapes)))
         if motion is None:
@@ -988,7 +1001,7 @@ class PhysicsWorld:
             return np.zeros(0, dtype=np.intp)
         collider = collider or model.Collider()
         shape = self.shapes[shape_index]
-        turn = np.asarray(orientation, dtype='d')
+        turn = _pose_vector(orientation, 4, 'orientation')
         reused = [self._free.pop() for _ in range(min(count, len(self._free)))]
         fresh = count - len(reused)
         if self._n + fresh > self._cap:
@@ -1120,15 +1133,19 @@ class PhysicsWorld:
         Either argument may be left out, which moves or turns the body without
         touching the other.
         """
+        if position is not None:
+            position = _pose_vector(position, 3, 'position')
+        if orientation is not None:
+            orientation = _pose_vector(orientation, 4, 'orientation')
         fixed = self._motion_type[i] == _STATIC
         if fixed:
             self._wake_near(i)
         if position is not None:
-            self._position[i] = np.asarray(position, dtype='d')
-            self._prev_position[i] = self._position[i]
+            self._position[i] = position
+            self._prev_position[i] = position
         if orientation is not None:
-            self._orientation[i] = np.asarray(orientation, dtype='d')
-            self._prev_orientation[i] = self._orientation[i]
+            self._orientation[i] = orientation
+            self._prev_orientation[i] = orientation
         self._fit_body(i, margin)
         if fixed:
             self._wake_near(i)

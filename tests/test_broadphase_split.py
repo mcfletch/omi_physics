@@ -172,3 +172,38 @@ def test_a_world_with_few_static_bodies_is_swept_whole() -> None:
     split = BroadPhase()
     split.pairs(small)
     assert split._inert is None                # noqa: SLF001 the index is what is being exercised
+
+
+def test_a_static_body_with_a_box_of_no_width_leaves_the_rest_small() -> None:
+    world = build(9, False)
+    trunk = int(np.flatnonzero(world.motion_type == 0)[5])
+    world.pose_arrays()[0][trunk] = np.nan
+    world.moved([trunk])
+    split = BroadPhase()
+    split.pairs(world)
+    index = split._inert                       # noqa: SLF001 the index is what is being exercised
+    assert index is not None
+    assert len(index.large) <= 2
+
+
+@pytest.mark.parametrize('position', [(np.nan, 0.0, 0.0), (0.0, np.inf, 0.0), (1.0, 2.0)])
+def test_a_body_at_no_position_is_refused(position) -> None:
+    world = PhysicsWorld()
+    box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+    with pytest.raises(ValueError, match='position'):
+        world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box),
+                       position=position)
+    with pytest.raises(ValueError, match='position'):
+        world.add_bodies(box, [position])
+    placed = world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box))
+    with pytest.raises(ValueError, match='position'):
+        world.place_body(placed, position=position)
+    assert np.array_equal(world.position[placed], (0.0, 0.0, 0.0))
+
+
+def test_a_body_at_no_orientation_is_refused() -> None:
+    world = PhysicsWorld()
+    box = world.add_shape(model.Shape.box((1.0, 1.0, 1.0)))
+    with pytest.raises(ValueError, match='orientation'):
+        world.add_body(model.Motion(type=model.STATIC), collider=model.Collider(shape=box),
+                       orientation=(0.0, np.nan, 0.0, 1.0))
