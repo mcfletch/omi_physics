@@ -1591,7 +1591,9 @@ class CharacterController:
         speed = flat_length(horiz)
         if speed < 1e-6:
             return None
-        hdir = horiz / speed
+        # Level: a move turned along a tilted contact rises, and probing along it
+        # would look for the ledge above where it is.
+        hdir = horiz * FLAT / speed
         lifted = self.position + UP * self.caps.stepHeight
         if self._overlaps(self._proxy(lifted)):
             return None                                     # too tall / ceiling above

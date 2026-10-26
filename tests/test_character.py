@@ -133,3 +133,20 @@ def test_blocked_by_tall_step():
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))
+
+
+def test_a_step_up_probes_along_the_ground_whatever_the_slope_of_the_move():
+    """A move turned up a tilted contact still finds the ledge ahead.
+
+    Grounded on the rounded edge of a rock, a walker's move is turned along a
+    steep normal and rises faster than it goes forward. The step-up looks for
+    the ledge a capsule radius ahead and a step height up, measured on the level.
+    """
+    world = floor_world()
+    add_box(world, (40, 0.2, 40), (20.32, 0.1, 0))      # a 0.2 m ledge just ahead
+    ch = standing_character(world)
+    level = ch.base()[1]
+    climbing = np.array([1.0, 2.0, 0.0])                # forward 1 m/s, up 2 m/s
+    mounted = ch._try_step_up(climbing, 1.0 / 120.0)    # noqa: SLF001 the probe under test
+    assert mounted is not None
+    assert mounted[1] - 0.5 * ch.height == pytest.approx(level + 0.2, abs=0.01)
