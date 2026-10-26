@@ -110,8 +110,9 @@ class PhysicsWorld:
             '1', 'true', 'yes', 'on')
         #: The rows of each motion type, as ``(population epoch, dynamic, kinematic, moving)``.
         self._motion_rows: tuple[int, np.ndarray, np.ndarray, np.ndarray] | None = None
-        #: Whether any body is a trigger or a sensor, with the population epoch it was found at.
-        self._sensing: tuple[int, bool] | None = None
+        #: Whether any body is a trigger or a sensor, and the rows of the triggers, with the
+        #: population epoch they were found at.
+        self._sensing: tuple[int, bool, np.ndarray] | None = None
         self.fixed_dt = fixed_dt
         self.max_frame = max_frame
         self._init_backend(backend, gpu_threshold)
@@ -1517,9 +1518,11 @@ class PhysicsWorld:
         """Whether a collision pass would find nothing to solve, sense, fire or end.
 
         So when no dynamic body is awake, none sleeps where a kinematic body can
-        wake it, no body is a trigger or a sensor, and no pair is touching from
-        the step before: a kinematic body against a fixed one makes no contact
-        the solver acts on.
+        wake it, no pair is touching from the step before, and either no body
+        is a trigger or a sensor or, in a world with no dynamic body, no
+        kinematic body's box meets a trigger's: a kinematic body against a fixed
+        one makes no contact the solver acts on, and without a dynamic body the
+        broad phase pairs a kinematic body with triggers alone.
         """
         if self.contacts or len(self.awake_dynamic_rows()) or stages.triggers.overlaps:
             return False
@@ -1532,8 +1535,24 @@ class PhysicsWorld:
         if found is None or found[0] != self._population_epoch:
             n = self._n
             found = self._sensing = (self._population_epoch, bool(
-                (self._trigger_shape[:n] >= 0).any() or self._sensor[:n].any()))
-        return not found[1]
+                (self._trigger_shape[:n] >= 0).any() or self._sensor[:n].any()),
+                np.flatnonzero(self._trigger_shape[:n] >= 0))
+        if not found[1]:
+            return True
+        if len(dynamic) or len(kinematic) > self._FEW_KINEMATIC:
+            return False
+        triggers = found[2]
+        low, high = self._aabb_min[triggers], self._aabb_max[triggers]
+        for k in kinematic.tolist():
+            x0, y0, z0 = self._aabb_min[k].tolist()
+            x1, y1, z1 = self._aabb_max[k].tolist()
+            if bool(np.any((high[:, 0] >= x0) & (high[:, 1] >= y0) & (high[:, 2] >= z0)
+                           & (low[:, 0] <= x1) & (low[:, 1] <= y1) & (low[:, 2] <= z1))):
+                return False
+        return True
+
+    #: The most kinematic bodies :meth:`_nothing_to_collide` tests against the triggers one by one.
+    _FEW_KINEMATIC = 8
 
     def writeback(self, alpha: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
         """Interpolated poses for rendering: lerp prev→current by ``alpha``."""

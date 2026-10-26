@@ -67,6 +67,9 @@ compatibility promise.
   where no more than a manifold's four spheres touch (`GridSurface.compiled_pushes`,
   `_collide_native.grid_capsule_pushes`), the same numbers as the Python column.
 - `WorldQuery.dynamic_near` answers a world with no dynamic body without reading a box.
+- A step in a world with no dynamic body skips the collision pass while no kinematic body's box
+  meets a trigger's: without a dynamic body the broad phase pairs a kinematic body with triggers
+  alone. Triggers fire as when every step runs the pass.
 
 ### Fixed
 
