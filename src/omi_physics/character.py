@@ -62,7 +62,7 @@ _GATHERS_KEPT = 4
 
 
 class _StaticBoxes:
-    """The oriented boxes among some static bodies, as arrays a capsule is tested against at once."""
+    """The oriented boxes among some static bodies, as arrays a capsule is tested against."""
 
     def __init__(self, bodies: list[int], proxy_of: Any) -> None:
         boxes = [(j, proxy) for j in bodies
@@ -168,7 +168,7 @@ class _Slide:
     elapsed: float = 0.0
     #: Whether the input still steers the slide, at the speed of its mode.
     steer: bool = False
-    #: How long the slide was asked to last, which :meth:`CharacterController.extend_slide` does not change.
+    #: How long the slide was asked to last; :meth:`CharacterController.extend_slide` keeps it.
     nominal: float = 0.0
 
 
@@ -332,7 +332,7 @@ class CharacterController:
         # Per *avatar*, unlike the proxy cache the query keeps: it is keyed on
         # where this capsule is, and two avatars are in different places.  See
         # `_near_triangles`.
-        self._near_cache: dict[int, tuple[np.ndarray, np.ndarray,
+        self._near_cache: dict[int, tuple[TriangleMeshProxy, np.ndarray, np.ndarray,
                                           np.ndarray]] = {}
         #: The static bodies gathered during the update under way; None outside an
         #: update. See :meth:`_keep_gathers`.
@@ -417,7 +417,7 @@ class CharacterController:
 
     @property
     def slide_progress(self) -> float:
-        """How far through the slide's own length the character is, from 0 to 1; 0 when it is not sliding.
+        """How far through the slide's own length the character is, 0 to 1; 0 when not sliding.
 
         A slide that was not extended is as far through as its time. One that was extended stays
         where it is while the capsule is low, however long that goes on, and goes through the rise
@@ -524,7 +524,7 @@ class CharacterController:
         return self.caps.walkSpeed
 
     def _intent(self) -> np.ndarray:
-        """Ground velocity the input asks for. Nothing while knocked down or in a slide that is not steered."""
+        """Ground velocity the input asks for; zero while knocked down or in an unsteered slide."""
         slide = self._slide
         if self.down or (slide is not None and not slide.steer):
             return np.zeros(3)
@@ -670,7 +670,7 @@ class CharacterController:
         return True
 
     def end_slide(self) -> bool:
-        """End a slide at once and stand, or crouch where there is no room; return whether there was one."""
+        """End a slide and stand, or crouch where there is no room; True if there was one."""
         if self._slide is None:
             return False
         self._slide = None
@@ -861,7 +861,9 @@ class CharacterController:
         step-down -- at positions centimetres apart. The broad phase does not
         change its answer over that, so it is asked once for a box grown by
         :attr:`NEAR_MARGIN` and the gather is reused until the capsule leaves
-        it. A superset is safe: the exact test rejects the rest.
+        it. A superset is safe: the exact test rejects the rest. A gather is
+        kept with the proxy it came from, and a body given another proxy (a tile
+        swapped into its slot, a body placed) is gathered again.
         """
         lo, hi = capsule.aabb()
         return self._near_triangles_in(body, mesh, lo, hi)
@@ -870,8 +872,8 @@ class CharacterController:
                            ) -> np.ndarray:
         """:meth:`_near_triangles` for a capsule whose box runs from ``lo`` to ``hi``."""
         cached = self._near_cache.get(body)
-        if cached is not None:
-            low, high, verts = cached
+        if cached is not None and cached[0] is mesh:
+            _mesh, low, high, verts = cached
             # Spelled out over the three axes rather than through two np.all
             # calls: each dispatches into the reduction machinery, and this
             # question is asked of every body on every depenetration iteration
@@ -883,7 +885,7 @@ class CharacterController:
         low = np.asarray(lo, dtype='d') - self.NEAR_MARGIN
         high = np.asarray(hi, dtype='d') + self.NEAR_MARGIN
         verts = mesh.candidate_vertices(low, high)
-        self._near_cache[body] = (low, high, verts)
+        self._near_cache[body] = (mesh, low, high, verts)
         return verts
 
     def _keep_gathers(self) -> None:
@@ -912,7 +914,7 @@ class CharacterController:
     HOLD_MARGIN = 1.0
 
     def _gather_statics(self, lo: np.ndarray, hi: np.ndarray) -> '_Gather':
-        """The static bodies near the box ``lo`` to ``hi``, from a gather this update kept if one holds it."""
+        """The static bodies near the box ``lo`` to ``hi``, from a kept gather holding the box."""
         kept = self._gathers
         if kept is not None:
             for gathered in kept:

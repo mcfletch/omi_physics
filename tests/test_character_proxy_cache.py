@@ -7,7 +7,8 @@ memory and a level's worth of grid-building for each opponent that joins —
 paid the first time each of them takes a step, so it shows up as a hitch at
 the start of a fight rather than as a number anybody profiled.
 
-They never move, which is what makes sharing them correct.
+A static body keeps its proxy until it is placed or removed, so sharing it
+between avatars answers each the same.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import gc
 
 import numpy as np
+import pytest
 
 from omi_physics import collisionquery, model
 from omi_physics.character import CharacterCapabilities, CharacterController
@@ -80,3 +82,19 @@ def test_sharing_does_not_change_where_anybody_stands():
         two.update(1.0 / 60.0)
     assert one.base()[1] == two.base()[1]
     assert one.grounded and one.base()[1] < 0.01
+
+
+def test_a_tile_swapped_in_the_same_slot_is_stood_on():
+    w = world()
+    old = floor(w, y=0.0)
+    avatar = walker(w)
+    for _ in range(60):
+        avatar.update(1 / 60)
+    assert avatar.grounded
+    standing = float(avatar.position[1])
+    w.remove_body(old)
+    new = floor(w, y=0.3)
+    assert new == old
+    for _ in range(30):
+        avatar.update(1 / 60)
+    assert float(avatar.position[1]) == pytest.approx(standing + 0.3, abs=0.02)
