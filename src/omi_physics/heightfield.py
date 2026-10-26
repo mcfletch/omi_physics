@@ -19,17 +19,17 @@ there. The routines below work in the field's local frame and return arrays;
 """
 import math
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 from ._accel import accelerators_disabled
 
-if accelerators_disabled():
-    _native = None
-else:
+_native: Any = None
+if not accelerators_disabled():
     try:
-        from . import _collide_native as _native  # type: ignore[attr-defined]
+        from . import _collide_native as _native  # type: ignore[attr-defined,no-redef]
     except ImportError:                # pragma: no cover - pure-Python fallback
         _native = None
 
@@ -174,11 +174,15 @@ class GridSurface(HeightSurface):
     ``x = origin[0] + i * spacing[0]`` and ``z = origin[2] + j * spacing[1]``,
     added to ``origin[1]``. The slope in a cell is the exact derivative of its
     bilinear patch.
+
+    The surface keeps a read-only copy of ``heights`` (:attr:`grid`), from which
+    its bounds, its steepest slope and its lookup tables are worked out once.
+    Different heights are a new surface.
     """
 
     def __init__(self, heights: ArrayLike, origin: ArrayLike = (0.0, 0.0, 0.0),
                  spacing: float | tuple[float, float] = 1.0) -> None:
-        grid = np.asarray(heights, dtype='d')
+        grid = np.array(heights, dtype='d')
         if grid.ndim != 2 or grid.shape[0] < 2 or grid.shape[1] < 2:
             raise ValueError('a height grid needs at least 2 rows and 2 columns, got shape %r'
                              % (grid.shape,))
@@ -187,7 +191,8 @@ class GridSurface(HeightSurface):
         step = np.broadcast_to(np.asarray(spacing, dtype='d'), (2,)).copy()
         if np.any(step <= 0.0):
             raise ValueError('a height grid needs a positive spacing, got %r' % (spacing,))
-        self.grid = grid
+        grid.flags.writeable = False
+        self._grid = grid
         self.origin = np.asarray(origin, dtype='d').reshape(3)
         self.spacing = step
         rows, columns = grid.shape
@@ -201,15 +206,22 @@ class GridSurface(HeightSurface):
         across = float(np.abs(np.diff(grid, axis=1)).max() / step[0])
         along = float(np.abs(np.diff(grid, axis=0)).max() / step[1])
         self.lipschitz = math.hypot(across, along)
-        self._numbers: tuple[list[list[float]], int, int, float, float, float, float, float] | None = None
+        self._numbers: tuple[list[list[float]], int, int, float, float, float, float,
+                             float] | None = None
         #: :meth:`_steepest_table` by its reach in cells across and along.
         self._steepest: dict[tuple[int, int], list[list[float]]] = {}
         #: :meth:`_compiled_grid` by the radius of the spheres.
         self._compiled: dict[float, tuple[np.ndarray, float, float, float, float, float,
                                           np.ndarray]] = {}
 
+    @property
+    def grid(self) -> np.ndarray:
+        """The heights, ``(rows, columns)``, read-only."""
+        return self._grid
+
     def sphere_contact(self, cx: float, cy: float, cz: float, radius: float
-                       ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float], float]:
+                       ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float],
+                                  float]:
         """The contact of one sphere with the surface, found as :func:`sphere_contacts_by_sliding`
         finds it, with numbers and not arrays: for one sphere that is several times as fast.
 
@@ -242,7 +254,7 @@ class GridSurface(HeightSurface):
                 (nx, ny, nz), depth)
 
     def _frame(self) -> tuple[list[list[float]], int, int, float, float, float, float, float]:
-        """The grid as nested lists, its size, origin and spacing, as numbers, for the one-point lookups."""
+        """The grid as nested lists, its size, origin and spacing, as numbers, for one point."""
         frame = self._numbers
         if frame is None:
             rows = self.grid.tolist()
@@ -267,7 +279,7 @@ class GridSurface(HeightSurface):
                 + h11 * u * v) + oy
 
     def _sample_one(self, x: float, z: float) -> tuple[float, float, float, float]:
-        """The height and the unit normal ``(nx, ny, nz)`` at one point: ``-inf`` and up off the grid."""
+        """The height and unit normal ``(nx, ny, nz)`` at one point; ``-inf`` and up off it."""
         grid, rows, columns, ox, oy, oz, sx, sz = self._frame()
         gx = (x - ox) / sx
         gz = (z - oz) / sz
@@ -358,7 +370,7 @@ class GridSurface(HeightSurface):
         if near:
             limit, top = self._local_clearance(x, z, radius)
             nearer = [y for y in near if not limit <= y - ground < top]
-        if len(nearer) > _ONE_BY_ONE or (nearer is near and len(near) > _ONE_BY_ONE):
+        if len(nearer) > _ONE_BY_ONE:
             found = self._slide_together([[x, y, z] for y in nearer], radius)
         else:
             found = [self.sphere_contact(x, y, z, radius) for y in nearer]

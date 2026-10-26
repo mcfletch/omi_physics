@@ -12,6 +12,7 @@ import pytest
 
 from omi_physics import collide, mathutil, model
 from omi_physics.body import make_proxy
+from omi_physics.heightfield import GridSurface
 from omi_physics.raycast import raycast, raycast_many
 from omi_physics.world import PhysicsWorld
 
@@ -555,3 +556,25 @@ class TestRays:
             single = raycast(world, origin, (0, -1, 0))
             assert hit is not None and single is not None
             assert hit.distance == pytest.approx(single.distance)
+
+
+class TestTheGridIsFixed:
+    """A grid surface keeps its own copy of the heights, which nothing can change."""
+
+    def test_an_edit_to_the_array_it_was_given_changes_nothing(self) -> None:
+        heights = np.zeros((4, 4))
+        surface = GridSurface(heights)
+        heights[1, 1] = 5.0
+        assert surface.height_at(1.0, 1.0) == 0.0
+        assert surface.heights(np.array([1.0]), np.array([1.0]))[0] == 0.0
+        assert float(surface.grid[1, 1]) == 0.0
+
+    def test_a_write_to_the_grid_raises(self) -> None:
+        surface = GridSurface(np.zeros((4, 4)))
+        with pytest.raises(ValueError, match='read-only'):
+            surface.grid[1, 1] = 5.0
+
+    def test_the_grid_cannot_be_replaced(self) -> None:
+        surface = GridSurface(np.zeros((4, 4)))
+        with pytest.raises(AttributeError):
+            surface.grid = np.zeros((1, 4))

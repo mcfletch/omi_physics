@@ -14,6 +14,10 @@ compatibility promise.
   `set_collider` changes or removes its collider, and `pose_arrays()` gives a compute backend
   the writable pose columns.
 - `refit_aabbs(rows=)` records the static bodies among the rows as placed.
+- `GridSurface` keeps a read-only copy of its heights: `grid` cannot be written or replaced, and an
+  edit to the array it was made from changes nothing.
+- A character's triangle gather is kept with the mesh proxy it came from, so a tile swapped into
+  the same body slot is collided with.
 - `add_body`, `add_bodies` and `place_body` raise `ValueError` for a position that is not 3
   finite numbers or an orientation that is not 4. One static body with a box of no finite width
   no longer makes the broad phase test every static body against every dynamic one.
