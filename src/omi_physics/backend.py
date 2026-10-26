@@ -50,12 +50,13 @@ class NumpyBackend:
         rows = world.awake_moving_rows()
         if not len(rows):
             return
-        world.position[rows] += world.linear_velocity[rows] * dt
+        position, orientation = world.pose_arrays()
+        position[rows] += world.linear_velocity[rows] * dt
         spin = world.angular_velocity[rows]
         turning = rows[np.any(spin != 0.0, axis=1)]
         if len(turning):
-            world.orientation[turning] = mathutil.quat_integrate(
-                world.orientation[turning], world.angular_velocity[turning], dt)
+            orientation[turning] = mathutil.quat_integrate(
+                orientation[turning], world.angular_velocity[turning], dt)
 
     def refit_aabbs(self, world: "PhysicsWorld") -> None:
         """Recompute each body's world-space AABB after integration."""

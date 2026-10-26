@@ -113,7 +113,7 @@ class TestTheIndexFollowsTheWorld:
         post = int(posts_in_a_row(world, 50)[0])
         query = WorldQuery(world)
         query.static_near(BOX_LO, BOX_HI)
-        world.position[post] = (500.0, 2.0, 500.0)
+        world.pose_arrays()[0][post] = (500.0, 2.0, 500.0)
         world.refit_aabbs(rows=np.array([post]))
         assert post not in set(query.static_near(BOX_LO, BOX_HI))
         assert post in set(query.static_near(np.array([499.0, 0.0, 499.0]),

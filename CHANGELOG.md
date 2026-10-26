@@ -9,6 +9,16 @@ compatibility promise.
 
 ### Changed
 
+- `PhysicsWorld.position`, `orientation`, `motion_type`, `collider_shape`, `trigger_shape` and
+  `sensor` are read-only views; a write raises `ValueError`. `place_body` places a body,
+  `set_collider` changes or removes its collider, and `pose_arrays()` gives a compute backend
+  the writable pose columns.
+- `refit_aabbs(rows=)` records the static bodies among the rows as placed.
+- `WorldQuery.static_proxy` builds a proxy again for a static body that was placed and for a
+  kinematic body whose pose changed, and raises `LookupError` for a body with no collider.
+- `StaticGrid.near` leaves out a removed large or kinematic body, and `WorldQuery.static_epoch()`
+  is None once a kinematic body has been added.
+
 - `ThreadedSimulation.start()` is safe against concurrent calls. `with_world()` answers an
   object that wraps the lock; its block receives the world.
 - A `cylinder` is a flat-ended cylinder rather than a capsule of its height.
@@ -34,7 +44,7 @@ compatibility promise.
   poses, the sleep pass, the narrow phase's rotations and the solver's arrays no longer read or
   allocate a row for every body. A world of 100,000 static posts and a ball steps in 0.4 ms, from
   1.2 ms; the forest walker's frame is 2.2 ms, from 6.3 ms.
-- A pose written into `position` or `orientation` of a static body is taken by a step only after
+- A pose of a static body written through `pose_arrays()` is taken by a step only after
   `PhysicsWorld.moved(rows)`; `OMI_PHYSICS_CHECK_STATICS=1` (`PhysicsWorld.check_statics`) makes
   a step raise for one that was not recorded. A static sensor's placement and removal are recorded
   too.

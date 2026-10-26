@@ -653,7 +653,7 @@ class TestGroundThatRisesUnderIt:
         vehicle = _hovering_car(world, position=(0.0, 1.0, 0.0), tuning=tuning)
         _settle(world, vehicle, seconds=1.0)
         surface = max(float(wheel.hub[1]) for wheel in vehicle.wheels) + above_hub
-        world.position[floor] = (0.0, surface, 0.0)
+        world.pose_arrays()[0][floor] = (0.0, surface, 0.0)
         world.moved([floor])
         world.wake(vehicle.body)
         _settle(world, vehicle, seconds=seconds)

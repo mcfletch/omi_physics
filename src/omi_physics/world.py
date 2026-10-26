@@ -71,10 +71,21 @@ class Step:
     time: float
 
 
-def _column(name: str) -> property:
-    """A read-only property answering column ``name`` over the live bodies."""
-    def rows(self: 'PhysicsWorld') -> np.ndarray:
-        return self._view(name)
+def _column(name: str, writable: bool = True) -> property:
+    """A property answering column ``name`` over the live bodies.
+
+    A column that is not ``writable`` is answered as a read-only view. The world
+    keeps boxes, indices and caches in step with such a column, so it changes
+    through the world's methods alone, and a write to the view raises ValueError.
+    """
+    if writable:
+        def rows(self: 'PhysicsWorld') -> np.ndarray:
+            return self._view(name)
+    else:
+        def rows(self: 'PhysicsWorld') -> np.ndarray:
+            view = self._view(name)
+            view.flags.writeable = False
+            return view
     return property(rows)
 
 class PhysicsWorld:
@@ -289,9 +300,11 @@ class PhysicsWorld:
         """A view of column ``name`` over the live bodies only (the first ``_n`` rows)."""
         return getattr(self, '_' + name)[:self._n]
 
-    position = _column('position')
+    #: Each body's position and orientation, read-only: :meth:`place_body` places
+    #: a body, and a compute backend writes through :meth:`pose_arrays`.
+    position = _column('position', writable=False)
     prev_position = _column('prev_position')
-    orientation = _column('orientation')
+    orientation = _column('orientation', writable=False)
     prev_orientation = _column('prev_orientation')
     linear_velocity = _column('linear_velocity')
     angular_velocity = _column('angular_velocity')
@@ -302,11 +315,14 @@ class PhysicsWorld:
     linear_damping = _column('linear_damping')
     angular_damping = _column('angular_damping')
     quadratic_drag = _column('quadratic_drag')
-    motion_type = _column('motion_type')
-    collider_shape = _column('collider_shape')
+    #: Read-only, fixed when the body is added.
+    motion_type = _column('motion_type', writable=False)
+    #: Read-only: :meth:`set_collider` changes a body's collider.
+    collider_shape = _column('collider_shape', writable=False)
     collider_material = _column('collider_material')
     collider_filter = _column('collider_filter')
-    trigger_shape = _column('trigger_shape')
+    #: Read-only, fixed when the body is added.
+    trigger_shape = _column('trigger_shape', writable=False)
     trigger_filter = _column('trigger_filter')
     aabb_min = _column('aabb_min')
     aabb_max = _column('aabb_max')
@@ -316,8 +332,18 @@ class PhysicsWorld:
     #: The steady force and torque on each body (:meth:`set_force`, :meth:`set_torque`).
     force = _column('force')
     torque = _column('torque')
-    #: Whether each body's collider only senses (:meth:`is_sensor`).
-    sensor = _column('sensor')
+    #: Whether each body's collider only senses (:meth:`is_sensor`); read-only,
+    #: fixed when the body is added.
+    sensor = _column('sensor', writable=False)
+
+    def pose_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """The writable position and orientation columns over the live bodies.
+
+        For a compute backend integrating the dynamic and kinematic bodies,
+        whose boxes every step refits. A static body written through these keeps
+        its old box until :meth:`moved` is called for it.
+        """
+        return self._view('position'), self._view('orientation')
 
     @property
     def layout_epoch(self) -> int:
@@ -548,6 +574,44 @@ class PhysicsWorld:
     def report_contacts(self, i: int, on: bool = True) -> None:
         """Flag body ``i`` so its pairs are recorded under ``'flagged'`` reporting."""
         self._report[i] = on
+
+    def set_collider(self, i: int, collider: model.Collider | None) -> None:
+        """Give body ``i`` the collider ``collider``, or none with None.
+
+        The body's box, the world's indices and the shared proxies follow. A
+        dynamic body keeps the mass and inertia it was added with.
+        """
+        if not 0 <= i < self._n or self._vacant[i]:
+            raise IndexError('no body %r' % (i,))
+        if collider is not None and not 0 <= collider.shape < len(self.shapes):
+            raise IndexError('no shape %r: the world holds %d'
+                             % (collider.shape, len(self.shapes)))
+        fixed = self._motion_type[i] != _DYNAMIC
+        if (collider is not None and self._motion_type[i] != _STATIC
+                and self.shapes[collider.shape].type == 'heightfield'):
+            raise ValueError('a heightfield is ground and only a static body can hold it')
+        if fixed:
+            self._wake_near(i)
+        if collider is None:
+            self._collider_shape[i] = -1
+            self._collider_material[i] = -1
+            self._collider_filter[i] = -1
+        else:
+            self._collider_shape[i] = collider.shape
+            self._collider_material[i] = collider.physicsMaterial
+            self._collider_filter[i] = collider.collisionFilter
+            self._collision = self._collision or _CollisionStages()
+        self._aabb_cache.pop(i, None)
+        if i < len(self._refit_pose):
+            self._refit_pose[i] = np.nan
+            self._refit_quat[i] = np.nan
+        self._patch_refit_cache(i)
+        self._fit_body(i, self._fitted_margin)
+        self._population_epoch += 1
+        self._forget_body(i)
+        if fixed:
+            self._wake_near(i)
+            self._layout_changed(i)
 
     def add_contact_listener(self, fn: Callable[[ContactEvent], None]
                              ) -> Callable[[ContactEvent], None]:
@@ -1042,13 +1106,11 @@ class PhysicsWorld:
         animated platform, a lift, a character proxy, a body staged for one
         query and taken away again.
 
-        A bare write to :attr:`position` is not enough on its own. The arrays
-        are views, so nothing sees the write, and a body's **world AABB** is
-        what the broadphase rejects against -- a ray, an overlap query or a
-        contact pair against a body whose box is still where it used to be is
-        answered about where it used to be. This writes the pose and refits
-        that one box, which is what keeps the cost of moving a handful of
-        bodies proportional to the handful rather than to the world.
+        :attr:`position` and :attr:`orientation` are read-only. A body's **world
+        AABB** is what the broadphase rejects against, and the world keeps
+        indices of its static bodies, so this writes the pose, refits that one
+        box and records the change. The cost of moving a handful of bodies
+        follows the handful, not the world.
 
         The previous pose is set with the new one, so the body **arrives**
         rather than travelling: an interpolating writeback would otherwise
@@ -1076,7 +1138,7 @@ class PhysicsWorld:
     def moved(self, rows: ArrayLike) -> None:
         """Record that the bodies at ``rows`` were placed by writing their poses.
 
-        The poses are those in :attr:`position` and :attr:`orientation`.
+        The poses are those written through :meth:`pose_arrays`.
 
         A step refits the boxes of the bodies that move and of the static bodies
         added, removed or placed since the last one, and looks at no other. A

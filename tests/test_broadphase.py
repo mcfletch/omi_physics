@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 
-from omi_physics import model
-from omi_physics.broadphase import BroadPhase, DynamicAABBTree, brute_force_pairs
+from omi_physics import broadphase, model
+from omi_physics.broadphase import BroadPhase, DynamicAABBTree, brute_force_pairs, filtered_pairs
 from omi_physics.world import PhysicsWorld
 
 
@@ -33,7 +33,7 @@ def test_refit_equals_rebuild():
     bp = BroadPhase()
     bp.pairs(world)
     for i in range(world.body_count):             # move everything
-        world.position[i] += (0.3, -0.2, 0.1)
+        world.pose_arrays()[0][i] += (0.3, -0.2, 0.1)
     world.refit_aabbs(margin=0.0)
     refit_pairs = set(bp.pairs(world))
     fresh = BroadPhase()
@@ -125,14 +125,13 @@ def world_with_filters(seed, n=80):
 
 @pytest.mark.parametrize('seed', range(60))
 def test_pairs_filtered_together_are_those_filtered_one_by_one(seed):
-    from omi_physics.broadphase import _filters_interact, filtered_pairs
     world = world_with_filters(seed)
     rng = np.random.RandomState(seed)
     count = 400
     lo = rng.randint(0, world.body_count, count)
     hi = rng.randint(0, world.body_count, count)
     one_by_one = [(p, q) for p, q in zip(lo.tolist(), hi.tolist(), strict=True)
-                  if _filters_interact(world, p, q)]
+                  if broadphase._filters_interact(world, p, q)]  # noqa: SLF001 the reference answer
     assert filtered_pairs(world, lo, hi) == one_by_one
 
 
@@ -143,10 +142,9 @@ def test_pairs_with_random_filters_match_brute_force(seed):
 
 
 def test_a_world_with_no_filters_checks_no_pair_one_by_one(monkeypatch):
-    from omi_physics import broadphase
     world = make_world(120, seed=1, spread=3.0)
     asked = []
-    original = broadphase._filters_interact
+    original = broadphase._filters_interact  # noqa: SLF001 the one-by-one test is what is counted
     monkeypatch.setattr(broadphase, '_filters_interact',
                         lambda w, a, b: asked.append((a, b)) or original(w, a, b))
     assert BroadPhase().pairs(world)

@@ -75,7 +75,7 @@ class TestAStaticMeshIsBuiltOnce:
     def test_the_contacts_are_still_generated(self) -> None:
         """Reuse must not mean the box quietly stops colliding."""
         world, mover = _world_with_terrain_and_a_box()
-        world.position[mover] = (0.0, 0.2, 0.0)      # sunk into the ground
+        world.pose_arrays()[0][mover] = (0.0, 0.2, 0.0)      # sunk into the ground
         for _ in range(30):
             world.step(STEP)
         assert float(world.position[mover][1]) > 0.4, "the box sank through"
@@ -87,7 +87,7 @@ class TestAStaticMeshIsBuiltOnce:
         for _ in range(120):
             world.step(STEP)
         resting = float(world.position[mover][1])
-        world.position[0] = (0.0, -5.0, 0.0)         # the ground drops away
+        world.pose_arrays()[0][0] = (0.0, -5.0, 0.0)         # the ground drops away
         world.moved([0])
         # A body resting on it has gone to sleep by now, and the ground moving
         # out from under a sleeper is not something the engine notices for it.
@@ -102,7 +102,7 @@ class TestAStaticMeshIsBuiltOnce:
         world, _ = _world_with_terrain_and_a_box()
         world.step(STEP)
         before = len(counted)
-        world.orientation[0] = (0.0, 0.383, 0.0, 0.924)
+        world.pose_arrays()[1][0] = (0.0, 0.383, 0.0, 0.924)
         world.moved([0])
         world.step(STEP)
         assert len(counted) > before
@@ -126,7 +126,7 @@ class TestTheAabbIsNotRecomputedEither:
     def test_moving_the_mesh_moves_its_aabb(self) -> None:
         world, _ = _world_with_terrain_and_a_box()
         world.refit_aabbs()
-        world.position[0] = (100.0, 0.0, 0.0)
+        world.pose_arrays()[0][0] = (100.0, 0.0, 0.0)
         world.moved([0])
         world.refit_aabbs()
         assert world.aabb_min[0][0] == pytest.approx(60.0, abs=0.1)
@@ -220,7 +220,7 @@ class TestRefittingCostsWhatMoved:
         world, _mover = self._world()
         world.refit_aabbs()
         before = len(measured)
-        world.position[3] = (999.0, 0.0, 0.0)
+        world.pose_arrays()[0][3] = (999.0, 0.0, 0.0)
         world.moved([3])
         world.refit_aabbs()
         assert len(measured) == before + 1
@@ -230,7 +230,7 @@ class TestRefittingCostsWhatMoved:
         world, _mover = self._world()
         world.refit_aabbs()
         before = len(measured)
-        world.position[3] = (999.0, 0.0, 0.0)
+        world.pose_arrays()[0][3] = (999.0, 0.0, 0.0)
         world.moved([3])
         world.refit_aabbs()
         world.refit_aabbs()
@@ -252,7 +252,7 @@ class TestRefittingCostsWhatMoved:
     def test_the_bounds_follow_it(self) -> None:
         world, _mover = self._world()
         world.refit_aabbs()
-        world.position[3] = (999.0, 0.0, 0.0)
+        world.pose_arrays()[0][3] = (999.0, 0.0, 0.0)
         world.moved([3])
         world.refit_aabbs()
         assert float(world.aabb_min[3][0]) > 900.0

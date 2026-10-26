@@ -452,10 +452,14 @@ the boxes and updates the broad phase's index for the recorded bodies alone,
 reading nothing of the others. Up to 1,024 changes are swept with the moving
 bodies before the index is sorted again, so a world that streams a rock at a
 time does not sort every trunk for each. A body asleep on a static body that
-is moved or removed is woken. A pose written straight into `position` or
-`orientation` is recorded by `world.moved(rows)`; without it the body keeps
-its old box. `OMI_PHYSICS_CHECK_STATICS=1` (or `world.check_statics = True`)
-has each step compare every pose with the one its box was fitted at and raise
+is moved or removed is woken. `position`, `orientation`, `motion_type`,
+`collider_shape`, `trigger_shape` and `sensor` are read-only views, and a
+write to one raises `ValueError`: `place_body` places a body and
+`set_collider` changes or removes its collider. A compute backend writes poses
+through `world.pose_arrays()`, and a static body written there is recorded by
+`world.moved(rows)`; without it the body keeps its old box.
+`OMI_PHYSICS_CHECK_STATICS=1` (or `world.check_statics = True`) has each step
+compare every pose with the one its box was fitted at and raise
 `RuntimeError` for a write that was not recorded. A world of 100,000 static
 posts and one rolling ball steps in 0.4 ms.
 

@@ -348,8 +348,8 @@ class GLComputeBackend(NumpyBackend):
                 ('defLin', 'f', float(world.default_linear_damping)),
                 ('defAng', 'f', float(world.default_angular_damping)),
                 ('nbody', 'u', n)])
-            self._down_vec3(self._pos, world.position, n)
-            self._down_vec4(self._ori, world.orientation, n)
+            self._down_vec3(self._pos, world.pose_arrays()[0], n)
+            self._down_vec4(self._ori, world.pose_arrays()[1], n)
             self._down_vec3(self._linvel, world.linear_velocity, n)
             self._down_vec3(self._angvel, world.angular_velocity, n)
             self._fused_done = True
@@ -388,5 +388,5 @@ class GLComputeBackend(NumpyBackend):
             buf.bind(binding)
         self._dispatch(self._prog_pos, n, [
             ('dt', 'f', float(dt)), ('nbody', 'u', n)])
-        self._down_vec3(self._pos, world.position, n)
-        self._down_vec4(self._ori, world.orientation, n)
+        self._down_vec3(self._pos, world.pose_arrays()[0], n)
+        self._down_vec4(self._ori, world.pose_arrays()[1], n)

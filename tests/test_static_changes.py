@@ -73,12 +73,12 @@ def turn(world, pad):
 
 
 def write(world, pad):
-    world.position[pad] = (130.0, 50.0, 100.0)
+    world.pose_arrays()[0][pad] = (130.0, 50.0, 100.0)
     world.moved([pad])
 
 
 def refit(world, pad):
-    world.position[pad] = (130.0, 50.0, 100.0)
+    world.pose_arrays()[0][pad] = (130.0, 50.0, 100.0)
     world.refit_aabbs(rows=np.array([pad]))
 
 
@@ -114,7 +114,7 @@ def test_a_pad_added_under_a_falling_ball_catches_it(many):
 def test_with_the_statics_checked_a_bare_write_is_refused(monkeypatch):
     monkeypatch.setenv('OMI_PHYSICS_CHECK_STATICS', '1')
     world, pad, _ball = ball_on_a_pad()
-    world.position[pad] = (130.0, 50.0, 100.0)
+    world.pose_arrays()[0][pad] = (130.0, 50.0, 100.0)
     with pytest.raises(RuntimeError, match='moved'):
         world.step(DT)
 

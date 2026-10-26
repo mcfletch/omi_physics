@@ -29,8 +29,8 @@ cdef inline double _length3(double x, double y, double z) noexcept nogil:
     return hypot(hypot(x, y), z)
 
 
-cdef int _box_box(double* ca, double* Ra, double* ha,
-                  double* cb, double* Rb, double* hb,
+cdef int _box_box(const double* ca, const double* Ra, const double* ha,
+                  const double* cb, const double* Rb, const double* hb,
                   double* out_normal, double* out_pts, double* out_depths) noexcept nogil:
     """Fill ``out_normal`` (3), up to 4 ``out_pts`` (4x3) and ``out_depths`` (4).
 
@@ -122,8 +122,8 @@ cdef void _face_vertices(double* c, double* R, double* half, int axis, double si
         verts[3 * 3 + r] = fc[r] + u[r] - v[r]
 
 
-cdef int _clip(double* ca, double* Ra, double* ha,
-               double* cb, double* Rb, double* hb,
+cdef int _clip(const double* ca, const double* Ra, const double* ha,
+               const double* cb, const double* Rb, const double* hb,
                double* normal, double depth,
                double* out_pts, double* out_depths) noexcept nogil:
     # Pick reference: the box whose face is most aligned with the normal.
@@ -275,8 +275,8 @@ cdef int _reduce(double* allpts, double* alldep, int nc,
     return nkeep
 
 
-def box_box(double[::1] ca, double[:, ::1] Ra, double[::1] ha,
-            double[::1] cb, double[:, ::1] Rb, double[::1] hb):
+def box_box(const double[::1] ca, const double[:, ::1] Ra, const double[::1] ha,
+            const double[::1] cb, const double[:, ::1] Rb, const double[::1] hb):
     """Return ``(count, normal, points, depths)`` for the oriented box pair.
 
     ``normal`` is a length-3 tuple, ``points`` a list of ``count`` (x, y, z)
@@ -294,7 +294,7 @@ def box_box(double[::1] ca, double[:, ::1] Ra, double[::1] ha,
     return n, (normal[0], normal[1], normal[2]), points, depths
 
 
-def sphere_sphere(double[::1] ca, double ra, double[::1] cb, double rb):
+def sphere_sphere(const double[::1] ca, double ra, const double[::1] cb, double rb):
     """Sphere↔sphere: ``(count, normal a→b, [point], [depth])``."""
     cdef double dx = cb[0] - ca[0], dy = cb[1] - ca[1], dz = cb[2] - ca[2]
     cdef double dist = _length3(dx, dy, dz)
@@ -311,7 +311,8 @@ def sphere_sphere(double[::1] ca, double ra, double[::1] cb, double rb):
     return 1, (nx, ny, nz), [(ca[0] + nx * f, ca[1] + ny * f, ca[2] + nz * f)], [depth]
 
 
-def sphere_box(double[::1] cs, double rs, double[::1] cb, double[:, ::1] Rb, double[::1] hb):
+def sphere_box(const double[::1] cs, double rs, const double[::1] cb,
+               const double[:, ::1] Rb, const double[::1] hb):
     """Sphere↔oriented-box: ``(count, normal sphere→box, [point], [depth])``."""
     cdef double sx = cs[0] - cb[0], sy = cs[1] - cb[1], sz = cs[2] - cb[2]
     # local = Rb.T @ (cs - cb)

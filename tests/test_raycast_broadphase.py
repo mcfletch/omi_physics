@@ -119,7 +119,7 @@ class TestItStillAnswersTheSameWay:
         """The boxes are the world's, and a refit is what refreshes them --
         the same rule collision follows."""
         world = _tiles(count=20)
-        world.position[3] = (500.0, 0.0, 0.0)
+        world.pose_arrays()[0][3] = (500.0, 0.0, 0.0)
         world.moved([3])
         world.refit_aabbs()
         hit = raycast(world, (510.0, 5.0, 10.0), (0, -1, 0), max_distance=10.0)

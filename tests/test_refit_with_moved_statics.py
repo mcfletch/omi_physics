@@ -31,7 +31,7 @@ def test_a_ball_rests_on_the_floor_while_a_static_body_is_moved_every_step(how):
         if how == 'place_body':
             world.place_body(mover, position=at)
         else:
-            world.position[mover] = at
+            world.pose_arrays()[0][mover] = at
             world.moved([mover])
         world.step(DT)
         lowest = min(lowest, float(world.position[ball][1]))
@@ -41,7 +41,7 @@ def test_a_ball_rests_on_the_floor_while_a_static_body_is_moved_every_step(how):
 
 def test_the_moved_static_body_has_its_box_where_it_is():
     world, mover, _ball = world_with_a_ball_over_a_floor()
-    world.position[mover] = (30.0, 0, 0)
+    world.pose_arrays()[0][mover] = (30.0, 0, 0)
     world.moved([mover])
     world.step(DT)
     assert np.allclose((world.aabb_min[mover] + world.aabb_max[mover]) / 2.0, (30.0, 0.0, 0.0),
@@ -51,8 +51,8 @@ def test_the_moved_static_body_has_its_box_where_it_is():
 def test_refitting_named_rows_fits_those_boxes_as_a_full_refit_does():
     world, mover, ball = world_with_a_ball_over_a_floor()
     world.refit_aabbs()
-    world.position[ball] = (1.0, 2.0, 3.0)
-    world.position[mover] = (25.0, 0.0, 0.0)
+    world.pose_arrays()[0][ball] = (1.0, 2.0, 3.0)
+    world.pose_arrays()[0][mover] = (25.0, 0.0, 0.0)
     world.refit_aabbs(rows=np.array([ball]))
     named_min, named_max = world.aabb_min.copy(), world.aabb_max.copy()
     world.moved([mover])

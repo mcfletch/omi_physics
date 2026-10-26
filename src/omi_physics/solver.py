@@ -431,7 +431,7 @@ class SequentialImpulseSolver:
             self.velocity_iterations, warm, self.slop, self.max_correction)
         moving = world.inv_mass[rows] > 0.0
         moved = rows[moving]
-        world.position[moved] = position[moving]
+        world.pose_arrays()[0][moved] = position[moving]
         world.linear_velocity[moved] = linear[moving]
         world.angular_velocity[moved] = angular[moving]
         cache: dict[tuple[int, int], list[tuple[np.ndarray, float, float, float]]] = {}
@@ -546,6 +546,7 @@ class SequentialImpulseSolver:
         """
         moved: dict[int, np.ndarray] = {}
         unmoved = np.zeros(3)
+        poses = world.pose_arrays()[0]
         for index, c in enumerate(contacts):
             a, b = c.a, c.b
             done = float(np.dot(moved.get(b, unmoved) - moved.get(a, unmoved), c.normal))
@@ -556,8 +557,8 @@ class SequentialImpulseSolver:
             if inv_sum <= 1e-12:
                 continue
             move = min(corr, self.max_correction) / inv_sum * c.normal
-            world.position[a] -= world.inv_mass[a] * move
-            world.position[b] += world.inv_mass[b] * move
+            poses[a] -= world.inv_mass[a] * move
+            poses[b] += world.inv_mass[b] * move
             moved[a] = moved.get(a, unmoved) - world.inv_mass[a] * move
             moved[b] = moved.get(b, unmoved) + world.inv_mass[b] * move
 

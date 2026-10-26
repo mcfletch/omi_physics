@@ -433,12 +433,9 @@ class RaycastVehicle:
         lake -- the car arrives level and stopped rather than carrying whatever
         it was doing into its new position.
         """
-        self.world.position[self.body] = np.asarray(position, dtype='d')
-        self.world.prev_position[self.body] = self.world.position[self.body]
         half = heading / 2.0
-        self.world.orientation[self.body] = (0.0, math.sin(half), 0.0,
-                                             math.cos(half))
-        self.world.prev_orientation[self.body] = self.world.orientation[self.body]
+        self.world.place_body(self.body, np.asarray(position, dtype='d'),
+                              (0.0, math.sin(half), 0.0, math.cos(half)))
         self.world.linear_velocity[self.body] = 0.0
         self.world.angular_velocity[self.body] = 0.0
         for wheel in self.wheels:
