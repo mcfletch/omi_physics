@@ -115,10 +115,11 @@ class _Gather:
     """The static bodies near a box, gathered once for the depenetrations that fit in it.
 
     ``grounds`` is the height field of each body when every one of them is a
-    height field, else None.
+    height field, else None; ``meshes`` is each body and its triangle mesh
+    when every one of them is a triangle mesh, else None.
     """
 
-    __slots__ = ('_bounds', 'bodies', 'boxes', 'grounds', 'high', 'low')
+    __slots__ = ('_bounds', 'bodies', 'boxes', 'grounds', 'high', 'low', 'meshes')
 
     def __init__(self, low: np.ndarray, high: np.ndarray, bodies: list[int], proxy_of: Any) -> None:
         self.low, self.high = low, high
@@ -130,6 +131,11 @@ class _Gather:
             proxy for proxy in proxies if isinstance(proxy, HeightFieldProxy)]
         if len(self.grounds) != len(bodies):
             self.grounds = None
+        self.meshes: list[tuple[int, TriangleMeshProxy]] | None = [
+            (j, proxy) for j, proxy in zip(bodies, proxies, strict=True)
+            if isinstance(proxy, TriangleMeshProxy)]
+        if not bodies or len(self.meshes) != len(bodies):
+            self.meshes = None
 
     def holds(self, lo: tuple[float, float, float], hi: tuple[float, float, float]) -> bool:
         """Whether the box ``lo`` to ``hi`` lies inside the box the bodies were gathered for."""
@@ -858,6 +864,11 @@ class CharacterController:
         it. A superset is safe: the exact test rejects the rest.
         """
         lo, hi = capsule.aabb()
+        return self._near_triangles_in(body, mesh, lo, hi)
+
+    def _near_triangles_in(self, body: int, mesh: TriangleMeshProxy, lo: Any, hi: Any
+                           ) -> np.ndarray:
+        """:meth:`_near_triangles` for a capsule whose box runs from ``lo`` to ``hi``."""
         cached = self._near_cache.get(body)
         if cached is not None:
             low, high, verts = cached
@@ -869,7 +880,8 @@ class CharacterController:
                     and hi[0] <= high[0] and hi[1] <= high[1]
                     and hi[2] <= high[2]):
                 return verts
-        low, high = lo - self.NEAR_MARGIN, hi + self.NEAR_MARGIN
+        low = np.asarray(lo, dtype='d') - self.NEAR_MARGIN
+        high = np.asarray(hi, dtype='d') + self.NEAR_MARGIN
         verts = mesh.candidate_vertices(low, high)
         self._near_cache[body] = (low, high, verts)
         return verts
@@ -935,7 +947,10 @@ class CharacterController:
         dynamic body is near, the contacts are those of the spheres down the
         capsule's axis against each ground, found with numbers
         (:func:`~omi_physics.collide.upright_capsule_heightfield_pushes`): no
-        capsule proxy, box test or contact object is made.
+        capsule proxy, box test or contact object is made. Where they are all
+        triangle meshes and no dynamic body is near, the triangles near the
+        capsule are collided with its axis as numbers
+        (:func:`~omi_physics.collide.upright_capsule_mesh_pushes`).
         """
         px, py, pz = (float(v) for v in np.asarray(position, dtype='d'))
         radius = self.caps.radius
@@ -956,10 +971,16 @@ class CharacterController:
             contacts: list[tuple[Any, float]] = []
             owners: list[int] = []
             grounds = gathered.grounds if fast and not self._obstacles else None
+            meshes = gathered.meshes if grounds is None and not self._obstacles else None
             if grounds is not None:
                 for field in grounds:
                     contacts.extend(collide.upright_capsule_heightfield_pushes(
                         field, px, py, pz, half, radius))
+                first_dynamic = len(contacts)
+            elif meshes is not None:
+                for j, mesh in meshes:
+                    contacts.extend(collide.upright_capsule_mesh_pushes(
+                        self._near_triangles_in(j, mesh, lo, hi), px, py, pz, half, radius))
                 first_dynamic = len(contacts)
             else:
                 first_dynamic = self._contacts_with_everything(

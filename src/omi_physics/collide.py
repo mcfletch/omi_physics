@@ -18,7 +18,7 @@ import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -628,6 +628,11 @@ def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
     """
     if verts is None:
         verts = mesh.candidate_vertices(*cap.aabb())
+    return _pushes_from_batch(cap, verts)
+
+
+def _pushes_from_batch(cap: CapsuleProxy, verts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The pushes and depths of :func:`capsule_mesh_pushes` for the triangles ``verts``."""
     hit, _points, normals, depths = capsule_triangle_batch(cap, verts)
     where = np.flatnonzero(hit)
     if not len(where):
@@ -637,6 +642,27 @@ def capsule_mesh_pushes(cap: CapsuleProxy, mesh: TriangleMeshProxy,
     pushes, found = normals[where], depths[where]
     order = np.argsort(-found, kind='stable')
     return pushes[order], found[order]
+
+
+def upright_capsule_mesh_pushes(verts: np.ndarray, x: float, y: float, z: float, half_height: float,
+                                radius: float) -> list[tuple[Any, float]]:
+    """:func:`capsule_mesh_pushes` for an upright capsule centred at ``(x, y, z)``, against
+    triangles already gathered.
+
+    ``half_height`` runs from the centre to the centre of each end, and
+    ``verts`` is ``(N, 3, 3)`` as :meth:`TriangleMeshProxy.candidate_vertices`
+    gathers them. Returns ``(push, depth)`` for each triangle the capsule
+    reaches, deepest first: the contacts :func:`capsule_mesh_pushes` finds, in
+    the same order. Where the compiled accelerator is built no capsule proxy or
+    array is made.
+    """
+    if _native is not None and hasattr(_native, 'upright_capsule_triangle_pushes'):
+        return _native.upright_capsule_triangle_pushes(  # type: ignore[no-any-return]
+            x, y - half_height, y + half_height, z, radius,
+            np.ascontiguousarray(verts, dtype='d').reshape(-1, 3, 3))
+    capsule = CapsuleProxy(np.array([x, y, z]), half_height, radius, _IDENTITY)
+    pushes, depths = _pushes_from_batch(capsule, verts)
+    return list(zip(pushes, depths, strict=True))
 
 
 #: Below this distance from a box, in metres, a capsule's axis is taken to reach into it.

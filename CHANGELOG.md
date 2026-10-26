@@ -55,6 +55,11 @@ compatibility promise.
   same order, so the contacts are the Python's to the bit. A character's height-field contacts
   on the hill grid cost 2 us a column, from 8 us. The accelerators are compiled with
   `-ffp-contract=off`, so no multiply and add are fused on a processor that has the instruction.
+- A character among triangle meshes alone, with no dynamic body near, is collided with the
+  triangles near it as numbers (`collide.upright_capsule_mesh_pushes`, compiled as
+  `_collide_native.upright_capsule_triangle_pushes`): no capsule proxy or contact array is made
+  in depenetration, and the poses are those of the proxy path to the bit. twig-bb's frame with
+  8 bots is 1.75 ms, from 2.16 ms.
 
 ### Fixed
 

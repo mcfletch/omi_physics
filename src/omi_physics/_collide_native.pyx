@@ -463,6 +463,108 @@ cdef void _closest_seg_seg(double* p1, double* q1, double* p2, double* q2,
         out2[m] = p2[m] + d2[m] * t
 
 
+cdef int _capsule_triangle(double* c0, double* c1, double* centre, double radius,
+                           double* v0, double* v1, double* v2,
+                           double* point, double* normal, double* depth) noexcept nogil:
+    """One triangle of :func:`capsule_triangles`: 1 and its contact in ``point``, ``normal`` and
+    ``depth`` where the capsule ``c0``-``c1`` of ``radius`` reaches it, else 0."""
+    cdef double e1[3], e2[3], face[3], fn[3]
+    cdef double sp[3], tp[3], foot[3], axis_pt[3], edge_pt[3]
+    cdef double bsp[3], btp[3]
+    cdef double face_len, height, reach, best_reach, d2, best_d2, dist
+    cdef double gx, gy, gz, nx, ny, nz
+    cdef int m, k, face_found
+    cdef double* caps[2]
+    cdef double bestpt[3]
+    caps[0] = c0
+    caps[1] = c1
+    for m in range(3):
+        e1[m] = v1[m] - v0[m]
+        e2[m] = v2[m] - v0[m]
+    face[0] = e1[1] * e2[2] - e1[2] * e2[1]
+    face[1] = e1[2] * e2[0] - e1[0] * e2[2]
+    face[2] = e1[0] * e2[1] - e1[1] * e2[0]
+    face_len = sqrt(_dot3(face, face))
+    if face_len <= EPS:
+        # No area, no surface: see `collide.capsule_triangle`.
+        return 0
+    face_found = 0
+    best_reach = -1e300
+    for m in range(3):
+        fn[m] = face[m] / face_len
+    gx = centre[0] - v0[0]; gy = centre[1] - v0[1]; gz = centre[2] - v0[2]
+    if fn[0] * gx + fn[1] * gy + fn[2] * gz < 0.0:
+        for m in range(3):
+            fn[m] = -fn[m]
+    for k in range(2):
+        for m in range(3):
+            sp[m] = caps[k][m]
+        gx = sp[0] - v0[0]; gy = sp[1] - v0[1]; gz = sp[2] - v0[2]
+        height = fn[0] * gx + fn[1] * gy + fn[2] * gz
+        for m in range(3):
+            foot[m] = sp[m] - fn[m] * height
+        _closest_on_tri(sp, v0, v1, v2, tp)
+        gx = foot[0] - tp[0]; gy = foot[1] - tp[1]; gz = foot[2] - tp[2]
+        if gx * gx + gy * gy + gz * gz > EPS * EPS:
+            continue
+        reach = radius - height
+        if reach > 0.0 and reach > best_reach:
+            best_reach = reach
+            face_found = 1
+            for m in range(3):
+                bestpt[m] = tp[m]
+    if face_found:
+        depth[0] = best_reach
+        for m in range(3):
+            point[m] = bestpt[m]
+            normal[m] = fn[m]
+        return 1
+
+    best_d2 = 1e300
+    for k in range(2):
+        for m in range(3):
+            sp[m] = caps[k][m]
+        _closest_on_tri(sp, v0, v1, v2, tp)
+        gx = sp[0] - tp[0]; gy = sp[1] - tp[1]; gz = sp[2] - tp[2]
+        d2 = gx * gx + gy * gy + gz * gz
+        if d2 < best_d2:
+            best_d2 = d2
+            for m in range(3):
+                bsp[m] = sp[m]; btp[m] = tp[m]
+    for k in range(3):
+        if k == 0:
+            _closest_seg_seg(c0, c1, v0, v1, axis_pt, edge_pt)
+        elif k == 1:
+            _closest_seg_seg(c0, c1, v1, v2, axis_pt, edge_pt)
+        else:
+            _closest_seg_seg(c0, c1, v2, v0, axis_pt, edge_pt)
+        gx = axis_pt[0] - edge_pt[0]
+        gy = axis_pt[1] - edge_pt[1]
+        gz = axis_pt[2] - edge_pt[2]
+        d2 = gx * gx + gy * gy + gz * gz
+        if d2 < best_d2:
+            best_d2 = d2
+            for m in range(3):
+                bsp[m] = axis_pt[m]; btp[m] = edge_pt[m]
+    if best_d2 >= radius * radius:
+        return 0
+    dist = sqrt(best_d2)
+    if dist > EPS:
+        nx = (bsp[0] - btp[0]) / dist
+        ny = (bsp[1] - btp[1]) / dist
+        nz = (bsp[2] - btp[2]) / dist
+    else:
+        # The capsule axis runs exactly through the contact point, which
+        # names no direction of its own; the face's does.
+        nx = face[0] / face_len; ny = face[1] / face_len
+        nz = face[2] / face_len
+    depth[0] = radius - dist
+    for m in range(3):
+        point[m] = btp[m]
+    normal[0] = nx; normal[1] = ny; normal[2] = nz
+    return 1
+
+
 def capsule_triangles(double[::1] cp0, double[::1] cp1, double radius,
                       double[:, :, ::1] verts,
                       unsigned char[::1] hit, double[:, ::1] points,
@@ -474,14 +576,9 @@ def capsule_triangles(double[::1] cp0, double[::1] cp1, double radius,
     buffers across a frame instead of allocating per query.
     """
     cdef Py_ssize_t n = verts.shape[0], i
-    cdef double v0[3], v1[3], v2[3], e1[3], e2[3], face[3], fn[3]
-    cdef double sp[3], tp[3], foot[3], centre[3], axis_pt[3], edge_pt[3]
-    cdef double bsp[3], btp[3], bpoint[3]
-    cdef double face_len, height, reach, best_reach, d2, best_d2, dist
-    cdef double gx, gy, gz, nx, ny, nz
-    cdef int m, k, face_found
-    cdef double* caps[2]
-    cdef double bestpt[3]
+    cdef double v0[3], v1[3], v2[3], centre[3], point[3], normal[3]
+    cdef double depth = 0.0
+    cdef int m
     cdef double c0[3]
     cdef double c1[3]
 
@@ -490,8 +587,6 @@ def capsule_triangles(double[::1] cp0, double[::1] cp1, double radius,
         c0[m] = cp0[m]
         c1[m] = cp1[m]
         centre[m] = (c0[m] + c1[m]) * 0.5
-    caps[0] = c0
-    caps[1] = c1
 
     with nogil:
         for i in range(n):
@@ -499,93 +594,50 @@ def capsule_triangles(double[::1] cp0, double[::1] cp1, double radius,
                 v0[m] = verts[i, 0, m]
                 v1[m] = verts[i, 1, m]
                 v2[m] = verts[i, 2, m]
-                e1[m] = v1[m] - v0[m]
-                e2[m] = v2[m] - v0[m]
-            face[0] = e1[1] * e2[2] - e1[2] * e2[1]
-            face[1] = e1[2] * e2[0] - e1[0] * e2[2]
-            face[2] = e1[0] * e2[1] - e1[1] * e2[0]
-            face_len = sqrt(_dot3(face, face))
-            if face_len <= EPS:
-                # No area, no surface: see `collide.capsule_triangle`.
-                hit[i] = 0
-                continue
-            face_found = 0
-            best_reach = -1e300
-            for m in range(3):
-                fn[m] = face[m] / face_len
-            gx = centre[0] - v0[0]; gy = centre[1] - v0[1]; gz = centre[2] - v0[2]
-            if fn[0] * gx + fn[1] * gy + fn[2] * gz < 0.0:
-                for m in range(3):
-                    fn[m] = -fn[m]
-            for k in range(2):
-                for m in range(3):
-                    sp[m] = caps[k][m]
-                gx = sp[0] - v0[0]; gy = sp[1] - v0[1]; gz = sp[2] - v0[2]
-                height = fn[0] * gx + fn[1] * gy + fn[2] * gz
-                for m in range(3):
-                    foot[m] = sp[m] - fn[m] * height
-                _closest_on_tri(sp, v0, v1, v2, tp)
-                gx = foot[0] - tp[0]; gy = foot[1] - tp[1]; gz = foot[2] - tp[2]
-                if gx * gx + gy * gy + gz * gz > EPS * EPS:
-                    continue
-                reach = radius - height
-                if reach > 0.0 and reach > best_reach:
-                    best_reach = reach
-                    face_found = 1
-                    for m in range(3):
-                        bestpt[m] = tp[m]
-            if face_found:
+            if _capsule_triangle(c0, c1, centre, radius, v0, v1, v2, point, normal, &depth):
                 hit[i] = 1
-                depths[i] = best_reach
+                depths[i] = depth
                 for m in range(3):
-                    points[i, m] = bestpt[m]
-                    normals[i, m] = fn[m]
-                continue
-
-            best_d2 = 1e300
-            for k in range(2):
-                for m in range(3):
-                    sp[m] = caps[k][m]
-                _closest_on_tri(sp, v0, v1, v2, tp)
-                gx = sp[0] - tp[0]; gy = sp[1] - tp[1]; gz = sp[2] - tp[2]
-                d2 = gx * gx + gy * gy + gz * gz
-                if d2 < best_d2:
-                    best_d2 = d2
-                    for m in range(3):
-                        bsp[m] = sp[m]; btp[m] = tp[m]
-            for k in range(3):
-                if k == 0:
-                    _closest_seg_seg(c0, c1, v0, v1, axis_pt, edge_pt)
-                elif k == 1:
-                    _closest_seg_seg(c0, c1, v1, v2, axis_pt, edge_pt)
-                else:
-                    _closest_seg_seg(c0, c1, v2, v0, axis_pt, edge_pt)
-                gx = axis_pt[0] - edge_pt[0]
-                gy = axis_pt[1] - edge_pt[1]
-                gz = axis_pt[2] - edge_pt[2]
-                d2 = gx * gx + gy * gy + gz * gz
-                if d2 < best_d2:
-                    best_d2 = d2
-                    for m in range(3):
-                        bsp[m] = axis_pt[m]; btp[m] = edge_pt[m]
-            if best_d2 >= radius * radius:
-                hit[i] = 0
-                continue
-            dist = sqrt(best_d2)
-            if dist > EPS:
-                nx = (bsp[0] - btp[0]) / dist
-                ny = (bsp[1] - btp[1]) / dist
-                nz = (bsp[2] - btp[2]) / dist
+                    points[i, m] = point[m]
+                    normals[i, m] = normal[m]
             else:
-                # The capsule axis runs exactly through the contact point, which
-                # names no direction of its own; the face's does.
-                nx = face[0] / face_len; ny = face[1] / face_len
-                nz = face[2] / face_len
-            hit[i] = 1
-            depths[i] = radius - dist
-            for m in range(3):
-                points[i, m] = btp[m]
-            normals[i, 0] = nx; normals[i, 1] = ny; normals[i, 2] = nz
+                hit[i] = 0
+
+
+def upright_capsule_triangle_pushes(double x, double bottom, double top, double z, double radius,
+                                    const double[:, :, ::1] verts):
+    """``(push, depth)`` of each triangle of ``verts`` an upright capsule reaches, deepest first.
+
+    The capsule's axis runs from ``(x, bottom, z)`` to ``(x, top, z)``. ``push`` is the unit normal
+    from the triangle into the capsule, as :func:`capsule_triangles` finds it; triangles of equal
+    depth keep their order, as ``collide.capsule_mesh_pushes`` orders them.
+    """
+    cdef Py_ssize_t n = verts.shape[0], i, k
+    cdef double v0[3], v1[3], v2[3], centre[3], point[3], normal[3]
+    cdef double depth = 0.0
+    cdef double c0[3]
+    cdef double c1[3]
+    cdef int m
+    cdef list out = []
+    cdef list depths = []
+    c0[0] = x; c0[1] = bottom; c0[2] = z
+    c1[0] = x; c1[1] = top; c1[2] = z
+    for m in range(3):
+        centre[m] = (c0[m] + c1[m]) * 0.5
+    for i in range(n):
+        for m in range(3):
+            v0[m] = verts[i, 0, m]
+            v1[m] = verts[i, 1, m]
+            v2[m] = verts[i, 2, m]
+        if not _capsule_triangle(c0, c1, centre, radius, v0, v1, v2, point, normal, &depth):
+            continue
+        # Insertion after every contact at least as deep: a stable order, deepest first.
+        k = len(depths)
+        while k > 0 and <double>depths[k - 1] < depth:
+            k -= 1
+        depths.insert(k, depth)
+        out.insert(k, ((normal[0], normal[1], normal[2]), depth))
+    return out
 
 
 # -- a column of spheres on a height grid ---------------------------------------
