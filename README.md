@@ -138,7 +138,7 @@ for _ in range(steps):
 
 **Ask once a step, not once a frame.** A frame is several steps, contacts are
 rebuilt in each of them, and the speed on a contact is taken *before* the solve
-— because resolving a contact is precisely cancelling the velocity that measures
+— because resolving a contact is cancelling the velocity that measures
 it. Sampled a step late, a square-on impact reads as nothing while a glancing
 one reads almost undiminished, which is the wrong way round for anything that
 has to tell a crash from a scrape.

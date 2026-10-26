@@ -9,7 +9,7 @@ same results. Nothing else in the code changes.
 | Accelerator | Replaces | Used by |
 | --- | --- | --- |
 | `_solver_native.pyx` | sequential-impulse inner loops (constraint prep with each contact's parameters, warm start, velocity + position iterations); the joint-row solve | `solver.py`, `jointrows.py` |
-| `_collide_native.pyx` | SAT box-box (with Sutherland–Hodgman clipping), sphere-sphere, sphere-box; **capsule against a batch of triangles**, and an upright capsule's pushes out of them, deepest first; a column of spheres on a height grid (`GridSurface.column_contacts`) | `narrowphase.py`, `collide.py`, `heightfield.py` |
+| `_collide_native.pyx` | SAT box-box (with Sutherland-Hodgman clipping), sphere-sphere, sphere-box; **capsule against a batch of triangles**, and an upright capsule's pushes out of them, deepest first; a column of spheres on a height grid (`GridSurface.column_contacts`) | `narrowphase.py`, `collide.py`, `heightfield.py` |
 
 ## The fallback contract
 
