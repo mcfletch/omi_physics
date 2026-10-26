@@ -282,6 +282,11 @@ mass) and `raycast(...)`. `WorldQuery(world)` answers it from a live
 immutable copy of the colliders can answer it instead. `body=True` needs a
 `PhysicsWorld`. `ignore=[...]` lists bodies the capsule does not collide with.
 
+A capsule among triangle meshes alone, with no dynamic body near, is collided
+with the triangles near it as numbers (`collide.upright_capsule_mesh_pushes`,
+compiled where the accelerator is built), and its poses are those of the proxy
+path to the bit.
+
 Dynamic bodies are obstacles and floors for the capsule, read once at the start
 of each `update`:
 
@@ -404,7 +409,10 @@ body in y for the broad phase, which an unbounded field cannot be.
   four radii of it (`heightfield.local_clearance`, `LOCAL_REACH`), so on a gentle slope a
   standing capsule slides one sphere and not five. The pose agrees with the
   contact solver's to 1e-9 m a step; `CharacterController.ground_fast_path =
-  False` collides it through `collide.collide` instead.
+  False` collides it through `collide.collide` instead. Where the compiled
+  accelerator is built, a grid answers the whole column in one call
+  (`GridSurface.compiled_pushes`), with the Python's numbers to the bit: about
+  2 us a column.
 - A ray is marched in steps of `feature` over the stretch inside the extent
   (at most 131,072 steps) and the step that crosses the surface is bisected.
 - The shape holds no mass: a dynamic or kinematic body cannot hold one
