@@ -159,6 +159,7 @@ class TestAddBodies:
         assert world.aabb_max[post][0] == pytest.approx(50.5 + 0.05, abs=1e-6)
 
 
+@pytest.mark.serial
 class TestCost:
     def test_ten_thousand_trunks_are_added_in_half_a_second(self) -> None:
         world = world_with_ground()

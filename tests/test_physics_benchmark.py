@@ -34,6 +34,7 @@ def test_broadphase_is_subquadratic_on_1000_bodies():
     assert set(pairs) == set(brute_force_pairs(world))
 
 
+@pytest.mark.serial
 def test_step_completes_on_1000_bodies():
     world = grid_world(10)
     t0 = time.time()
