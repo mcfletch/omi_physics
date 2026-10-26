@@ -832,11 +832,13 @@ def _hit_triangles(origin: np.ndarray, heading: np.ndarray,
         edge = cross(to_a, edge1)
         v = (edge @ heading) * inverse
         distance = np.einsum('ij,ij->i', edge2, edge) * inverse
-    met = ((np.abs(determinant) >= _TINY)        # not parallel to the plane
-           & np.isfinite(distance)
-           & (u >= 0.0) & (u <= 1.0)
-           & (v >= 0.0) & (u + v <= 1.0)
-           & (distance >= 0.0) & (distance <= limit))
+        # A ray parallel to a triangle's plane gives infinite u and v of
+        # either sign, and their sum is invalid; the first test rules it out.
+        met = ((np.abs(determinant) >= _TINY)        # not parallel to the plane
+               & np.isfinite(distance)
+               & (u >= 0.0) & (u <= 1.0)
+               & (v >= 0.0) & (u + v <= 1.0)
+               & (distance >= 0.0) & (distance <= limit))
     if not met.any():
         return None
     # ``where`` rather than masking the arrays: the winner's index is wanted
