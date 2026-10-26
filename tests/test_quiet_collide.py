@@ -1,6 +1,7 @@
 """A step with nothing that can collide skips the broad phase; one with something does not."""
 import numpy as np
 import pytest
+
 from omi_physics import model
 from omi_physics.broadphase import BroadPhase
 from omi_physics.world import PhysicsWorld

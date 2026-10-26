@@ -5,9 +5,8 @@ import numpy as np
 import pytest
 
 from omi_physics import hull, model
-from omi_physics.body import BoxProxy
+from omi_physics.body import BoxProxy, make_proxy
 from omi_physics.collide import box_face_contacts, collide
-from omi_physics.body import make_proxy
 from omi_physics.world import PhysicsWorld
 
 DT = 1.0 / 120.0

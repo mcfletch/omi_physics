@@ -109,12 +109,14 @@ def test_a_capsule_inside_a_box_leaves_by_the_nearest_face():
 
 def test_a_capsule_lying_through_a_box_is_pushed_out_of_its_side():
     box = BoxProxy((0.0, 0.0, 0.0), (0.2, 2.0, 0.2), np.eye(3))
-    across = mathutil.quat_to_matrix(np.array([[0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)]]))[0]
+    quarter = np.array([[0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)]])
+    across = mathutil.quat_to_matrix(quarter)[0]
     capsule = CapsuleProxy((0.0, 0.0, 0.1), 1.0, 0.1, across)
     hit, push, depth = pushes(capsule, box)
     assert hit[0]
     assert np.allclose(push[0], (0.0, 0.0, 1.0))
-    assert depth[0] == pytest.approx((0.2 - 0.1) + 0.1)      # the box's side past the axis, and the radius
+    # The box's side past the axis, and the radius.
+    assert depth[0] == pytest.approx((0.2 - 0.1) + 0.1)
 
 
 def test_a_capsule_of_no_length_is_a_sphere():

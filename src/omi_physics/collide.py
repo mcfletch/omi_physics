@@ -39,11 +39,10 @@ from .body import (
 )
 from .mathutil import cross
 
-if accelerators_disabled():
-    _native = None
-else:
+_native: Any = None
+if not accelerators_disabled():
     try:
-        from . import _collide_native as _native  # type: ignore[no-redef,attr-defined]
+        from . import _collide_native as _native  # type: ignore[attr-defined,no-redef]
     except ImportError:                # pragma: no cover - pure-Python fallback
         _native = None
 
@@ -64,7 +63,7 @@ class Contact:
     they met, in metres per second, positive for closing and zero or below for a
     pair merely resting against one another.  The solver records it before it
     resolves anything, which is the only moment it can be read: resolving a
-    contact is precisely cancelling the velocity that measures it.  See
+    contact is cancelling the velocity that measures it.  See
     :meth:`~omi_physics.world.PhysicsWorld.impact_on`.
 
     ``slip`` is the sliding speed across the contact, taken at the same moment.
@@ -439,7 +438,7 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     """Convex↔triangle-soup: collide the mover against overlapping triangles.
 
     A capsule mover (the character) uses the analytic capsule↔triangle test — far
-    faster and more robust than GJK/EPA, whose polytope expansion stalls on the
+    faster and more reliable than GJK/EPA, whose polytope expansion stalls on the
     big flat wall/floor triangles of an arbitrary mesh.
 
     Two triangle soups have no inside to be in, so a mesh against a mesh
@@ -662,9 +661,10 @@ def upright_capsule_mesh_pushes(verts: np.ndarray, x: float, y: float, z: float,
     array is made.
     """
     if _native is not None and hasattr(_native, 'upright_capsule_triangle_pushes'):
-        return _native.upright_capsule_triangle_pushes(  # type: ignore[no-any-return]
+        found: list[tuple[Any, float]] = _native.upright_capsule_triangle_pushes(
             x, y - half_height, y + half_height, z, radius,
             np.ascontiguousarray(verts, dtype='d').reshape(-1, 3, 3))
+        return found
     capsule = CapsuleProxy(np.array([x, y, z]), half_height, radius, _IDENTITY)
     pushes, depths = _pushes_from_batch(capsule, verts)
     return list(zip(pushes, depths, strict=True))
@@ -803,7 +803,7 @@ def capsule_box_push(p0: tuple[float, float, float], p1: tuple[float, float, flo
 
 def _segment_box_overlap(start: np.ndarray, end: np.ndarray, halves: np.ndarray,
                          rotations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The least push, world direction and distance, that takes segments clear of the boxes they reach into.
+    """The least push, world direction and distance, taking segments clear of the boxes they reach.
 
     ``start`` and ``end`` are in each box's frame. The candidate directions are
     the faces of the box swept along the segment: the box's three axes and the

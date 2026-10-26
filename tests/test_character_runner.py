@@ -1,4 +1,7 @@
-"""A character that runs without stopping: a slide that steers and goes on, and a jump that follows the slope."""
+"""A character that runs without stopping.
+
+A slide that steers and goes on, and a jump that follows the slope.
+"""
 import numpy as np
 import pytest
 

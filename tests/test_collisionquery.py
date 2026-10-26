@@ -7,7 +7,7 @@ import pytest
 from omi_physics import model, raycast
 from omi_physics.body import Proxy, make_proxy, world_aabb
 from omi_physics.character import CharacterCapabilities, CharacterController
-from omi_physics.collisionquery import CollisionQuery, DynamicBody, WorldQuery
+from omi_physics.collisionquery import CollisionQuery, DynamicBody, WorldQuery, dynamic_rows
 from omi_physics.world import PhysicsWorld
 
 DT = 1.0 / 60.0
@@ -170,7 +170,6 @@ def test_a_proxy_for_a_dynamic_body_is_made_from_its_pose() -> None:
 # -- the moving bodies a query keeps ------------------------------------------------
 
 def test_the_moving_bodies_of_a_world_are_found_once_while_none_is_added_or_removed():
-    from omi_physics.collisionquery import dynamic_rows
     world, ids = level()
     first = dynamic_rows(world)
     world.step(DT)
@@ -179,7 +178,6 @@ def test_the_moving_bodies_of_a_world_are_found_once_while_none_is_added_or_remo
 
 
 def test_the_moving_bodies_follow_a_body_added_and_one_removed():
-    from omi_physics.collisionquery import dynamic_rows
     world, ids = level()
     dynamic_rows(world)
     crate = world.add_shape(model.Shape.box((0.5, 0.5, 0.5)))

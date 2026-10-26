@@ -98,7 +98,8 @@ def roaming(seed: int):
 
     def drive(character, step):
         angle = 0.008 * step + float(turns[: step + 1].sum()) + seed
-        character.set_move((math.cos(angle), 0.0, math.sin(angle)), 'run' if step % 400 < 300 else 'walk')
+        mode = 'run' if step % 400 < 300 else 'walk'
+        character.set_move((math.cos(angle), 0.0, math.sin(angle)), mode)
         if step % 170 == 60:
             character.jump()
         elif step % 230 == 120:
@@ -139,13 +140,14 @@ def test_a_contact_with_a_wall_is_found_with_numbers(monkeypatch):
     assert character.grounded
 
 
-@pytest.mark.skipif(collide._native is None, reason='the compiled accelerators are not in use')
+@pytest.mark.skipif(collide._native is None,  # noqa: SLF001 whether the compiled module loaded
+                    reason='the compiled accelerators are not in use')
 def test_among_meshes_alone_depenetration_makes_no_capsule_proxy(monkeypatch):
     character = CharacterController(world_of(level(3)), capabilities(), gravity=9.81)
     character.safe_bind((0.5, 2.0, 0.5))
     inside = []
     made = []
-    push_out = CharacterController._push_out
+    push_out = CharacterController._push_out  # noqa: SLF001 the depenetration is what is counted
 
     def counted(self, *arguments, **named):
         inside.append(True)
@@ -155,8 +157,9 @@ def test_among_meshes_alone_depenetration_makes_no_capsule_proxy(monkeypatch):
             inside.pop()
     monkeypatch.setattr(CharacterController, '_push_out', counted)
     original = CapsuleProxy.__init__
-    monkeypatch.setattr(CapsuleProxy, '__init__',
-                        lambda self, *a, **k: (inside and made.append(a)) or original(self, *a, **k))
+    monkeypatch.setattr(
+        CapsuleProxy, '__init__',
+        lambda self, *a, **k: (inside and made.append(a)) or original(self, *a, **k))
     monkeypatch.setattr(collide, 'capsule_mesh_pushes',
                         lambda *a, **k: pytest.fail('the proxy path was taken'))
     pushes = []

@@ -252,7 +252,7 @@ class SequentialImpulseSolver:
             k.surface = (float(terms.surface[index, 0]), float(terms.surface[index, 1]))
             # How hard they met, which restitution is a fraction of and
             # impact_on answers from. Taken before anything is solved because
-            # the iterations below are precisely the removal of it.
+            # the iterations below remove exactly that.
             relative = (world.linear_velocity[b] + _cross(world.angular_velocity[b], k.rB)
                         - world.linear_velocity[a] - _cross(world.angular_velocity[a], k.rA))
             along = float(np.dot(relative, k.n))

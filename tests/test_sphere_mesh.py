@@ -14,7 +14,8 @@ from omi_physics.world import PhysicsWorld
 DT = 1.0 / 120.0
 
 
-def bumpy_mesh(seed: int, cells: int = 6, size: float = 6.0, bowl: float = 0.0) -> TriangleMeshProxy:
+def bumpy_mesh(seed: int, cells: int = 6, size: float = 6.0, bowl: float = 0.0
+               ) -> TriangleMeshProxy:
     """A grid of random heights, raised toward its rim by ``bowl`` times the squared distance."""
     rng = np.random.default_rng(seed)
     n = cells + 1

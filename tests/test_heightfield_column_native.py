@@ -34,7 +34,8 @@ def python_column(surface: GridSurface, x: float, z: float, heights: list[float]
         return surface.column_contacts(x, z, heights, radius)
 
 
-def column_on(surface: GridSurface, rng: np.random.Generator) -> tuple[float, float, list[float], float]:
+def column_on(surface: GridSurface, rng: np.random.Generator
+              ) -> tuple[float, float, list[float], float]:
     """A column somewhere on or just off the grid, its lowest sphere at or near the ground."""
     low, high = surface.low, surface.high
     x = float(rng.uniform(low[0] - 1.0, high[0] + 1.0))
