@@ -143,3 +143,27 @@ def test_two_numpy_runs_match_within_tolerance():
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))
+
+
+def test_use_backend_numpy_fixes_the_world_on_numpy():
+    world = PhysicsWorld(gravity=model.Gravity(gravity=9.81), gpu_threshold=2)
+    world.use_backend('numpy')
+    assert isinstance(world.backend, backend.NumpyBackend)
+    assert world.backend_mode == 'fixed'
+
+
+def test_use_backend_auto_starts_on_numpy_and_hands_off_past_the_threshold():
+    world = PhysicsWorld(gravity=model.Gravity(gravity=9.81), backend='numpy')
+    world.use_backend('auto')
+    assert world.backend_mode == 'auto'
+    assert isinstance(world.backend, backend.NumpyBackend)
+
+
+def test_use_backend_gpu_without_compute_raises_and_keeps_the_backend(monkeypatch):
+    world = PhysicsWorld(gravity=model.Gravity(gravity=9.81), backend='numpy')
+    before = world.backend
+    monkeypatch.setattr(backend, 'has_gl_compute', lambda: False)
+    with pytest.raises(RuntimeError):
+        world.use_backend('gpu')
+    assert world.backend is before
+    assert world.backend_mode == 'fixed'

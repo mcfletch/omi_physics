@@ -1268,6 +1268,24 @@ class PhysicsWorld:
             self._backend_mode = 'auto'
             self.backend = self._cpu_backend           # upgraded past threshold
 
+    @property
+    def backend_mode(self) -> str:
+        """``'fixed'`` for a world that keeps its backend; ``'auto'`` changes it with the load."""
+        return self._backend_mode
+
+    def use_backend(self, mode: str) -> None:
+        """Step from now on with the backend ``mode`` names: ``numpy``, ``gpu`` or ``auto``.
+
+        ``gpu`` needs GL 4.3 compute current on the calling thread and raises
+        where there is none, leaving the backend as it was.
+        """
+        if mode in ('gpu', 'glcompute'):
+            made = select_backend('gpu')
+            self._backend_mode = 'fixed'
+            self.backend = self._gpu_backend = made
+        else:
+            self._init_backend(mode, self.gpu_threshold)
+
     def _select_auto_backend(self) -> None:
         """In ``auto`` mode, swap CPU↔GPU backend by awake-body count (with hysteresis)."""
         awake = len(self.awake_dynamic_rows())
