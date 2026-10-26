@@ -8,12 +8,12 @@ What a ray must get right is not "did it hit" but **which** thing it hit first.
 A cast that returns any hit rather than the nearest shoots through walls, and
 that is the defect these tests are shaped around.
 """
-import time
 
 import numpy as np
 import pytest
 
 from omi_physics import model, raycast
+from omi_physics.trigrid import TriangleGrid
 from omi_physics.world import PhysicsWorld
 
 
@@ -441,10 +441,11 @@ class TestTheCostOfACast:
     to the whole mesh is milliseconds per cast at a real map's size, so a
     handful of bots costs more than the entire frame budget.
 
-    Asserted as **scaling** rather than as a number of milliseconds, because a
-    threshold in milliseconds measures the machine.  Quadrupling the triangles
-    without moving the geometry must not quadruple the cost: what a cast looks
-    at is what is near it, and there is no more near it than there was.
+    Asserted as the work a cast does, counted: the grid cells it walks and the
+    candidate triangles those cells hand it. A time measures the machine and
+    whatever else runs on it. Quadrupling the triangles without moving the
+    geometry walks the same cells and must not quadruple the candidates: what a
+    cast looks at is what is near it, and there is no more near it than there was.
     """
 
     def level(self, side):
@@ -473,28 +474,52 @@ class TestTheCostOfACast:
                    collider=model.Collider(shape=shape), position=(0, 0, 0))
         return w
 
-    def cost(self, w, origin, heading, limit, times=60):
-        """Seconds per cast, with the first thrown away so the placed-mesh
-        cache and numpy's own warm-up are not being timed."""
+    def work(self, w, origin, heading, limit, monkeypatch):
+        """The cells one cast walks, the candidates they hand it, and the mesh's triangle count.
+
+        The first cast builds the placed mesh and its grid, and is not counted.
+        """
         raycast.raycast(w, origin, heading, max_distance=limit)
-        start = time.perf_counter()
-        for _ in range(times):
+        counted = [0, 0]
+        walk = TriangleGrid._walk                # noqa: SLF001 the walk is the work counted
+        gathered = TriangleGrid._gathered        # noqa: SLF001 the candidates are the work counted
+
+        def walking(grid, *arguments):
+            for cell in walk(grid, *arguments):
+                counted[0] += 1
+                yield cell
+
+        def gathering(grid, found, *arguments, **named):
+            counted[1] += sum(len(cell) for cell in found)
+            return gathered(grid, found, *arguments, **named)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(TriangleGrid, '_walk', walking)
+            patch.setattr(TriangleGrid, '_gathered', gathering)
             raycast.raycast(w, origin, heading, max_distance=limit)
-        return (time.perf_counter() - start) / times
+        return counted[0], counted[1], len(w.shapes[0].indices)
 
-    def scaling(self, origin, heading, limit):
-        """How much dearer a cast gets for four times the triangles."""
-        small = self.cost(self.level(40), origin, heading, limit)
-        large = self.cost(self.level(80), origin, heading, limit)
-        return large / max(small, 1e-9)
+    def scaling(self, origin, heading, limit, monkeypatch):
+        """The work of a cast on a level, and on the same level with four times the triangles."""
+        return (self.work(self.level(40), origin, heading, limit, monkeypatch),
+                self.work(self.level(80), origin, heading, limit, monkeypatch))
 
-    def test_a_short_probe_does_not_get_dearer_with_the_mesh(self):
+    def test_a_short_probe_does_not_get_dearer_with_the_mesh(self, monkeypatch):
         """What a bot's step probe is: half a metre, on thousands of triangles."""
-        assert self.scaling((0.0, 0.5, 0.0), (1.0, 0.0, 0.0), 0.5) < 2.0
+        (cells, small, _), (finer_cells, large, triangles) = self.scaling(
+            (0.0, 0.5, 0.0), (1.0, 0.0, 0.0), 0.5, monkeypatch)
+        assert cells == finer_cells == 1
+        assert large < 2 * small
+        assert large < triangles / 1000
 
-    def test_a_cast_across_the_level_does_not_either(self):
+    def test_a_cast_across_the_level_does_not_either(self, monkeypatch):
         """The case a bounding box cannot help with: the box is the level."""
-        assert self.scaling((-40.0, 0.5, 0.3), (1.0, 0.0, 0.0), 100.0) < 2.0
+        (cells, small, _), (finer_cells, large, triangles) = self.scaling(
+            (-40.0, 0.5, 0.3), (1.0, 0.0, 0.0), 100.0, monkeypatch)
+        assert cells == finer_cells > 1
+        assert 0 < large < 2 * small
+        # A line of cells across the floor: about 1 in 40 of the mesh's triangles.
+        assert large < triangles / 20
 
     def test_it_still_finds_the_floor_it_is_aimed_at(self):
         """The narrowing must not have cost the cast its answer."""
