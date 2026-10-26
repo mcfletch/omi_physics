@@ -10,6 +10,9 @@ from omi_physics.heightfield import GridSurface
 
 RNG = np.random.default_rng(20261026)
 
+#: Spheres found one at a time; more are found together.
+ONE_BY_ONE = heightfield._ONE_BY_ONE  # noqa: SLF001 the split between the two ways is what is tested
+
 
 def bumpy_grid(rows: int = 40, columns: int = 40, spacing: float = 0.5) -> GridSurface:
     z, x = np.mgrid[0:rows, 0:columns] * spacing
@@ -20,7 +23,8 @@ def bumpy_grid(rows: int = 40, columns: int = 40, spacing: float = 0.5) -> GridS
 def axis_spheres(foot: np.ndarray, count: int = 9, length: float = 1.4, radius: float = 0.15
                  ) -> np.ndarray:
     """Centres of the spheres a standing capsule is taken as, its base at ``foot``."""
-    return foot[None, :] + np.array([0.0, radius, 0.0]) + np.linspace(0.0, length, count)[:, None] * [0, 1, 0]
+    rise = np.linspace(0.0, length, count)[:, None] * [0, 1, 0]
+    return foot[None, :] + np.array([0.0, radius, 0.0]) + rise
 
 
 class Spy(GridSurface):
@@ -120,7 +124,7 @@ def test_a_height_with_numbers_is_the_height_with_arrays_to_the_bit(seed):
 
 @pytest.mark.parametrize('count', [1, 2, 4, 5, 9, 12])
 @pytest.mark.parametrize('seed', range(12))
-def test_a_few_spheres_slid_together_with_numbers_are_those_slid_with_arrays_to_the_bit(seed, count):
+def test_a_few_spheres_slid_together_with_numbers_match_those_slid_with_arrays(seed, count):
     rng = np.random.default_rng(1000 * count + seed)
     surface = bumpy_grid()
     for _ in range(10):
@@ -133,9 +137,10 @@ def test_a_few_spheres_slid_together_with_numbers_are_those_slid_with_arrays_to_
 
 
 @pytest.mark.parametrize('seed', range(8))
-def test_the_spheres_of_a_capsule_are_found_as_with_arrays_to_the_bit(seed):
+def test_the_spheres_of_a_capsule_are_found_as_with_arrays(seed):
     rng = np.random.default_rng(seed)
     surface = bumpy_grid()
+    alone = 0
     for _ in range(25):
         foot = random_centres(rng, surface, 1)[0]
         centres = axis_spheres(foot)
@@ -143,10 +148,22 @@ def test_the_spheres_of_a_capsule_are_found_as_with_arrays_to_the_bit(seed):
         heights = surface.heights(centres[:, 0], centres[:, 2])
         reach = 2.0 * 0.15 * math.sqrt(1.0 + surface.lipschitz ** 2)
         near = np.flatnonzero(centres[:, 1] - heights < reach)
-        if len(near) > heightfield._ONE_BY_ONE:
+        far = np.setdiff1d(np.arange(len(centres)), near)
+        assert not got[0][far].any()
+        if 0 < len(near) <= ONE_BY_ONE:
+            alone += 1
+        if len(near):
             wanted = heightfield.sphere_contacts_by_sliding(surface, centres[near], 0.15)
-            for one, other in zip(got, wanted, strict=True):
-                assert np.array_equal(one[near], other)
+            assert np.array_equal(got[0][near], wanted[0])
+            for one, other in zip(got[1:], wanted[1:], strict=True):
+                if len(near) > ONE_BY_ONE:
+                    assert np.array_equal(one[near], other)
+                else:
+                    # A sphere slid alone stops at its own step under _SETTLED (1e-9), and
+                    # spheres slid together stop when all of them have.
+                    assert np.allclose(one[near], other, rtol=0.0, atol=1e-8)
+    # Every seed meets the ground with a few spheres at least 4 times in 25.
+    assert alone >= 4
 
 
 def test_a_capsule_lying_on_the_ground_is_found_with_no_array_lookup():
@@ -155,5 +172,5 @@ def test_a_capsule_lying_on_the_ground_is_found_with_no_array_lookup():
     centres[:, 1] = [surface.height_at(x, 6.0) + 0.1 for x in centres[:, 0]]
     surface.heights_asked = surface.samples = 0
     touching, *_ = heightfield.sphere_contacts(surface, centres, 0.15)
-    assert touching.sum() > heightfield._ONE_BY_ONE
+    assert touching.sum() > ONE_BY_ONE
     assert surface.samples == 0 and surface.heights_asked == 0
