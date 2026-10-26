@@ -5,8 +5,9 @@ import importlib.util
 import numpy as np
 import pytest
 
-from omi_physics import heightfield
+from omi_physics import collide, heightfield
 from omi_physics._accel import accelerators_disabled
+from omi_physics.body import HeightFieldProxy
 from omi_physics.heightfield import GridSurface
 
 pytestmark = pytest.mark.skipif(accelerators_disabled() or importlib.util.find_spec(
@@ -91,3 +92,45 @@ def test_a_column_of_more_than_sixteen_spheres_is_found_with_arrays(monkeypatch)
     heights = [ground + 0.05 * k for k in range(20)]
     assert (surface.column_contacts(x, z, heights, 0.3)
             == python_column(surface, x, z, heights, 0.3, monkeypatch))
+
+
+def field_of(surface: GridSurface, rng: np.random.Generator) -> HeightFieldProxy:
+    return HeightFieldProxy(surface, tuple(float(v) for v in rng.uniform(-2.0, 2.0, 3)), np.eye(3))
+
+
+@pytest.mark.parametrize('seed', range(30))
+def test_a_capsule_pushed_out_of_a_grid_by_the_compiled_column_is_pushed_as_by_python(
+        seed, monkeypatch):
+    rng = np.random.default_rng(4400 + seed)
+    surface = rough_grid(rng)
+    field = field_of(surface, rng)
+    found = 0
+    for _ in range(60):
+        x, z, heights, radius = column_on(surface, rng)
+        half = float(rng.uniform(0.05, 1.0))
+        x, y, z = x + field.center[0], heights[0] + half + field.center[1], z + field.center[2]
+        compiled = collide.upright_capsule_heightfield_pushes(field, x, y, z, half, radius)
+        with monkeypatch.context() as patch:
+            patch.setattr(heightfield, '_native', None)
+            assert compiled == collide.upright_capsule_heightfield_pushes(field, x, y, z, half,
+                                                                          radius)
+        found += len(compiled)
+    assert found
+
+
+def test_a_capsule_on_a_grid_asks_python_only_for_a_column_of_many_contacts(monkeypatch):
+    """The few contacts of a standing or sunk capsule come from the compiled column alone; one
+    buried with more contacts than a manifold keeps is reduced by the Python."""
+    rng = np.random.default_rng(8)
+    surface = rough_grid(rng)
+    field = field_of(surface, rng)
+    columns = [column_on(surface, rng) for _ in range(200)]
+    found = []
+    python_column = surface.column_contacts
+    monkeypatch.setattr(surface, 'column_contacts',
+                        lambda *a: found.append(len(contacts := python_column(*a))) or contacts)
+    for x, z, heights, radius in columns:
+        collide.upright_capsule_heightfield_pushes(
+            field, x + field.center[0], heights[0] + 0.2 + field.center[1], z + field.center[2],
+            0.2, radius)
+    assert all(count > collide._MANIFOLD_POINTS for count in found)  # noqa: SLF001 the manifold's size

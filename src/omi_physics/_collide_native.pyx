@@ -824,32 +824,16 @@ cdef void _slide_together(_Grid* g, double cx, double cz, double* ys, int count,
             break
 
 
-def grid_column_contacts(const double[:, ::1] heights, double ox, double oy, double oz,
-                         double sx, double sz, const double[:, ::1] steepest, double lipschitz,
-                         double x, double z, list ys, double radius):
-    """GridSurface.column_contacts for at most 16 spheres: ``(point, normal, depth)`` of each
-    touching sphere of ``radius`` at ``(x, y, z)`` for ``y`` in ``ys``, in their order.
-
-    ``steepest`` is the grid's table of the steepest slope near each cell for a reach of
-    four radii (GridSurface._steepest_table).
-    """
-    cdef _Grid g
-    g.heights = &heights[0, 0]
-    g.rows = heights.shape[0]
-    g.columns = heights.shape[1]
-    g.ox = ox; g.oy = oy; g.oz = oz; g.sx = sx; g.sz = sz
-    cdef int count = len(ys)
-    if count > COLUMN_MOST:
-        raise ValueError('a column of at most 16 spheres')
-    cdef double column[COLUMN_MOST]
+cdef int _grid_column(_Grid* g, const double[:, ::1] steepest, double lipschitz,
+                      double x, double z, double* column, int count, double radius,
+                      double* found) noexcept nogil:
+    """GridSurface.column_contacts before its answer is built: eight numbers into ``found`` for
+    each sphere slid, as :func:`_slide_one` gives them; returns how many were slid."""
     cdef double kept[COLUMN_MOST]
-    cdef double found[8 * COLUMN_MOST]
     cdef int k, near = 0, nearer = 0
-    for k in range(count):
-        column[k] = ys[k]
     cdef double reach = 2.0 * radius * sqrt(1.0 + lipschitz * lipschitz)
-    cdef double ground = _grid_height(&g, x, z)
-    cdef double limit, top, slope, spread, wide_reach, gx, gz, above, depth, half
+    cdef double ground = _grid_height(g, x, z)
+    cdef double limit, top, slope, spread, wide_reach, gx, gz, above
     cdef Py_ssize_t i, j
     for k in range(count):
         if column[k] - ground < reach:
@@ -858,8 +842,8 @@ def grid_column_contacts(const double[:, ::1] heights, double ox, double oy, dou
     if near:
         # GridSurface._local_clearance and _steepest_near.
         wide_reach = LOCAL_REACH * radius
-        gx = (x - ox) / sx
-        gz = (z - oz) / sz
+        gx = (x - g.ox) / g.sx
+        gz = (z - g.oz) / g.sz
         if not (0.0 <= gx and gx <= <double>(g.columns - 1)
                 and 0.0 <= gz and gz <= <double>(g.rows - 1)):
             slope = INFINITY
@@ -884,17 +868,85 @@ def grid_column_contacts(const double[:, ::1] heights, double ox, double oy, dou
                 kept[nearer] = kept[k]
                 nearer += 1
     if nearer > ONE_BY_ONE:
-        _slide_together(&g, x, z, kept, nearer, found)
+        _slide_together(g, x, z, kept, nearer, found)
     else:
         for k in range(nearer):
-            _slide_one(&g, x, kept[k], z, found + 8 * k)
-    cdef list out = []
+            _slide_one(g, x, kept[k], z, found + 8 * k)
+    return nearer
+
+
+cdef inline void _grid_of(_Grid* g, const double[:, ::1] heights, double ox, double oy, double oz,
+                          double sx, double sz):
+    g.heights = &heights[0, 0]
+    g.rows = heights.shape[0]
+    g.columns = heights.shape[1]
+    g.ox = ox; g.oy = oy; g.oz = oz; g.sx = sx; g.sz = sz
+
+
+def grid_column_contacts(const double[:, ::1] heights, double ox, double oy, double oz,
+                         double sx, double sz, const double[:, ::1] steepest, double lipschitz,
+                         double x, double z, list ys, double radius):
+    """GridSurface.column_contacts for at most 16 spheres: ``(point, normal, depth)`` of each
+    touching sphere of ``radius`` at ``(x, y, z)`` for ``y`` in ``ys``, in their order.
+
+    ``steepest`` is the grid's table of the steepest slope near each cell for a reach of
+    four radii (GridSurface._steepest_table).
+    """
+    cdef _Grid g
+    _grid_of(&g, heights, ox, oy, oz, sx, sz)
+    cdef int count = len(ys)
+    if count > COLUMN_MOST:
+        raise ValueError('a column of at most 16 spheres')
+    cdef double column[COLUMN_MOST]
+    cdef double found[8 * COLUMN_MOST]
+    cdef int k, slid
+    cdef double depth, half
     cdef double* row
-    for k in range(nearer):
+    for k in range(count):
+        column[k] = ys[k]
+    slid = _grid_column(&g, steepest, lipschitz, x, z, column, count, radius, found)
+    cdef list out = []
+    for k in range(slid):
         row = found + 8 * k
         depth = radius - row[7]
         if row[0] != 0.0 and depth > 0.0:
             half = 0.5 * depth
             out.append(((row[1] - row[4] * half, row[2] - row[5] * half, row[3] - row[6] * half),
                         (row[4], row[5], row[6]), depth))
+    return out
+
+
+def grid_capsule_pushes(const double[:, ::1] heights, double ox, double oy, double oz,
+                        double sx, double sz, const double[:, ::1] steepest, double lipschitz,
+                        double x, double z, double bottom, double span, double lift, tuple along,
+                        double radius, int most):
+    """``(normal, depth)`` of each sphere of a column that touches the grid, or None where more
+    than ``most`` do.
+
+    The spheres stand at ``(bottom + span * a) - lift`` for ``a`` in ``along``, as
+    ``collide.upright_capsule_heightfield_pushes`` places them.
+    """
+    cdef _Grid g
+    _grid_of(&g, heights, ox, oy, oz, sx, sz)
+    cdef int count = len(along)
+    if count > COLUMN_MOST:
+        raise ValueError('a column of at most 16 spheres')
+    cdef double column[COLUMN_MOST]
+    cdef double found[8 * COLUMN_MOST]
+    cdef int k, slid, touching = 0
+    cdef double* row
+    for k in range(count):
+        column[k] = (bottom + span * <double>along[k]) - lift
+    slid = _grid_column(&g, steepest, lipschitz, x, z, column, count, radius, found)
+    for k in range(slid):
+        row = found + 8 * k
+        if row[0] != 0.0 and radius - row[7] > 0.0:
+            touching += 1
+    if touching > most:
+        return None
+    cdef list out = []
+    for k in range(slid):
+        row = found + 8 * k
+        if row[0] != 0.0 and radius - row[7] > 0.0:
+            out.append(((row[4], row[5], row[6]), radius - row[7]))
     return out

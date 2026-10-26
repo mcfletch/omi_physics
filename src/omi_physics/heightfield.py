@@ -204,9 +204,9 @@ class GridSurface(HeightSurface):
         self._numbers: tuple[list[list[float]], int, int, float, float, float, float, float] | None = None
         #: :meth:`_steepest_table` by its reach in cells across and along.
         self._steepest: dict[tuple[int, int], list[list[float]]] = {}
-        #: The grid and those tables as contiguous arrays, for the compiled column contacts.
-        self._compiled: dict[tuple[int, int], np.ndarray] = {}
-        self._contiguous: np.ndarray | None = None
+        #: :meth:`_compiled_grid` by the radius of the spheres.
+        self._compiled: dict[float, tuple[np.ndarray, float, float, float, float, float,
+                                          np.ndarray]] = {}
 
     def sphere_contact(self, cx: float, cy: float, cz: float, radius: float
                        ) -> tuple[bool, tuple[float, float, float], tuple[float, float, float], float]:
@@ -367,17 +367,37 @@ class GridSurface(HeightSurface):
     def _compiled_column(self, x: float, z: float, heights: list[float], radius: float,
                          bound: float) -> list[ColumnContact]:
         """:meth:`column_contacts` by the compiled accelerator, which finds the same numbers."""
-        grid = self._contiguous
-        if grid is None:
-            grid = self._contiguous = np.ascontiguousarray(self.grid, dtype='d')
-        _rows, _r, _c, ox, oy, oz, sx, sz = self._frame()
-        reach = LOCAL_REACH * radius
-        wide = (math.ceil(reach / sx), math.ceil(reach / sz))
-        table = self._compiled.get(wide)
-        if table is None:
-            table = self._compiled[wide] = np.ascontiguousarray(self._steepest_list(wide))
-        return _native.grid_column_contacts(grid, ox, oy, oz, sx, sz, table, bound, x, z,
-                                            heights, radius)
+        return _native.grid_column_contacts(*self._compiled_grid(radius), bound, x, z, heights,
+                                            radius)
+
+    def compiled_pushes(self, x: float, z: float, bottom: float, span: float, lift: float,
+                        along: tuple[float, ...], radius: float, most: int
+                        ) -> list[tuple[tuple[float, float, float], float]] | None:
+        """The ``(normal, depth)`` of each touching sphere of the column at ``(x, z)`` whose
+        spheres stand at ``(bottom + span * a) - lift`` for ``a`` in ``along``, by the compiled
+        accelerator; None where it is not built or more than ``most`` spheres touch.
+
+        The contacts are those :meth:`column_contacts` finds for those heights.
+        """
+        if (_native is None or not hasattr(_native, 'grid_capsule_pushes')
+                or len(along) > _WITH_NUMBERS or self.lipschitz is None):
+            return None
+        return _native.grid_capsule_pushes(*self._compiled_grid(radius), self.lipschitz, x, z,
+                                           bottom, span, lift, along, radius, most)
+
+    def _compiled_grid(self, radius: float) -> tuple[np.ndarray, float, float, float, float, float,
+                                                     np.ndarray]:
+        """The grid, its origin and spacing, and the steepest table for spheres of ``radius``,
+        as the compiled column contacts take them."""
+        found = self._compiled.get(radius)
+        if found is None:
+            _rows, _r, _c, ox, oy, oz, sx, sz = self._frame()
+            reach = LOCAL_REACH * radius
+            table = np.ascontiguousarray(self._steepest_list(
+                (math.ceil(reach / sx), math.ceil(reach / sz))))
+            found = self._compiled[radius] = (np.ascontiguousarray(self.grid, dtype='d'),
+                                              ox, oy, oz, sx, sz, table)
+        return found
 
     def _steepest_list(self, wide: tuple[int, int]) -> list[list[float]]:
         """:meth:`_steepest_table` for a reach of ``wide`` cells across and along, made once."""

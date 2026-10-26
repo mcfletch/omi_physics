@@ -406,6 +406,11 @@ def upright_capsule_heightfield_pushes(field: HeightFieldProxy, x: float, y: flo
     count = int(min(max(math.ceil(math.sqrt(span * span) / max(radius, 1e-9)) + 1, 2),
                     _AXIS_SPHERES))
     cx, cy, cz = field.center.tolist()
+    compiled = getattr(field.surface, 'compiled_pushes', None)
+    if compiled is not None:
+        pushes = compiled(x - cx, z - cz, bottom, span, cy, _ALONG[count], radius, _MANIFOLD_POINTS)
+        if pushes is not None:
+            return pushes
     heights = [(bottom + span * along) - cy for along in _ALONG[count]]
     found = field.surface.column_contacts(x - cx, z - cz, heights, radius)
     if len(found) <= _MANIFOLD_POINTS:

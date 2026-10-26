@@ -63,6 +63,10 @@ compatibility promise.
 - The broad phase pairs a kinematic body only with the dynamic bodies and triggers near it (and
   kinematic bodies, where it is a trigger), so a walker's stand-in among static colliders is
   paired and ordered with nothing.
+- An upright capsule's pushes out of a grid ground come from the compiled accelerator in one call
+  where no more than a manifold's four spheres touch (`GridSurface.compiled_pushes`,
+  `_collide_native.grid_capsule_pushes`), the same numbers as the Python column.
+- `WorldQuery.dynamic_near` answers a world with no dynamic body without reading a box.
 
 ### Fixed
 

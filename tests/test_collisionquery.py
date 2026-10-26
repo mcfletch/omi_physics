@@ -189,3 +189,13 @@ def test_the_moving_bodies_follow_a_body_added_and_one_removed():
     assert sorted(dynamic_rows(world).tolist()) == sorted([ids['near'], added])
     found = WorldQuery(world).dynamic_near(np.array([1.0, -1.0, -1.0]), np.array([3.0, 1.0, 2.0]))
     assert sorted(body.body for body in found) == sorted([ids['near'], added])
+
+
+def test_a_world_with_no_dynamic_body_answers_none_without_reading_a_box(monkeypatch):
+    world, ids = level()
+    for name in ('near', 'far'):
+        world.remove_body(ids[name])
+    read = []
+    monkeypatch.setattr(PhysicsWorld, 'aabb_max', property(lambda self: read.append(1)))
+    assert WorldQuery(world).dynamic_near(np.full(3, -1e9), np.full(3, 1e9)) == []
+    assert read == []

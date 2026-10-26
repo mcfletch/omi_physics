@@ -169,6 +169,8 @@ class WorldQuery:
         world = self.world
         # The boxes are read for the moving bodies and not for every body in the world.
         rows = dynamic_rows(world)
+        if not len(rows):
+            return []
         near = (np.all(world.aabb_max[rows] >= lo, axis=1)
                 & np.all(world.aabb_min[rows] <= hi, axis=1))
         return [DynamicBody(body=j, shape=world.shapes[world.collider_shape[j]],
