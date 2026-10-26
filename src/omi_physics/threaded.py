@@ -24,7 +24,8 @@ Any thread talks to the world through the command inbox. :meth:`~ThreadedSimulat
 queues a function of the world and :meth:`~ThreadedSimulation.call` queues one
 and returns a future for its result. The simulation thread runs the queue at
 the start of each tick, before that tick's step, in the order the commands were
-queued, so a command is never half-way through a step.
+queued, so a command is never half-way through a step. A command queued from
+inside a step (a step hook or a contact listener) runs at the start of the next tick.
 
 While no dynamic body is awake, no kinematic body is moving, the world holds no
 joint and the inbox is empty, the thread blocks on an event rather than
@@ -149,6 +150,9 @@ class ThreadedSimulation:
     #: rather than an average across a stall that has already passed.
     RATE_WINDOW = 120
 
+    #: Seconds :meth:`stop` waits for the thread to finish its tick and exit.
+    STOP_TIMEOUT = 2.0
+
     def __init__(self, world: Any, sim_hz: float = 120.0,
                  block_when_idle: bool = True) -> None:
         self.world = world
@@ -162,7 +166,10 @@ class ThreadedSimulation:
         self._snap: Snapshot | None = None
         self._version = 0                        # bumped each publish
         self._thread: threading.Thread | None = None
+        #: The stop token of the current run; each :meth:`start` makes a new one.
         self._stop = threading.Event()
+        #: The thread inside a step of the world, or None between steps.
+        self._stepping: threading.Thread | None = None
         self._wake = threading.Event()
         self._inbox: deque[tuple[Callable[[Any], Any], Future[Any] | None]] = deque()
         self._steps = 0
@@ -176,29 +183,36 @@ class ThreadedSimulation:
         """Begin simulating on a daemon thread; a running simulation is left alone.
 
         Safe to call from several threads at once: one of them starts the thread.
+        A thread still finishing after :meth:`stop` keeps the stop token of its
+        own run, and exits without stepping again.
         """
         with self._lifecycle:
-            if self._thread is not None:
+            if self._thread is not None and not self._stop.is_set():
                 return
-            self._stop.clear()
+            stop = self._stop = threading.Event()
             self._wake.clear()
             with self._world_lock:
                 self._publish()
-            self._thread = threading.Thread(target=self._loop, name='physics', daemon=True)
-            self._thread.start()
+            thread = threading.Thread(target=self._loop, args=(stop,), name='physics',
+                                      daemon=True)
+            with self._lock:
+                self._thread = thread
+            thread.start()
 
     def stop(self) -> None:
         """Stop the simulation thread, interrupting an idle wait, and wait for it to exit.
 
-        Commands still in the inbox stay there for the next :meth:`start`.
+        Commands still in the inbox stay there for the next :meth:`start`. Called
+        on the simulation thread, from a command or a hook, it returns at once and
+        the thread exits at the end of its tick. The wait is at most
+        :attr:`STOP_TIMEOUT` seconds.
         """
         with self._lifecycle:
             thread = self._thread
             self._stop.set()
             self._wake.set()
             if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=2.0)
-                self._thread = None
+                thread.join(timeout=self.STOP_TIMEOUT)
 
     def with_world(self) -> '_WorldAccess':
         """Context manager giving exclusive access to the world (pauses stepping).
@@ -232,14 +246,17 @@ class ThreadedSimulation:
     def call(self, command: Callable[[Any], _Result]) -> 'Future[_Result]':
         """Queue ``command(world)`` like :meth:`post`; the future answers its result or exception.
 
-        From the simulation thread itself the command runs at once, since
+        From a command on the simulation thread the command runs at once, since
         waiting on a queue that thread is the only one to drain would never
-        finish. Nothing resolves the future while the thread is stopped, so a
-        caller waiting on it from a stopped simulation waits for the next
-        :meth:`start`.
+        finish. From inside a step on that thread (a step hook or a contact
+        listener) it is queued for the next tick, and the caller must not wait
+        on the future there. Nothing resolves the future while the thread is
+        stopped, so a caller waiting on it from a stopped simulation waits for
+        the next :meth:`start`.
         """
         future: Future[_Result] = Future()
-        if self._thread is not None and threading.current_thread() is self._thread:
+        current = threading.current_thread()
+        if current is self._thread and current is not self._stepping:
             self._run_command(command, future)
             return future
         self._inbox.append((command, future))
@@ -331,17 +348,37 @@ class ThreadedSimulation:
             return False
         return bool(world.linear_velocity[moving].any() or world.angular_velocity[moving].any())
 
-    def _loop(self) -> None:
+    def _loop(self, stop: threading.Event) -> None:
+        """Tick until ``stop``, this run's token, is set; then let the next start run."""
+        try:
+            self._ticks(stop)
+        finally:
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+
+    def _ticks(self, stop: threading.Event) -> None:
+        """The ticks of one run, ending once ``stop`` is set."""
         clock = time.perf_counter
         dt = self._sim_dt
         next_t = clock()
-        while not self._stop.is_set():
+        while not stop.is_set():
             self._wake.clear()
             with self._world_lock:
+                if stop.is_set():
+                    return
                 ran = self._run_commands()
+                if stop.is_set():
+                    if ran:
+                        self._publish()
+                    return
                 stepping = not self._block_when_idle or self._busy()
                 if stepping:
-                    self.world.step(dt)
+                    self._stepping = threading.current_thread()
+                    try:
+                        self.world.step(dt)
+                    finally:
+                        self._stepping = None
                     self._steps += 1
                     self._publish()
                 elif ran:
@@ -358,7 +395,7 @@ class ThreadedSimulation:
             if dropped:
                 self._dropped += 1
             else:
-                self._stop.wait(delay)          # interruptible sleep
+                stop.wait(delay)                # interruptible sleep
 
     def _record_tick(self, now: float) -> None:
         """Note that a tick finished at ``now``, for :meth:`rate`'s window."""

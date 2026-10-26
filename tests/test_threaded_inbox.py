@@ -309,3 +309,55 @@ class TestStart:
         sim.stop()
         sim.start()
         assert sim.call(lambda world: 'again').result(timeout=5) == 'again'
+
+
+class TestStopAndStart:
+    def test_a_stop_from_a_command_lets_a_later_start_run_again(self, sim) -> None:
+        sim.start()
+        sim.call(lambda world: sim.stop()).result(timeout=5)
+        deadline = time.monotonic() + 5
+        while sim._thread is not None and time.monotonic() < deadline:  # noqa: SLF001 the thread's exit is what is tested
+            time.sleep(0.01)
+        sim.start()
+        assert sim.call(lambda world: 'again').result(timeout=5) == 'again'
+
+    def test_a_stop_that_times_out_leaves_one_loop_stepping(self, moving) -> None:
+        moving.STOP_TIMEOUT = 0.05
+        stepping: set[int] = set()
+        moving.world.add_step_hook(before=lambda step: stepping.add(threading.get_ident()))
+        held = threading.Event()
+        release = threading.Event()
+
+        def block(world: PhysicsWorld) -> None:
+            held.set()
+            release.wait(5)
+
+        moving.start()
+        moving.post(block)
+        assert held.wait(5)
+        moving.stop()
+        # start() publishes under the world lock, which the blocked command holds.
+        threading.Timer(0.1, release.set).start()
+        moving.start()
+        time.sleep(0.1)
+        stepping.clear()
+        assert moving.wait_steps(moving.steps + 20, timeout=10)
+        assert len(stepping) == 1
+
+
+class TestCallDuringAStep:
+    def test_a_call_from_a_step_hook_waits_for_the_next_tick(self, moving) -> None:
+        seen: list[bool] = []
+        futures: list[Future] = []
+
+        def hook(step) -> None:
+            if not futures:
+                future = moving.call(lambda world: world.step_count)
+                futures.append(future)
+                seen.append(future.done())
+
+        moving.world.add_step_hook(after=hook)
+        moving.start()
+        assert moving.wait_steps(3, timeout=10)
+        assert seen == [False]
+        assert futures[0].result(timeout=5) >= 1

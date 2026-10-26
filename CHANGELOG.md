@@ -19,6 +19,9 @@ compatibility promise.
 - `StaticGrid.near` leaves out a removed large or kinematic body, and `WorldQuery.static_epoch()`
   is None once a kinematic body has been added.
 
+- `ThreadedSimulation.stop()` called on the simulation thread lets a later `start()` run again,
+  and a thread still finishing after `stop()` (`STOP_TIMEOUT`, 2 s) exits without stepping.
+  `call()` from a step hook or a contact listener queues the command for the next tick.
 - `ThreadedSimulation.start()` is safe against concurrent calls. `with_world()` answers an
   object that wraps the lock; its block receives the world.
 - A `cylinder` is a flat-ended cylinder rather than a capsule of its height.
