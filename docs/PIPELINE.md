@@ -85,7 +85,7 @@ flowchart LR
     end
     subgraph narrow["Narrowphase — exact"]
         CAND --> ROUTE{shape pair}
-        ROUTE -->|box·box / sphere| FAST[SAT / analytic<br/>collide.py · _collide_native]
+        ROUTE -->|box·box / sphere / capsule| FAST[SAT / analytic<br/>collide.py · _collide_native]
         ROUTE -->|general convex| GJK[GJK / EPA<br/>gjk.py]
         FAST --> MAN[contact manifolds]
         GJK --> MAN
@@ -105,8 +105,11 @@ O(n²) all-pairs cost.
 **Narrowphase** turns each surviving pair into a contact manifold: a normal, one
 or more contact points, and a penetration depth. Box-box and sphere pairs — the
 overwhelming majority in a typical scene — take a vectorized SAT / analytic path
-(and the `_collide_native` accelerator when present); general convex shapes go
-through GJK/EPA.
+(and the `_collide_native` accelerator when present). Capsule-capsule and
+capsule-sphere are analytic too: the nearest points of the two axes (or of the
+axis and the centre) treated as two spheres, so two characters pressed together
+cost a segment test rather than an EPA run. Other convex pairs go through
+GJK/EPA.
 
 **Solver** groups contacting bodies into independent *islands* and solves each
 with sequential-impulse Gauss–Seidel: it iterates over the contacts applying

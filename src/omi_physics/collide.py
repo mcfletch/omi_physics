@@ -119,6 +119,92 @@ def sphere_box(a: int, b: int, S: SphereProxy, B: BoxProxy) -> list[Contact]:
     return [Contact(a, b, world_point, -normal, depth)]
 
 
+def capsule_capsule(a: int, b: int, A: CapsuleProxy, B: CapsuleProxy) -> list[Contact]:
+    """Capsule↔capsule contact (empty if the capsules are apart).
+
+    The nearest points of the two axes are found and the pair is treated as
+    two spheres of the capsules' radii at those points. Where the axes are
+    parallel the nearest points are not unique, and the pair is taken at the
+    middle of the stretch the two axes share, so two capsules standing side by
+    side touch halfway along their overlap. Where the axes meet, the capsules
+    are pushed apart across A's axis, or across B's where A has no length.
+    """
+    pa, pb = _closest_axis_points(A.p0, A.p1, B.p0, B.p1)
+    return _spheres_contact(a, b, pa, A.radius, B.radius, A.p1 - A.p0, B.p1 - B.p0, pb - pa)
+
+
+def capsule_sphere(a: int, b: int, A: CapsuleProxy, S: SphereProxy) -> list[Contact]:
+    """Capsule↔sphere contact: the sphere against the nearest point of the capsule's axis."""
+    axis = A.p1 - A.p0
+    span = float(np.dot(axis, axis))
+    s = 0.0 if span <= EPS else min(max(float(np.dot(S.center - A.p0, axis)) / span, 0.0), 1.0)
+    pa = A.p0 + axis * s
+    return _spheres_contact(a, b, pa, A.radius, S.radius, axis, np.zeros(3), S.center - pa)
+
+
+def _spheres_contact(a: int, b: int, pa: np.ndarray, ra: float, rb: float,
+                     axis_a: np.ndarray, axis_b: np.ndarray, gap: np.ndarray) -> list[Contact]:
+    """The contact of a sphere of ``ra`` at ``pa`` with one of ``rb`` at ``pa + gap``.
+
+    Where ``gap`` has no length, the normal is taken across
+    ``axis_a``, or ``axis_b`` where that has none, and along +Y where neither
+    has a length.
+    """
+    dist = mathutil.length(gap)
+    depth = ra + rb - dist
+    if depth <= 0.0:
+        return []
+    if dist > EPS:
+        n = gap / dist
+    else:
+        n = _across(axis_a if float(np.dot(axis_a, axis_a)) > EPS else axis_b)
+    return [Contact(a, b, pa + n * (ra - 0.5 * depth), n, depth)]
+
+
+def _across(axis: np.ndarray) -> np.ndarray:
+    """A unit vector perpendicular to ``axis``, or +Y where ``axis`` has no length."""
+    span = mathutil.length(axis)
+    if span <= EPS:
+        return np.array([0.0, 1.0, 0.0])
+    u = axis / span
+    # Crossed with whichever world axis it is least aligned with.
+    other = np.zeros(3)
+    other[int(np.argmin(np.abs(u)))] = 1.0
+    n = cross(u, other)
+    return n / mathutil.length(n)
+
+
+#: Below this squared sine of the angle between them, two axes are taken as parallel.
+_PARALLEL = 1e-12
+
+
+def _closest_axis_points(p1: np.ndarray, q1: np.ndarray, p2: np.ndarray,
+                         q2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The nearest points of segments ``p1q1`` and ``p2q2``, mid-overlap where they are parallel.
+
+    :func:`_closest_segment_segment` answers one end of the shared stretch of
+    two parallel segments, which is as near as any other point of it; a contact
+    there sits at one end of two side-by-side capsules.
+    """
+    d1, d2 = q1 - p1, q2 - p2
+    aa = float(np.dot(d1, d1))
+    e = float(np.dot(d2, d2))
+    if aa > EPS and e > EPS:
+        bb = float(np.dot(d1, d2))
+        if aa * e - bb * bb <= _PARALLEL * aa * e:
+            # B's ends as fractions along A, and the stretch of A they share.
+            t0 = float(np.dot(p2 - p1, d1)) / aa
+            t1 = float(np.dot(q2 - p1, d1)) / aa
+            low = max(min(t0, t1), 0.0)
+            high = min(max(t0, t1), 1.0)
+            if low <= high:
+                s = 0.5 * (low + high)
+                pa = p1 + d1 * s
+                t = min(max(float(np.dot(pa - p2, d2)) / e, 0.0), 1.0)
+                return pa, p2 + d2 * t
+    return _closest_segment_segment(p1, q1, p2, q2)
+
+
 def _project(half: np.ndarray, R: np.ndarray, center: np.ndarray,
              axis: np.ndarray) -> tuple[float, float]:
     """Return the ``(min, max)`` extent of an oriented box projected onto ``axis``."""
@@ -278,6 +364,8 @@ _DISPATCH: dict[tuple[str, str], Callable[..., list[Contact]]] = {
     ('sphere', 'sphere'): sphere_sphere,
     ('sphere', 'box'): sphere_box,
     ('box', 'box'): box_box,
+    ('capsule', 'capsule'): capsule_capsule,
+    ('capsule', 'sphere'): capsule_sphere,
 }
 
 
