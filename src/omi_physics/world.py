@@ -1656,7 +1656,8 @@ class PhysicsWorld:
 
         With ``rows``, the boxes of those bodies alone are recomputed: for a
         caller that has moved those bodies and no others, at the margin the
-        boxes were last fitted with.
+        boxes were last fitted with. The static bodies among them are recorded
+        as placed, as :meth:`moved` records them.
 
         Only the boxes that can have changed are recomputed: those of bodies
         that move, and those of static bodies added, removed or placed since
@@ -1679,6 +1680,10 @@ class PhysicsWorld:
         seen_position, seen_orientation = self._fitted_poses()
         if rows is not None and margin == self._fitted_margin:
             rows = np.asarray(rows, dtype=np.intp)
+            fixed = self._motion_type[rows] == _STATIC
+            if fixed.any():
+                self.moved(rows[fixed])
+                rows = rows[~fixed]
             seen_position[rows] = self._position[rows]
             seen_orientation[rows] = self._orientation[rows]
             self._refit_rows(rows, kind, half, margin)

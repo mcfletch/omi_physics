@@ -77,11 +77,16 @@ def write(world, pad):
     world.moved([pad])
 
 
+def refit(world, pad):
+    world.position[pad] = (130.0, 50.0, 100.0)
+    world.refit_aabbs(rows=np.array([pad]))
+
+
 def remove(world, pad):
     world.remove_body(pad)
 
 
-@pytest.mark.parametrize('change', [place, turn, write, remove])
+@pytest.mark.parametrize('change', [place, turn, write, refit, remove])
 def test_a_pad_moved_from_under_a_ball_lets_it_fall_on_the_next_step(change):
     world, pad, ball = ball_on_a_pad()
     change(world, pad)

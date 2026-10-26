@@ -108,6 +108,17 @@ class TestTheIndexFollowsTheWorld:
         assert post in set(query.static_near(np.array([499.0, 0.0, 499.0]),
                                              np.array([501.0, 3.0, 501.0])))
 
+    def test_a_static_body_refitted_by_row_is_found_where_it_was_moved(self) -> None:
+        world, _ = world_with_floor()
+        post = int(posts_in_a_row(world, 50)[0])
+        query = WorldQuery(world)
+        query.static_near(BOX_LO, BOX_HI)
+        world.position[post] = (500.0, 2.0, 500.0)
+        world.refit_aabbs(rows=np.array([post]))
+        assert post not in set(query.static_near(BOX_LO, BOX_HI))
+        assert post in set(query.static_near(np.array([499.0, 0.0, 499.0]),
+                                             np.array([501.0, 3.0, 501.0])))
+
     def test_a_few_changes_are_read_from_the_world_and_do_not_rebuild_the_grid(self) -> None:
         world, _ = world_with_floor()
         posts_in_a_row(world, 50)
