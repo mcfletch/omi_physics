@@ -11,6 +11,8 @@ three calls the narrow phase relies on: ``aabb()`` for the broad-phase box,
 ``center_hint()`` for a representative interior point.  The type aliases
 :data:`SupportProxy` and :data:`Proxy` name these two proxy families for callers.
 """
+import functools
+import math
 from collections.abc import Iterator
 
 import numpy as np
@@ -22,6 +24,10 @@ from .mathutil import Vec
 from .trigrid import TriangleGrid
 
 _AABB = tuple[np.ndarray, np.ndarray]           # (lo, hi) corner pair
+
+#: Two triangles sharing an edge whose faces are within 5 degrees of parallel make
+#: one surface for :attr:`TriangleMeshProxy.internal_edges`.
+INTERNAL_EDGE_COS = math.cos(math.radians(5.0))
 
 
 def _box_corners(half: np.ndarray) -> np.ndarray:
@@ -305,6 +311,51 @@ class TriangleMeshProxy:
         one gather instead of a proxy built and discarded per triangle.
         """
         return self.world_pts[self.indices[self._candidate_indices(lo, hi)]]
+
+    def candidate_triangles(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        """Indices of the triangles near ``[lo, hi]``, into :attr:`indices`."""
+        return self._candidate_indices(lo, hi)
+
+    @functools.cached_property
+    def internal_edges(self) -> np.ndarray:
+        """``(T, 3)`` booleans: edge ``k`` of each triangle lies inside a flat surface.
+
+        Edge ``k`` runs from corner ``k`` to corner ``k + 1``. It is internal where
+        exactly one other triangle shares it and the two faces are within
+        ``INTERNAL_EDGE_COS`` of parallel, so that a body crossing it is still on
+        the same surface. Vertices are matched by position, so a mesh that repeats
+        a vertex per triangle has the same edges as one that shares them. A free
+        edge, an edge of three or more triangles, and a crease are not internal.
+        """
+        count = len(self.indices)
+        internal = np.zeros((count, 3), dtype=bool)
+        if not count:
+            return internal
+        _unique, welded = np.unique(self.world_pts, axis=0, return_inverse=True)
+        corners = welded.reshape(-1)[self.indices].astype(np.int64)
+        start, end = corners, np.roll(corners, -1, axis=1)
+        low, high = np.minimum(start, end), np.maximum(start, end)
+        keys = (low * (int(corners.max()) + 1) + high).reshape(-1)
+        order = np.argsort(keys, kind='stable')
+        ordered = keys[order]
+        same = ordered[1:] == ordered[:-1]
+        # A pair is two equal keys with no third beside them.
+        before = np.concatenate(([False], same[:-1]))
+        after = np.concatenate((same[1:], [False]))
+        pairs = np.flatnonzero(same & ~before & ~after)
+        first, second = order[pairs], order[pairs + 1]
+        tris = self.world_pts[self.indices]
+        faces = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+        lengths = np.linalg.norm(faces, axis=1)
+        faces = np.divide(faces, lengths[:, None], out=np.zeros_like(faces),
+                          where=lengths[:, None] > 0.0)
+        # Either winding: a triangle soup does not promise a consistent one.
+        flat = np.abs(np.einsum('ij,ij->i', faces[first // 3], faces[second // 3]))
+        flat = flat >= INTERNAL_EDGE_COS
+        flags = internal.reshape(-1)
+        flags[first[flat]] = True
+        flags[second[flat]] = True
+        return internal
 
     def center_hint(self) -> np.ndarray:
         """A representative interior point (the vertex centroid)."""

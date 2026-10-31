@@ -542,9 +542,9 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
     lo, hi = other.aabb()
     if other.kind == 'capsule':
         # Every candidate in one call. A character controller reaches this nine
-        # to twelve times a frame -- three depenetration iterations inside each
-        # of four call sites -- so a Python round trip per triangle is the
-        # frame at a handful of characters and hopeless at a hundred.
+        # to twelve times a frame (three depenetration iterations inside each
+        # of four call sites), so a Python round trip per triangle fills the
+        # frame at a handful of characters.
         verts = mesh.candidate_vertices(lo, hi)
         hit, points, normals, depths = capsule_triangle_batch(
             cast(CapsuleProxy, other), verts)
@@ -571,15 +571,28 @@ def _collide_mesh(a: int, b: int, PA: Proxy, PB: Proxy) -> list[Contact]:
         # The same argument as the capsule above, and the same shape of answer:
         # a box on a level's floor triangles is what most dynamic bodies are
         # doing most of the time, and GJK is at its slowest on exactly that.
-        verts = mesh.candidate_vertices(lo, hi)
-        hit, points, normals, depths = box_triangle_batch(
-            cast(BoxProxy, other), verts)
+        box = cast(BoxProxy, other)
+        candidates = mesh.candidate_triangles(lo, hi)
+        verts = mesh.world_pts[mesh.indices[candidates]]
+        hit, points, normals, depths = box_triangle_batch(box, verts)
         if not mesh_is_a:
             normals = -normals
         contacts: list[Contact] = []
+        internal = mesh.internal_edges[candidates]
         for i in np.flatnonzero(hit):
-            feet = box_face_contacts(cast(BoxProxy, other), verts[i], normals[i],
-                                     mesh_is_a)
+            toward_box = normals[i] if mesh_is_a else -normals[i]
+            up = face_across_internal_edge(box, verts[i], toward_box, internal[i])
+            if up is not None:
+                # The way out the separating axes found crosses into a coplanar
+                # neighbour, which holds the box on the same plane: the box
+                # stands on the face, held by the corners over this triangle,
+                # if any.
+                face_normal = up if mesh_is_a else -up
+                contacts.extend(Contact(a, b, point, face_normal, depth)
+                                for point, depth in box_face_contacts(
+                                    box, verts[i], face_normal, mesh_is_a))
+                continue
+            feet = box_face_contacts(box, verts[i], normals[i], mesh_is_a)
             if feet:
                 contacts.extend(Contact(a, b, point, normals[i], depth)
                                 for point, depth in feet)
@@ -927,6 +940,8 @@ def _segment_box_overlap(start: np.ndarray, end: np.ndarray, halves: np.ndarray,
 #: stand on it, as a fraction of the triangle's own size; a corner on the edge
 #: two triangles share is on both.
 _EDGE_SLACK = 1e-6
+#: A contact normal this close to a triangle's face normal (cosine) is that face's.
+_FACE_ALIGNED = 0.999
 
 
 def box_face_contacts(box: BoxProxy, triangle: np.ndarray, normal: np.ndarray,
@@ -951,7 +966,7 @@ def box_face_contacts(box: BoxProxy, triangle: np.ndarray, normal: np.ndarray,
         return []
     face = face / length
     toward_box = normal if mesh_is_first else -normal
-    if abs(float(np.dot(face, toward_box))) < 0.999:
+    if abs(float(np.dot(face, toward_box))) < _FACE_ALIGNED:
         return []
     up = face if float(np.dot(face, toward_box)) > 0.0 else -face
     local = np.array([(sx, sy, sz) for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)
@@ -977,6 +992,47 @@ def box_face_contacts(box: BoxProxy, triangle: np.ndarray, normal: np.ndarray,
         if v >= -slack and w >= -slack and v + w <= 1.0 + slack:
             found.append((onto, float(-height[k])))
     return found
+
+
+def face_across_internal_edge(box: BoxProxy, triangle: np.ndarray, toward_box: np.ndarray,
+                              internal: np.ndarray) -> np.ndarray | None:
+    """The triangle's unit face normal on the box's side, where the contact crosses a flat edge.
+
+    ``toward_box`` is the contact normal from the triangle toward the box, and
+    ``internal`` the triangle's three flags from
+    :attr:`~omi_physics.body.TriangleMeshProxy.internal_edges`. A normal with a
+    component in the triangle's plane pushes the box out across one of its
+    edges: the edge whose outward direction is closest to that component. Where
+    that edge is internal, the neighbour across it continues the plane, so the
+    push is an artefact of the surface being cut into triangles and the face
+    normal replaces it. Returns ``None`` where the normal is already the face
+    normal, the edge is a free edge or a crease, or the triangle has no area.
+    """
+    v0, v1, v2 = triangle
+    face = cross(v1 - v0, v2 - v0)
+    length = float(np.linalg.norm(face))
+    if length <= EPS:
+        return None
+    face = face / length
+    along = float(np.dot(face, toward_box))
+    if abs(along) >= _FACE_ALIGNED:
+        return None
+    sideways = toward_box - along * face
+    best, best_edge = -np.inf, 0
+    for edge in range(3):
+        start, end, opposite = triangle[edge], triangle[(edge + 1) % 3], triangle[(edge + 2) % 3]
+        outward = cross(end - start, face)
+        if float(np.dot(opposite - start, outward)) > 0.0:
+            outward = -outward
+        reach = float(np.linalg.norm(outward))
+        if reach <= EPS:
+            continue
+        score = float(np.dot(outward, sideways)) / reach
+        if score > best:
+            best, best_edge = score, edge
+    if not internal[best_edge]:
+        return None
+    return face if float(np.dot(box.center - v0, face)) >= 0.0 else -face
 
 
 def box_triangle_batch(box: BoxProxy, verts: np.ndarray
