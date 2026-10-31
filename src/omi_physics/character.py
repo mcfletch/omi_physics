@@ -47,6 +47,24 @@ UP = np.array([0.0, 1.0, 0.0])
 #: per comparison.
 _depth_of = operator.itemgetter(1)
 IDENT = np.array([0.0, 0.0, 0.0, 1.0])
+
+
+def _finite_vector(value: Vec, name: str) -> np.ndarray:
+    """``value`` as a float array, or ValueError naming ``name`` where a part is not finite."""
+    vector = np.asarray(value, dtype='d')
+    if not np.isfinite(vector).all():
+        raise ValueError(f'{name} must be finite, not {value!r}')
+    return vector
+
+
+def _not_negative(value: float, name: str) -> float:
+    """``value`` as a float, or ValueError naming ``name`` where it is negative or not finite."""
+    number = float(value)
+    if not (math.isfinite(number) and number >= 0.0):
+        raise ValueError(f'{name} must be finite and zero or more, not {value!r}')
+    return number
+
+
 IDENTITY = np.eye(3)
 FLAT = np.array([1.0, 0.0, 1.0])
 
@@ -503,18 +521,18 @@ class CharacterController:
         capabilities; None goes at the tier's. A crouch goes no faster than
         ``crouchSpeed`` either way.
         """
-        d = np.asarray(direction, dtype='d')
-        d = d * FLAT                                        # flatten to ground plane
+        given = None if speed is None else _not_negative(speed, 'speed')
+        d = _finite_vector(direction, 'direction') * FLAT   # flatten to ground plane
         n = np.linalg.norm(d)
         self.move_dir = d / n if n > 1e-9 else np.zeros(3)
         if n > 1e-9:
             self._heading = self.move_dir
         self.mode = mode
-        self.move_speed = None if speed is None else float(speed)
+        self.move_speed = given
 
     def set_fly_move(self, direction: Vec) -> None:
         """Set the desired fly move (full 3D unit direction, no ground flattening)."""
-        d = np.asarray(direction, dtype='d')
+        d = _finite_vector(direction, 'direction')
         n = np.linalg.norm(d)
         self.fly_dir = d / n if n > 1e-9 else np.zeros(3)
 
@@ -619,7 +637,7 @@ class CharacterController:
         bleeds it away.  Ungrounding is part of the launch: a grounded capsule is
         snapped back onto its surface each step, which would eat the impulse.
         """
-        v = np.asarray(velocity, dtype='d')
+        v = _finite_vector(velocity, 'velocity')
         self.push = v * FLAT
         self.vy = float(v[1])
         self.grounded = False
@@ -635,7 +653,10 @@ class CharacterController:
         carried like an :meth:`apply_impulse` and bled off by ground friction;
         an upward part leaves the ground.
         """
-        change = np.asarray(impulse, dtype='d') / self.caps.mass
+        mass = float(self.caps.mass)
+        if not (math.isfinite(mass) and mass > 0.0):
+            raise ValueError(f'a knockback needs caps.mass positive and finite, not {mass!r}')
+        change = _finite_vector(impulse, 'impulse') / mass
         self.push = self.push + change * FLAT
         self.vy += float(change[1])
         if self.vy > 0.0:
@@ -1096,7 +1117,11 @@ class CharacterController:
         The dynamic bodies near the capsule are read once, at the start, and
         stay where they were found for the whole update. A body the character
         stands on carries it by the velocity it was found with.
+
+        ``dt`` is in seconds, finite and zero or more; anything else raises
+        ValueError before the character moves.
         """
+        dt = _not_negative(dt, 'dt')
         self._gather_for(dt)
         self._keep_gathers()
         try:

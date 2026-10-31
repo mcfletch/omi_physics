@@ -144,3 +144,60 @@ class TestModeChanges:
 
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-v']))
+
+
+NOT_FINITE = [float('nan'), float('inf'), -float('inf')]
+
+
+class TestWhatIsRefused:
+    """A value no step can use is refused where it is given, and the character is untouched."""
+
+    @pytest.mark.parametrize('mass', [0.0, -80.0, *NOT_FINITE])
+    def test_a_knockback_needs_a_positive_finite_mass(self, mass):
+        character = standing_character(CharacterCapabilities(mass=mass))
+        with pytest.raises(ValueError, match='mass'):
+            character.knockback((10.0, 0.0, 0.0))
+        assert character.push == pytest.approx([0.0, 0.0, 0.0])
+
+    @pytest.mark.parametrize('bad', NOT_FINITE)
+    def test_a_knockback_needs_a_finite_impulse(self, bad):
+        character = standing_character()
+        with pytest.raises(ValueError, match='impulse'):
+            character.knockback((bad, 0.0, 0.0))
+        assert character.grounded
+
+    @pytest.mark.parametrize('bad', NOT_FINITE)
+    def test_a_launch_needs_a_finite_velocity(self, bad):
+        character = standing_character()
+        with pytest.raises(ValueError, match='velocity'):
+            character.apply_impulse((0.0, bad, 0.0))
+        assert character.grounded
+
+    @pytest.mark.parametrize('bad', NOT_FINITE)
+    def test_a_move_needs_a_finite_direction(self, bad):
+        character = standing_character()
+        with pytest.raises(ValueError, match='direction'):
+            character.set_move((bad, 0.0, 1.0))
+        with pytest.raises(ValueError, match='direction'):
+            character.set_fly_move((bad, 0.0, 1.0))
+
+    @pytest.mark.parametrize('speed', [-1.0, *NOT_FINITE])
+    def test_a_move_needs_a_finite_speed_of_zero_or_more(self, speed):
+        character = standing_character()
+        with pytest.raises(ValueError, match='speed'):
+            character.set_move((1.0, 0.0, 0.0), speed=speed)
+        assert character.move_speed is None
+
+    @pytest.mark.parametrize('dt', [-DT, *NOT_FINITE])
+    def test_an_update_needs_a_finite_time_of_zero_or_more(self, dt):
+        character = standing_character()
+        before = character.position.copy()
+        with pytest.raises(ValueError, match='dt'):
+            character.update(dt)
+        assert character.position == pytest.approx(before)
+
+    def test_an_update_of_no_time_moves_nothing(self):
+        character = standing_character()
+        before = character.position.copy()
+        character.update(0.0)
+        assert character.position == pytest.approx(before)
