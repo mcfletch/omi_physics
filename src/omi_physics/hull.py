@@ -2,9 +2,14 @@
 
 No scipy dependency: a compact incremental 3D hull builds the face set used for
 ``convex`` colliders, debug wireframes, and the concavity measure that drives
-``auto`` cooking.  The decomposition is a simple recursive split (not full
-V-HACD) — enough to turn a concave mesh into a compound of convex pieces that
-round-trips as OMI ``convex`` shapes.
+``auto`` cooking.  The decomposition is a recursive split (not V-HACD) that
+turns a concave mesh into a compound of convex pieces, which round-trips as OMI
+``convex`` shapes.
+
+OpenGLContext carries a copy of this module as ``OpenGLContext.physics.cooking``,
+so that it cooks shapes without omi_physics installed. The two give the same
+answers (``tests/test_hull_copies_agree.py``), and a fix to one belongs in the
+other.
 """
 
 import numpy as np
@@ -60,7 +65,7 @@ def _initial_tetra(pts: np.ndarray) -> list[tuple[int, int, int]] | None:
 
 def _incremental(pts: np.ndarray,
                  faces: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
-    """Add each point to the hull, replacing the faces it sees with new ones.
+    """Add each point to the hull, replacing the faces it lies in front of with new ones.
 
     The seed corners are already on the hull and are not added again: a face
     built nearly coplanar with a seed face can leave a corner within rounding
@@ -116,12 +121,11 @@ def hull_volume(vertices: np.ndarray, faces: np.ndarray) -> float:
     """Enclosed volume of a triangulated hull (0 for an empty face list)."""
     if len(faces) == 0:
         return 0.0
-    origin = vertices.mean(axis=0)
-    vol = 0.0
-    for f in faces:
-        a, b, c = vertices[f[0]] - origin, vertices[f[1]] - origin, vertices[f[2]] - origin
-        vol += abs(np.dot(a, cross(b, c))) / 6.0
-    return vol
+    centre = vertices.mean(axis=0)
+    a = vertices[faces[:, 0]] - centre
+    b = vertices[faces[:, 1]] - centre
+    c = vertices[faces[:, 2]] - centre
+    return float(np.abs(np.einsum('ij,ij->i', a, np.cross(b, c))).sum() / 6.0)
 
 
 def concavity(points: ArrayLike) -> float:
