@@ -173,10 +173,13 @@ class CylinderProxy:
         angle = (np.arange(sides) + 0.5) * (2.0 * np.pi / sides)
         radial = np.cos(angle)[:, None] * self.R[:, 0] + np.sin(angle)[:, None] * self.R[:, 2]
         length = 2.0 * self.half_height
-        # A side narrows by (bottom - top) over its length, which tilts its normal along the axis.
-        side = length * radial + (self.radius_bottom - self.radius_top) * self.axis
+        inscribed = np.cos(np.pi / sides)
+        # A facet runs from the middle of an edge of the polygon inscribed in one
+        # end to the same edge's middle at the other, so it narrows by
+        # (bottom - top) * inscribed over its length and tilts toward the axis by that.
+        side = length * radial + (self.radius_bottom - self.radius_top) * inscribed * self.axis
         side /= np.linalg.norm(side, axis=1, keepdims=True)
-        reach = self.radius_bottom * np.cos(np.pi / sides)
+        reach = self.radius_bottom * inscribed
         on_side = self.bottom + reach * radial
         normals = np.vstack((self.axis, -self.axis, side))
         offsets = np.concatenate((

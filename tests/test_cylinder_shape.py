@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from omi_physics import mathutil, model
-from omi_physics.body import make_proxy, world_aabb
+from omi_physics.body import CylinderProxy, make_proxy, world_aabb
 from omi_physics.collide import collide
 from omi_physics.raycast import raycast
 from omi_physics.world import PhysicsWorld, inertia_diagonal
@@ -87,3 +87,15 @@ def test_the_inertia_of_a_cone():
     diag = inertia_diagonal(_cone(height=2.0, radius=1.0), 1.0)
     # About its own centre of volume: 3/10 m r^2 along the axis.
     assert diag[1] == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize('bottom, top', [(1.0, 1.0), (1.0, 0.0), (0.0, 1.0), (1.0, 0.5)])
+def test_the_side_facets_pass_through_the_corners_of_both_ends(bottom, top):
+    sides = 24
+    shape = CylinderProxy([0.0, 0.0, 0.0], 1.0, bottom, top, np.identity(3))
+    normals, offsets = shape.planes(sides)
+    turn = np.arange(sides) * 2.0 * np.pi / sides
+    ring = np.column_stack((np.cos(turn), np.zeros(sides), np.sin(turn)))
+    corners = np.vstack((shape.bottom + bottom * ring, shape.top + top * ring))
+    outside = corners @ normals.T - offsets
+    assert outside.max() == pytest.approx(0.0, abs=1e-12)
