@@ -64,8 +64,10 @@ class Shape:
         """The faces of a ``convex`` shape's hull as ``(normals, offsets)`` in its local frame.
 
         A face is the set of ``x`` with ``normal . x = offset``, its normal
-        pointing out of the hull. Worked out on the first call and kept; empty for
-        points that do not span a volume.
+        pointing out of the hull. Worked out on the first call and kept. Points in
+        one plane make a flat hull, bounded by its two faces back to back and an
+        upright plane along each edge of its polygon; points on a line or at one
+        place bound nothing, and the answer is empty.
         """
         if self._planes is None:
             self._planes = _face_planes(self.points)
@@ -167,11 +169,11 @@ class Shape:
 
 def _face_planes(points: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
     """The distinct outward face planes of the hull of ``points``, as ``(normals, offsets)``."""
-    if points is None or len(points) < 4:
+    if points is None or len(points) < 3:
         return np.zeros((0, 3)), np.zeros(0)
     vertices, faces = convex_hull(points)
     if not len(faces):
-        return np.zeros((0, 3)), np.zeros(0)
+        return _flat_planes(vertices)
     a, b, c = (vertices[faces[:, k]] for k in range(3))
     normals = np.cross(b - a, c - a)
     length = np.linalg.norm(normals, axis=1)
@@ -181,6 +183,58 @@ def _face_planes(points: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
     _, unique = np.unique(np.round(np.column_stack((normals, offsets)), 9), axis=0,
                           return_index=True)
     return normals[unique], offsets[unique]
+
+
+def _flat_planes(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The planes bounding a convex polygon of coplanar ``points``, as ``(normals, offsets)``.
+
+    Its two faces, back to back on the polygon's plane, and one plane through
+    each edge of the polygon, upright to it and facing out. Empty for points
+    that lie on a line or at one place, which bound no area.
+    """
+    empty = np.zeros((0, 3)), np.zeros(0)
+    if len(points) < 3:
+        return empty
+    centre = points.mean(axis=0)
+    _, spread, axes = np.linalg.svd(points - centre)
+    if spread[1] <= 1e-9 * max(float(spread[0]), 1.0):
+        return empty
+    across, along, normal = axes
+    flat = np.column_stack(((points - centre) @ across, (points - centre) @ along))
+    corners = _polygon_hull(flat)
+    following = np.roll(corners, -1, axis=0)
+    # Counter-clockwise in (across, along), so each edge's outward side is its right.
+    edge = following - corners
+    outward2 = np.column_stack((edge[:, 1], -edge[:, 0]))
+    outward2 /= np.linalg.norm(outward2, axis=1)[:, None]
+    sides = outward2[:, :1] * across + outward2[:, 1:] * along
+    on_sides = np.einsum('ij,ij->i', outward2, corners) + sides @ centre
+    face = float(normal @ centre)
+    normals = np.vstack((normal, -normal, sides))
+    offsets = np.concatenate(([face, -face], on_sides))
+    return normals, offsets
+
+
+def _polygon_hull(points: np.ndarray) -> np.ndarray:
+    """The convex hull of 2D ``points``, counter-clockwise, as ``(K, 2)`` corners.
+
+    Andrew's monotone chain; collinear points along an edge are left out.
+    """
+    ordered = sorted(map(tuple, np.unique(points, axis=0).tolist()))
+
+    def turn(o: tuple, a: tuple, b: tuple) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    def chain(sequence: list) -> list:
+        kept: list = []
+        for point in sequence:
+            while len(kept) >= 2 and turn(kept[-2], kept[-1], point) <= 0.0:
+                kept.pop()
+            kept.append(point)
+        return kept
+
+    lower, upper = chain(ordered), chain(ordered[::-1])
+    return np.array(lower[:-1] + upper[:-1], dtype='d')
 
 
 @dataclass

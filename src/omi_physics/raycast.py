@@ -18,7 +18,8 @@ Shapes are tested exactly: a height field by marching along the ray and
 bisecting the step that crosses the surface, a sphere analytically, a box in its own frame, a
 capsule as a segment, a cylinder or cone as its slanted side and flat ends, a
 convex hull by clipping the ray against the planes of its faces
-(:meth:`~omi_physics.model.Shape.hull_planes`), a trimesh triangle by triangle
+(:meth:`~omi_physics.model.Shape.hull_planes`, which bound a flat hull by its
+polygon), a trimesh triangle by triangle
 through the proxy's own spatial grid, and a compound part by part. A shape this
 module cannot test is left out of the answer and named by
 :func:`unsupported_shapes`, which is a prop you cannot shoot rather than a hit
@@ -298,9 +299,10 @@ def line_of_sight(world: Any, start: Vec, end: Vec,
 def unsupported_shapes(world: Any) -> set[str]:
     """Shape types in ``world`` that a ray cannot be cast against.
 
-    Reported rather than skipped in silence: a body a ray passes through is
-    something a game needs to know about, and the answer is either a different
-    collider or a hull cast this module does not have.
+    A body a ray passes through is reported rather than skipped. A shape type
+    outside :data:`SUPPORTED` is named, and so is a ``convex`` whose points lie on
+    a line or at one place, which has no face to meet; a different collider is
+    the remedy for either.
     """
     found: set[str] = set()
     for body in range(world.body_count):
@@ -316,6 +318,8 @@ def _unsupported_in(shape: Any) -> set[str]:
     kind = str(shape.type)
     if kind == 'compound':
         return {found for part in shape.parts or () for found in _unsupported_in(part.shape)}
+    if kind == 'convex' and not len(shape.hull_planes()[0]):
+        return {kind}
     return set() if kind in SUPPORTED else {kind}
 
 

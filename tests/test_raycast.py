@@ -315,6 +315,9 @@ class TestWhatToIgnore:
 
 CUBE = [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
 
+#: A 4 by 4 square in the plane y = 0, a hull with no volume.
+FLAT_SQUARE = [(-2, 0, -2), (2, 0, -2), (-2, 0, 2), (2, 0, 2)]
+
 #: A square pyramid, its base on y = 0 and its apex at (0, 2, 0).
 PYRAMID = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1), (0, 2, 0)]
 
@@ -386,10 +389,35 @@ class TestAConvexHull:
         assert raycast.raycast(w, (10, 0, 0), (-1, 0, 0)).distance == pytest.approx(9.0)
         assert raycast.raycast(w, (0, 0, 10), (0, 0, -1)).distance == pytest.approx(7.0)
 
-    def test_points_that_enclose_no_volume_are_not_hit(self):
+    def test_a_ray_beside_the_plane_of_a_flat_hull_misses_it(self):
         w = world()
         hull(w, [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)], position=(5.0, 0.0, 0.0))
         assert raycast.raycast(w, (0, 0.5, 0.5), (1, 0, 0)) is None
+
+    @pytest.mark.parametrize('height', [5.0, -5.0])
+    def test_a_flat_hull_is_hit_from_either_side(self, height):
+        w = world()
+        body = hull(w, FLAT_SQUARE)
+        found = raycast.raycast(w, (1, height, 1), (0, -np.sign(height), 0),
+                                max_distance=10)
+        assert found.body == body
+        assert found.distance == pytest.approx(5.0)
+        assert found.normal == pytest.approx([0.0, np.sign(height), 0.0])
+
+    def test_a_ray_past_the_edge_of_a_flat_hull_misses_it(self):
+        w = world()
+        hull(w, FLAT_SQUARE)
+        assert raycast.raycast(w, (2.5, 5, 0), (0, -1, 0), max_distance=10) is None
+
+    def test_a_flat_hull_is_one_a_ray_can_meet(self):
+        w = world()
+        hull(w, FLAT_SQUARE)
+        assert raycast.unsupported_shapes(w) == set()
+
+    def test_a_hull_with_no_area_is_named_as_one_a_ray_cannot_meet(self):
+        w = world()
+        hull(w, [(0, 0, 0), (1, 0, 0), (2, 0, 0)])
+        assert raycast.unsupported_shapes(w) == {'convex'}
 
     def test_a_bundle_of_rays_meets_it_as_each_would_alone(self):
         w = world()
