@@ -1,5 +1,12 @@
 # omi_physics
 
+> **Deprecated.** OpenGLContext steps its physics with Jolt Physics through
+> `pyjoltphysics`. omi_physics is supported only for programs that still name
+> `PhysicsDefinition(engine='omi')`, installed with
+> `pip install OpenGLContext[omi]`; glisteel's race uses its `RaycastVehicle`
+> until Jolt vehicles land. Removal is planned with that phase (P6 of
+> OpenGLContext's `plans/NATIVE-PHYSICS.md`).
+
 A renderer-agnostic, real-time **rigid-body physics engine** for Python, built
 natively on the [OMI glTF physics](https://github.com/omigroup/gltf-extensions)
 data model. State lives in flat NumPy arrays, the whole step pipeline is

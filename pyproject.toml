@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "omi_physics"
 dynamic = ["version"]
-description = "Renderer-agnostic real-time rigid-body physics on the OMI glTF physics model"
+description = "Deprecated: renderer-agnostic real-time rigid-body physics on the OMI glTF physics model, kept for OpenGLContext programs that name the omi engine"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
