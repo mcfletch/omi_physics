@@ -775,10 +775,10 @@ def sphere_contacts(surface: HeightSurface, centres: np.ndarray, radius: float
                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Spheres of ``radius`` at ``centres`` ``(K, 3)`` against the ground.
 
-    The answer is that of :func:`sphere_contacts_by_sliding`. Where the surface knows how steep it
-    can be (:attr:`HeightSurface.lipschitz`) one lookup of its height under each sphere leaves out
-    the spheres too far above it to touch, which for a capsule standing on the ground is all but
-    the lowest; a few left are found one at a time.
+    The answer is that of :func:`sphere_contacts_by_sliding`. Where the surface has a bound on
+    its steepness (:attr:`HeightSurface.lipschitz`), one lookup of its height under each sphere
+    leaves out the spheres too far above it to touch, which for a capsule standing on the ground
+    is all but the lowest; a few left are found one at a time.
     """
     bound = surface.lipschitz
     one = getattr(surface, 'sphere_contact', None)

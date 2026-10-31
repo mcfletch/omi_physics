@@ -5,6 +5,27 @@ Notable changes to `omi_physics`. The format follows
 follows [semantic versioning](https://semver.org/); `0.x` makes no
 compatibility promise.
 
+## [Unreleased]
+
+### Changed
+
+- `CharacterController.update`, `set_move`, `set_fly_move`, `apply_impulse` and `knockback` raise
+  `ValueError` for a negative or non-finite `dt` or speed, a non-finite direction, velocity or
+  impulse, and a knockback while `CharacterCapabilities.mass` is not positive and finite.
+- A flat `convex` shape is bounded by its polygon (`Shape.hull_planes`), so rays meet it;
+  `raycast.unsupported_shapes` names a `convex` whose points lie on a line or at one place.
+- The README and the package description say that OpenGLContext uses pyjoltphysics and that
+  omi_physics is standalone and deprecated.
+
+### Fixed
+
+- A box resting across an edge between two coplanar triangles of a mesh takes the face normal
+  rather than a push along the slope (`TriangleMeshProxy.internal_edges`), and holds on a slope
+  its friction can hold.
+- The side facets of a cone or tapered cylinder (`CylinderProxy.planes`) pass through the
+  corners of both ends; a cone's apex was 7.65 mm outside them.
+- `hull.hull_volume` sums the same way as OpenGLContext's copy of the hull.
+
 ## [0.4.0] - unreleased
 
 ### Changed

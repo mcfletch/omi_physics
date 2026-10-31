@@ -1,11 +1,7 @@
 # omi_physics
 
 > **Deprecated.** OpenGLContext steps its physics with Jolt Physics through
-> `pyjoltphysics`. omi_physics is supported only for programs that still name
-> `PhysicsDefinition(engine='omi')`, installed with
-> `pip install OpenGLContext[omi-physics]`; glisteel's race uses its `RaycastVehicle`
-> until Jolt vehicles land. Removal is planned with that phase (P6 of
-> OpenGLContext's `plans/NATIVE-PHYSICS.md`).
+> `pyjoltphysics`; omi_physics is a standalone engine, and deprecated.
 
 A renderer-agnostic, real-time **rigid-body physics engine** for Python, built
 natively on the [OMI glTF physics](https://github.com/omigroup/gltf-extensions)
@@ -299,7 +295,7 @@ of each `update`:
 
 - A body of at most `pushMass` kilograms (default 200) that the capsule is
   within `PUSH_REACH` (0.05 m) of, in the way of its step, is named in
-  `pushing` as `(body, velocity)`. The velocity is the one the step wanted,
+  `pushing` as `(body, velocity)`. The velocity is that of the step the body blocks,
   limited to `pushSpeed` (default `walkSpeed`). The caller gives that velocity to
   a kinematic stand-in body placed at the character, wider than the capsule by
   at most `PUSH_REACH` so it overlaps what the capsule touches, and the solver

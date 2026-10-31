@@ -434,7 +434,7 @@ class ContactTracker:
 
     @property
     def tracking(self) -> bool:
-        """Whether any pair is touching as far as the tracker knows."""
+        """Whether any pair is touching in the tracker's record."""
         return bool(len(self._keys))
 
     def update(self, world: 'PhysicsWorld', batch: ContactBatch,

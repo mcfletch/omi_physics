@@ -245,7 +245,7 @@ class _InertIndex:
     An inert body is static, has a collider and no trigger, so it pairs with
     dynamic bodies only. The index lists them in the broad phase's own order
     (minimum x, then body index), the small ones apart from the large, and
-    remembers each one's rank in that order. A static body is added, removed
+    records each one's rank in that order. A static body is added, removed
     or moved only through the world's methods, which record it
     (:attr:`~omi_physics.world.PhysicsWorld.layout_epoch`), so the index is
     current for every inert body the record does not name.

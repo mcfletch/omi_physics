@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 _TYPE_INT = {model.STATIC: 0, model.KINEMATIC: 1, model.DYNAMIC: 2}
 _STATIC, _KINEMATIC, _DYNAMIC = 0, 1, 2
 
-#: How many single changes to the fixed bodies a world remembers
+#: How many single changes to the fixed bodies a world keeps a record of
 #: (:meth:`PhysicsWorld.layout_changes_since`).
 _LAYOUT_CHANGES_KEPT = 8192
 
